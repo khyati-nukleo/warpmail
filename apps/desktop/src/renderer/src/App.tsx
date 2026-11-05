@@ -127,7 +127,6 @@ import {
   readAheadKey,
   readAheadQuery,
 } from './read-ahead'
-import { useOpenTiming } from './perf' // Warpmail perf log (temporary)
 import { version as packagedVersion } from '../../../package.json'
 const Composer = lazy(() => import('./Composer').then((m) => ({ default: m.Composer })))
 const SettingsPanel = lazy(() => import('./Settings').then((m) => ({ default: m.SettingsPanel })))
@@ -432,13 +431,6 @@ export function App() {
   })
   // The list summary lacks bodies, and so does a read-ahead that left a large message to the open.
   const summaryOnly = thread.isPlaceholderData && !aheadHasBodies(ahead)
-  useOpenTiming(
-    // Warpmail perf log (temporary)
-    route.thread && route.threadAccount + ':' + route.thread,
-    !!thread.data && !summaryOnly,
-    thread.isFetching,
-    !!thread.error,
-  )
   useEffect(() => {
     localStorage.setItem('mail-density', density)
   }, [density])

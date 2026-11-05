@@ -51,7 +51,6 @@ import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
 import { submitSmtp, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
-import { callerLabel, imapPerf, timedPorts } from './perf' // Warpmail perf log (temporary)
 
 export interface ImapProviderOptions {
   connectionId: string
@@ -128,8 +127,6 @@ type Task = {
   resolve: (value: unknown) => void
   reject: (error: unknown) => void
   background: boolean
-  // Warpmail perf log (temporary)
-  perf: { label: string; queued: number; at: number; path?: string; blockedBy?: string }
 }
 const roleViews = ['inbox', 'archive', 'sent', 'drafts', 'junk', 'trash']
 const bodyLimit = 10_000_000
@@ -191,7 +188,6 @@ export class ImapProvider implements MailProvider {
   private idle?: ImapPort
   private queue: Task[] = []
   private pumping = false
-  private perfRunning?: string // Warpmail perf log (temporary)
   private listeners = new Set<(event: ProviderEvent) => void>()
   private disposed = false
   private started = false
@@ -214,10 +210,7 @@ export class ImapProvider implements MailProvider {
   constructor(private options: ImapProviderOptions) {
     this.accountId = accountKey(options.connectionId, 'imap')
     this.timing = { ...defaultTiming, ...options.timing }
-    // Warpmail perf log (temporary): every port call, connect and close is timed.
-    this.ports = timedPorts(
-      options.ports || ((settings, purpose) => new ImapFlowPort(settings, purpose)),
-    )
+    this.ports = options.ports || ((settings, purpose) => new ImapFlowPort(settings, purpose))
     this.folders = options.folders || {}
   }
   private get index() {
@@ -250,31 +243,17 @@ export class ImapProvider implements MailProvider {
   // Connection and command queue
 
   /** Runs one task at a time on the command connection. User work goes before background work. */
-  private run<T>(
-    task: (port: ImapPort) => Promise<T>,
-    background = false,
-    perf?: { label?: string; path?: string }, // Warpmail perf log (temporary)
-  ): Promise<T> {
-    const label = perf?.label || callerLabel() // Warpmail perf log (temporary)
+  private run<T>(task: (port: ImapPort) => Promise<T>, background = false): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const entry: Task = {
         run: task,
         resolve: resolve as (v: unknown) => void,
         reject,
         background,
-        // Warpmail perf log (temporary)
-        perf: {
-          label,
-          path: perf?.path,
-          queued: 0,
-          at: performance.now(),
-          blockedBy: this.perfRunning,
-        },
       }
       const firstBackground = this.queue.findIndex((t) => t.background)
       if (background || firstBackground < 0) this.queue.push(entry)
       else this.queue.splice(firstBackground, 0, entry)
-      entry.perf.queued = this.queue.indexOf(entry) + (this.pumping ? 1 : 0) // Warpmail perf log (temporary)
       void this.pump()
     })
   }
@@ -284,35 +263,10 @@ export class ImapProvider implements MailProvider {
     try {
       while (this.queue.length) {
         const task = this.queue.shift()!
-        // Warpmail perf log (temporary): queue wait, connection wait and run time per task.
-        const started = performance.now()
-        this.perfRunning = task.perf.label
-        let connected = started
-        let ok = false
         try {
-          const port = await this.commandPort()
-          connected = performance.now()
-          task.resolve(await task.run(port))
-          ok = true
+          task.resolve(await task.run(await this.commandPort()))
         } catch (error) {
           task.reject(error)
-        } finally {
-          this.perfRunning = undefined
-          const end = performance.now()
-          const r = (n: number) => Math.round(n * 10) / 10
-          imapPerf('imap:task', {
-            account: this.accountId,
-            label: task.perf.label,
-            ...(task.perf.path ? { path: task.perf.path } : {}),
-            background: task.background,
-            queuedAhead: task.perf.queued,
-            ...(task.perf.blockedBy ? { blockedBy: task.perf.blockedBy } : {}),
-            waitMs: r(started - task.perf.at),
-            connectWaitMs: r(connected - started),
-            runMs: r(end - connected),
-            ok,
-            left: this.queue.length,
-          })
         }
       }
     } finally {
@@ -601,18 +555,12 @@ export class ImapProvider implements MailProvider {
     return boxes.filter((b) => !b.noSelect).sort((a, b) => rank(a) - rank(b))
   }
   private async syncPass(scope: 'inbox' | 'all') {
-    const boxes = await this.run(async (port) => this.refreshFolders(port), true, {
-      label: 'syncPass:refreshFolders', // Warpmail perf log (temporary)
-    })
+    const boxes = await this.run(async (port) => this.refreshFolders(port), true)
     let changed = false
     for (const box of this.ordered(boxes)) {
       if (this.disposed) return
       if (scope === 'inbox' && !isInbox(box.path)) continue
-      changed =
-        (await this.run((port) => this.syncMailbox(port, box), true, {
-          label: 'syncMailbox', // Warpmail perf log (temporary)
-          path: box.path,
-        })) || changed
+      changed = (await this.run((port) => this.syncMailbox(port, box), true)) || changed
     }
     this.lastSync = Date.now()
     if (changed) this.emit({ type: 'changed', accountId: this.accountId })
@@ -874,20 +822,16 @@ export class ImapProvider implements MailProvider {
         }
         let fetched = new Map<number, Uint8Array>()
         try {
-          fetched = await this.run(
-            async (port) => {
-              const selected = await port.select(box.path)
-              const valid = batch.filter((row) => row.uidValidity === selected.uidValidity)
-              return valid.length
-                ? port.sources(
-                    valid.map((row) => row.uid),
-                    this.timing.prefetchMaxSize,
-                  )
-                : new Map<number, Uint8Array>()
-            },
-            true,
-            { label: 'prefetchBodies', path: box.path }, // Warpmail perf log (temporary)
-          )
+          fetched = await this.run(async (port) => {
+            const selected = await port.select(box.path)
+            const valid = batch.filter((row) => row.uidValidity === selected.uidValidity)
+            return valid.length
+              ? port.sources(
+                  valid.map((row) => row.uid),
+                  this.timing.prefetchMaxSize,
+                )
+              : new Map<number, Uint8Array>()
+          }, true)
         } catch (error) {
           if (isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline'))
             throw error

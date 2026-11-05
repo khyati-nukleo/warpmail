@@ -2,7 +2,6 @@ import { chmod, mkdir, readFile, open, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { safeStorage } from 'electron'
-import { perf } from './perf-log' // Warpmail perf log (temporary)
 
 export class JsonStore {
   private queue = Promise.resolve()
@@ -72,9 +71,7 @@ export class JsonStore {
   }
   write(name: string, data: unknown, version = 1): Promise<void> {
     const serialized = JSON.stringify({ version, data })
-    const queuedAt = performance.now() // Warpmail perf log (temporary)
     const operation = this.queue.then(async () => {
-      const startedAt = performance.now() // Warpmail perf log (temporary)
       const target = this.path(name),
         temporary = target + '.' + randomUUID() + '.tmp'
       try {
@@ -85,7 +82,6 @@ export class JsonStore {
         } finally {
           await file.close()
         }
-        const syncedAt = performance.now() // Warpmail perf log (temporary)
         await rename(temporary, target)
         // Windows cannot fsync directory handles; the file itself is already synced above.
         if (process.platform !== 'win32') {
@@ -96,14 +92,6 @@ export class JsonStore {
             await dir.close()
           }
         }
-        // Warpmail perf log (temporary): JSON store writes fsync, which can be slow on Windows.
-        perf('store:write', {
-          name,
-          bytes: serialized.length,
-          waitMs: Math.round(startedAt - queuedAt),
-          writeSyncMs: Math.round(syncedAt - startedAt),
-          renameMs: Math.round(performance.now() - syncedAt),
-        })
       } catch (error) {
         await rm(temporary, { force: true })
         throw error

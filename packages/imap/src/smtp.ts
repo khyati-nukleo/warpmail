@@ -4,7 +4,6 @@ import { Readable } from 'node:stream'
 import { TLSSocket } from 'node:tls'
 import { ProviderError, type ServerSettings, type SubmissionOutcome } from '@inlark/core'
 import { certificateError, certificateOptions } from './certificate'
-import { imapPerf } from './perf' // Warpmail perf log (temporary)
 
 export interface SmtpSettings extends ServerSettings {
   password: string
@@ -149,16 +148,11 @@ async function session<T>(
   conn.on('error', (error: SmtpFailure) => drop(connectionLost(settings, state, conn, error)))
   conn.on('end', () => drop(connectionLost(settings, state, conn)))
   let done = false
-  // Warpmail perf log (temporary): connect (TCP+TLS+EHLO), login and work (send) phases.
-  const t0 = performance.now()
-  const marks: Record<string, number> = {}
-  const mark = (name: string) => (marks[name] = Math.round((performance.now() - t0) * 10) / 10)
   try {
     await Promise.race([
       new Promise<void>((resolve, reject) => conn.connect((e) => (e ? reject(e) : resolve()))),
       dropped,
     ])
-    mark('connectMs') // Warpmail perf log (temporary)
     // Defense in depth: nodemailer's requireTLS already refuses to continue unencrypted.
     if (!conn.secure)
       throw new ProviderError(
@@ -166,7 +160,6 @@ async function session<T>(
         `The connection to ${settings.host} isn't encrypted, so no password was sent. Check the security setting.`,
       )
     await Promise.race([login(conn, settings), dropped])
-    mark('loginDoneMs') // Warpmail perf log (temporary)
     const result = await Promise.race([work(conn, state), dropped])
     done = true
     return result
@@ -175,13 +168,6 @@ async function session<T>(
       ? error
       : connectionLost(settings, state, conn, error as SmtpFailure)
   } finally {
-    // Warpmail perf log (temporary)
-    imapPerf('smtp:session', {
-      ...marks,
-      totalMs: Math.round((performance.now() - t0) * 10) / 10,
-      ok: done,
-      phase: state.phase,
-    })
     if (done) {
       conn.quit()
       setTimeout(() => conn.close(), 5000).unref()

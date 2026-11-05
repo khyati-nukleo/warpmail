@@ -20,7 +20,6 @@ import type {
   SearchCriteria,
   SelectedMailbox,
 } from './port'
-import { imapPerf } from './perf' // Warpmail perf log (temporary)
 
 const tlsCodes = new Set(['ERR_SSL_WRONG_VERSION_NUMBER', 'EPROTO'])
 
@@ -150,10 +149,7 @@ export class ImapFlowPort implements ImapPort {
   ) {
     this.client = new ImapFlow(imapFlowOptions(options, purpose))
     // Errors also surface as rejected commands and a `close` event; never crash the process.
-    // Warpmail perf log (temporary): record the error code, which explains a following close.
-    this.client.on('error', (error: { code?: unknown }) =>
-      imapPerf('imap:error', { purpose, code: String(error?.code ?? 'unknown') }),
-    )
+    this.client.on('error', () => {})
   }
   get capabilities(): ReadonlySet<string> {
     return new Set([...this.client.capabilities.keys()].map((c) => c.toUpperCase()))

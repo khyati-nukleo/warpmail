@@ -12,14 +12,7 @@ port.on('message', (request: { id: number; method: string; args: unknown[] }) =>
     const method = index[request.method as keyof SqliteMetadataIndex] as (
       ...args: unknown[]
     ) => unknown
-    const start = performance.now() // Warpmail perf log (temporary)
-    const result = method.apply(index, request.args)
-    // Warpmail perf log (temporary): `ms` is the SQLite work itself, without queueing.
-    port.postMessage({
-      id: request.id,
-      result,
-      ms: Math.round((performance.now() - start) * 10) / 10,
-    })
+    port.postMessage({ id: request.id, result: method.apply(index, request.args) })
   } catch (error) {
     port.postMessage({
       id: request.id,

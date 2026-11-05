@@ -1,6 +1,5 @@
 import { EncryptionService, type CryptoTransport } from './encryption'
 import { securityKind, maxMessageBytes } from '@inlark/crypto'
-import { perfSpan } from './perf-log' // Warpmail perf log (temporary)
 import { randomUUID, X509Certificate, createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile, copyFile, rm, stat, chmod, open } from 'node:fs/promises'
 import { join, basename, extname } from 'node:path'
@@ -892,15 +891,13 @@ export class MailService {
   }
   conversation = (id: string, threadId: string, options?: { prefetch?: boolean }) =>
     this.guard(id, async (p, a) => {
-      const span = perfSpan('conversation:open', { account: id }) // Warpmail perf log (temporary)
       // Reading ahead waits behind the user's own work on the provider's connection.
       const background = { background: !!options?.prefetch }
       const messages = await p.conversation(a, threadId, background)
-      span.mark('providerConversation') // Warpmail perf log (temporary)
       const rawMessage = p.rawMessage
       // Largest original read ahead: one short background task on a slow link.
       const readAheadSourceBytes = 768 * 1024
-      const result = await Promise.all(
+      return Promise.all(
         messages.map(async (message) => {
           // A large original is downloaded by the open, not by a background task the user's
           // open would queue behind. Until then it is neither decrypted nor verified, so it
@@ -922,9 +919,6 @@ export class MailService {
           }
         }),
       )
-      span.mark('rawMessageAndDecrypt') // Warpmail perf log (temporary)
-      span.end({ messages: messages.length }) // Warpmail perf log (temporary)
-      return result
     })
   query = async (query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage> => {
     const accounts = this.accounts.filter(
@@ -1321,9 +1315,7 @@ export class MailService {
     }
   }
   private async syncDraftNow(input: Draft): Promise<Draft> {
-    const span = perfSpan('syncDraft', { account: input.accountId }) // Warpmail perf log (temporary)
     input = await this.saveDraft(input)
-    span.mark('saveDraft') // Warpmail perf log (temporary)
     this.busyDrafts.add(input.id)
     let committed: Draft | undefined
     try {
@@ -1354,16 +1346,12 @@ export class MailService {
             'This draft changed in another client. Your local copy is safe; save it as a new draft to keep both versions.',
           )
       }
-      span.mark('serverDraftCheck') // Warpmail perf log (temporary)
       const protectedMime =
         input.encryption === 'encrypt'
           ? await this.protectedMime(input, randomUUID() + '@inlark.local', true)
           : undefined
-      span.mark('protectedMime') // Warpmail perf log (temporary)
       const draft = protectedMime ? input : await this.uploadDraft(input)
-      span.mark('uploadDraft') // Warpmail perf log (temporary)
       const serverId = await provider.createDraft(account, draft, undefined, protectedMime)
-      span.mark('createDraft') // Warpmail perf log (temporary)
       const [remote] = await this.serverMessages(
         provider,
         account,
@@ -1381,15 +1369,11 @@ export class MailService {
         error: note?.error,
         errorKind: note?.errorKind,
       }
-      span.mark('readBackDraft') // Warpmail perf log (temporary)
       committed = saved
       this.commitSync(saved)
       await this.persistDrafts()
-      span.mark('persistDrafts') // Warpmail perf log (temporary)
       if (input.serverId && input.serverId !== serverId)
         await this.removePreviousDraft(provider, account, input)
-      span.mark('removePreviousDraft') // Warpmail perf log (temporary)
-      span.end({ ok: true, replaced: !!input.serverId }) // Warpmail perf log (temporary)
       this.emit({ type: 'changed', accountId: account.id })
       return saved
     } catch (error) {
@@ -1399,7 +1383,6 @@ export class MailService {
         error: friendlyError(error),
         errorKind: errorKind(error),
       }
-      span.end({ ok: false }) // Warpmail perf log (temporary)
       this.commitSync(saved)
       await this.persistDrafts()
       return saved
@@ -1696,9 +1679,7 @@ export class MailService {
       throw new Error('This draft is still saving. Try again in a moment.')
     const existing = this.journals.get(draft.id)
     if (existing && existing.state !== 'rejected') return this.reconcile(draft.id)
-    const span = perfSpan('send', { account: draft.accountId }) // Warpmail perf log (temporary)
     draft = sendDraftSchema.parse(await this.saveDraft(draft))
-    span.mark('saveDraft') // Warpmail perf log (temporary)
     const { provider, account } = this.provider(draft.accountId)
     this.busyDrafts.add(draft.id)
     const journal: Journal = {
@@ -1721,7 +1702,6 @@ export class MailService {
     let uploaded = draft
     try {
       await this.persistJournal()
-      span.mark('persistJournal') // Warpmail perf log (temporary)
       if (draft.serverId) {
         const [remote] = await this.serverMessages(
           provider,
@@ -1741,22 +1721,18 @@ export class MailService {
             'This draft changed in another client. Save a separate copy before sending.',
           )
       }
-      span.mark('serverDraftCheck') // Warpmail perf log (temporary)
       const protectedMime =
         (draft.encryption && draft.encryption !== 'none') ||
         this.encryption.identity(draft.accountId, draft.identityId)?.enabled
           ? await this.protectedMime(draft, journal.messageId!)
           : undefined
-      span.mark('protectedMime') // Warpmail perf log (temporary)
       uploaded = protectedMime ? draft : await this.uploadDraft(draft)
-      span.mark('uploadDraft') // Warpmail perf log (temporary)
       const outgoing = await provider.prepareSubmission(
         account,
         uploaded,
         journal.messageId!,
         protectedMime,
       )
-      span.mark('prepareSubmission') // Warpmail perf log (temporary)
       journal.emailId = outgoing.emailId
       journal.envelope = outgoing.envelope
       if (outgoing.mime) {
@@ -1776,12 +1752,10 @@ export class MailService {
       await this.persistJournal()
       this.localDrafts.set(draft.id, { ...uploaded, status: 'sending' })
       await this.persistDrafts()
-      span.mark('persistBeforeSubmit') // Warpmail perf log (temporary)
       attempted = true
       const outcome = await this.guard(account.id, (p, a) =>
         p.submit(a, outgoing, draft.identityId),
       )
-      span.mark('submit') // Warpmail perf log (temporary)
       accepted = true
       this.outgoing(account.connectionId, undefined)
       journal.accepted = outcome.accepted
@@ -1789,16 +1763,12 @@ export class MailService {
       journal.state = outcome.rejected.length ? 'partial' : 'sent'
       // Acceptance is recorded before filing or cleanup, which may fail independently.
       await this.persistJournal()
-      span.mark('persistAccepted') // Warpmail perf log (temporary)
       // A partial send keeps its content so the refused recipients can be recovered.
       if (journal.state === 'sent') await this.completeDraft(uploaded)
       else this.localDrafts.set(draft.id, { ...uploaded, status: 'sent' })
       await this.persistDrafts()
-      span.mark('completeDraft') // Warpmail perf log (temporary)
       this.finishing.set(draft.id, this.finishSend(journal, uploaded, outgoing))
       finishing = true
-      span.mark('returned') // Warpmail perf log (temporary)
-      span.end({ ok: true, sentCopy: journal.sentCopy, hadServerDraft: !!draft.serverId }) // Warpmail perf log (temporary)
       return this.sendResult(journal, uploaded, !!journal.sentCopy)
     } catch (error) {
       if (accepted) {
@@ -1836,7 +1806,6 @@ export class MailService {
         }
       throw error
     } finally {
-      span.end({ ok: false }) // Warpmail perf log (temporary)
       if (!finishing) this.busyDrafts.delete(draft.id)
     }
   }
@@ -1846,19 +1815,14 @@ export class MailService {
    * and a quit is resumed on the next start. The message itself is never sent again.
    */
   private async finishSend(journal: Journal, draft: Draft, outgoing: OutgoingMessage) {
-    const span = perfSpan('send:finish', { account: draft.accountId }) // Warpmail perf log (temporary)
     try {
       // The old draft goes first: until then it could be opened and sent a second time.
       await this.removeReplacedDraft(journal)
-      span.mark('removePreviousDraft') // Warpmail perf log (temporary)
       if (journal.sentCopy) await this.fileSentCopy(journal, outgoing)
-      span.mark('fileSentCopy') // Warpmail perf log (temporary)
-      span.end({ ok: true, sentCopy: journal.sentCopy }) // Warpmail perf log (temporary)
     } catch {
       // Filing and cleanup record their own failures; the next refresh retries them.
       this.log('sent-finish-failed')
     } finally {
-      span.end({ ok: false }) // Warpmail perf log (temporary)
       this.finishing.delete(draft.id)
       this.busyDrafts.delete(draft.id)
       this.emit({ type: 'submissions', submissions: this.summaries() })

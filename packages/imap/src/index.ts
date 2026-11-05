@@ -7,4 +7,3 @@ export * from './mime'
 export * from './smtp'
 export * from './provider'
 export * from './certificate'
-export * from './perf' // Warpmail perf log (temporary)
