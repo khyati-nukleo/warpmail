@@ -47,26 +47,26 @@ Protocols today: JMAP, IMAP and SMTP with passwords only. **No Google or Microso
 
 ## Roadmap and status
 
-| #   | Feature                                            | Status                                 |
-| --- | -------------------------------------------------- | -------------------------------------- |
-| 0   | Speed and reliability on Gmail over IMAP           | Done (see "Speed work" below)          |
-| 1   | Connect Google accounts (app password)             | Done: connected and working            |
-| 1b  | Optional Google sign-in (Gmail API mode)           | Documented below, not started          |
-| 2   | Split inbox per project                            | Designed, waiting for Khyati's review  |
-| 3   | Follow-up nudges + "you forgot to reply" reminders | Direction agreed, needs design pass    |
-| 4   | Draft improvement (AI)                             | Button agreed, AI service chosen later |
-| 5   | Read status, per recipient                         | Direction agreed, Cloudflare Worker    |
-| 6   | Undo send                                          | Not started                            |
-| 7   | Snippets (reusable text)                           | Not started                            |
-| 8   | Snooze                                             | Not started                            |
-| 9   | Scheduled send                                     | Not started                            |
-| 10  | Gmail labels                                       | Not started                            |
-| 11  | AI summaries                                       | Not started                            |
-| 12  | Calendar                                           | Not started                            |
-| 13  | Contact side panel                                 | Not started                            |
-| 14  | Team thread sharing and comments                   | Not started                            |
-| 15  | Outlook / Microsoft sign-in                        | Not started                            |
-| 16  | Mobile app                                         | Not started                            |
+| #   | Feature                                            | Status                                |
+| --- | -------------------------------------------------- | ------------------------------------- |
+| 0   | Speed and reliability on Gmail over IMAP           | Done (see "Speed work" below)         |
+| 1   | Connect Google accounts (app password)             | Done: connected and working           |
+| 1b  | Optional Google sign-in (Gmail API mode)           | Documented below, not started         |
+| 2   | Split inbox per project                            | Designed; build session ready         |
+| 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; build after split inbox     |
+| 4   | Draft improvement (AI)                             | Designed; build when API key is ready |
+| 5   | Read status, per recipient                         | Direction agreed, Cloudflare Worker   |
+| 6   | Undo send                                          | Not started                           |
+| 7   | Snippets (reusable text)                           | Not started                           |
+| 8   | Snooze                                             | Not started                           |
+| 9   | Scheduled send                                     | Not started                           |
+| 10  | Gmail labels                                       | Not started                           |
+| 11  | AI summaries                                       | Not started                           |
+| 12  | Calendar                                           | Not started                           |
+| 13  | Contact side panel                                 | Not started                           |
+| 14  | Team thread sharing and comments                   | Not started                           |
+| 15  | Outlook / Microsoft sign-in                        | Not started                           |
+| 16  | Mobile app                                         | Not started                           |
 
 Items 1–5 are Khyati's order. Items 6–16 are my proposed order (cheapest and most self-contained first, biggest last); Khyati can reorder. The original "11 missing features" list grouped some of these together; they are split here so each can be tracked.
 
@@ -138,7 +138,7 @@ The "expected" column comes from how the Gmail API works, not from measurements.
 
 ## Speed work (item 0)
 
-Done and tested by Khyati on 2026-11-05 (commit 63782ff on `fix/gmail-speed`). Measured with a temporary timing log, removed afterwards.
+Done and tested by Khyati on 2026-11-05 (branch `fix/gmail-speed`, PR #1). Measured with a temporary timing log, removed afterwards.
 
 |                            | Before                               | After                                                         |
 | -------------------------- | ------------------------------------ | ------------------------------------------------------------- |
@@ -184,8 +184,18 @@ Follow-up: the app's background process still freezes for 1–5 s now and then (
 - **Forgot to reply:** when Khyati received a message and hasn't answered, Warpmail reminds Khyati.
 - Khyati can pause or snooze any reminder.
 - Both run inside the app, no server needed.
+- **Which mail counts (2026-11-05):** mail from people, the same rule as Important (automated senders left out, Khyati's Important exceptions apply). "Forgot to reply" only when Khyati is on the To line, not only Cc.
+- **When (2026-11-05):** follow-up after **3 working days** without a reply to Khyati's email; forgot-to-reply after **1 working day**. Weekends don't count. Both numbers are editable in Settings. One setting for all mail, not per project.
+- **How a reminder shows (2026-11-05):** the conversation comes back to the top of the inbox with a small label ("No reply in 3 days", "Waiting on you"), in inlark's look. An archived follow-up returns to the inbox (this re-adds it to Gmail's Inbox, unlike tabs, which never move mail). No separate Reminders tab; desktop notifications not chosen.
+- **Every reminder can be dismissed** from the conversation (stops reminders for it), besides being snoozed to come back later.
+- **Archiving counts as handled for "forgot to reply" (2026-11-05):** only conversations still in the inbox get "Waiting on you". Follow-ups still come back after archiving.
+- **Which sent emails get a follow-up (2026-11-05):** only emails that **ask for something**: a question mark, or request phrases in English or French ("let me know", "can you", "could you", "please confirm", "any update", "pouvez-vous", "merci de confirmer", "tenez-moi au courant", …), checked in Khyati's own text, not the quoted reply. Khyati often sends the last email in a thread, so reminding on everything would be noise. The composer shows "Follow-up: on/off" with the reason, and one click or shortcut flips it before sending. Once feature 4's AI provider exists, AI can replace this check (an upgrade, not a requirement).
+  - A plain closing "Thanks," / "Merci," is ignored (Khyati ends every email with it), as are the signature and quoted text. "Thanks in advance" / "merci d'avance" count as requests.
+- **What cancels a follow-up (2026-11-05):** a reply from anyone on the thread except Khyati, from any device (Gmail is the source of truth). Automatic replies (out-of-office, `Auto-Submitted`) don't count.
+- **Two laptops (2026-11-05):** reminders are worked out from the mail itself, so both laptops show the same ones. Khyati's choices (dismissing a reminder, switching follow-up off for an email) are saved as a Gmail label ("Warpmail/No reminder") so both laptops see them; the label is visible in Gmail on the web. Snoozes stay on the laptop where they're set.
+- **On/off switch in Settings (2026-11-05):** the reminders feature can be turned off entirely.
 
-**Open:** how many days by default, and is it per project? Which mail counts (only people in projects, or everyone except newsletters)? Where do reminders show up (notification, a "Needs follow-up" tab, a badge on the conversation)?
+**Full design:** [2026-11-05-reminders-design.md](2026-11-05-reminders-design.md). Builds on split inbox (reuses its automated-sender check), so it is built after split inbox is merged.
 
 ### 4. Draft improvement (AI)
 
@@ -205,7 +215,11 @@ Follow-up: the app's background process still freezes for 1–5 s now and then (
 
 **My call:** build the button against a swappable AI provider, so the service can be chosen or changed without touching the button. Options to weigh when choosing: a paid API (Claude or Gemini paid tier: content isn't used for training, but it still leaves the computer), or a model running on Khyati's own computer (fully private, weaker writing). Add the Warpmail MCP server later as a second way in through Khyati's Claude subscription.
 
-**Open for the design pass:** what "improve" means to Khyati (grammar, tone, shorter, more formal), whether drafts are in English, French or both, and how Khyati reviews the suggestion before accepting it.
+**What "improve" means (2026-11-05):** one Improve button polishes the draft (grammar, wording, clarity) while keeping Khyati's tone and length. A small menu next to it offers one-click styles: shorter, more formal, friendlier. Drafts are written in **English**.
+
+**Review (2026-11-05):** the improved text appears as a preview with the changes highlighted. Enter accepts, Escape keeps the original, and another style can be tried from the preview. Nothing changes until Khyati accepts.
+
+**AI service (2026-11-05):** Anthropic's Claude API with Khyati's own key; only Khyati's draft text is sent (not the quoted email, signature or recipients). **Full design:** [2026-11-05-improve-draft-design.md](2026-11-05-improve-draft-design.md). Build once Khyati has the key.
 
 ### 5. Read status, per recipient
 
