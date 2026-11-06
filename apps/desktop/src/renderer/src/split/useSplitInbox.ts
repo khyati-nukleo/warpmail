@@ -10,6 +10,7 @@ import {
   UserRound,
 } from '@inlark/ui/icons'
 import {
+  friendlyError,
   ownAddresses,
   type Account,
   type Bootstrap,
@@ -33,6 +34,7 @@ import {
   addRule,
   adjacentTab,
   moveTab,
+  needsWholeConversation,
   putTab,
   senderOf,
   serialQueue,
@@ -78,6 +80,8 @@ export function useSplitInbox({
           id: string
           count?: number
           messages?: Pick<Message, 'from' | 'receivedAt'>[]
+          /** The messages are a placeholder while the conversation loads. */
+          partial?: boolean
         }
       | undefined
   }
@@ -192,7 +196,8 @@ export function useSplitInbox({
     if (!(await saveTabs(putTab(tabs, tab)))) return
     closeDialog()
     if (sender) {
-      if (tab.rules.includes(sender)) notify('Added ' + sender + ' to ' + tab.name)
+      if (tab.rules.some((r) => r.toLowerCase() === sender.toLowerCase()))
+        notify('Added ' + sender + ' to ' + tab.name)
     } else if (added) select(tab.id)
   }
   const deleteTab = async (tab: SplitTab) => {
@@ -203,18 +208,27 @@ export function useSplitInbox({
   }
 
   const [picker, setPicker] = useState<AddToTabState>()
+  // The latest render's conversation, for a picker that had to wait for one.
+  const target = useRef(addToTab)
+  target.current = addToTab
   /** Opens the add-to-tab picker for the newest sender who isn't the user. */
   const openPicker = async (fromCommand = false) => {
     const conversation = addToTab.conversation()
     if (!conversation) return
-    const { accountId, id, count = 0, messages } = conversation
-    let sender = senderOf(messages ?? [], own)
-    // The list holds only the latest message, which may be the user's own reply.
-    if (!sender && (!messages || count > messages.length))
-      sender = senderOf(
-        await api.conversation(accountId, id, { prefetch: true }).catch(() => []),
-        own,
-      )
+    const { accountId, id } = conversation
+    let sender = senderOf(conversation.messages ?? [], own)
+    // What is on hand may be only the latest message, which can be the user's own reply.
+    if (needsWholeConversation(conversation, !!sender)) {
+      try {
+        sender = senderOf(await api.conversation(accountId, id, { prefetch: true }), own)
+      } catch (error) {
+        return notify(friendlyError(error), 'error')
+      }
+      // Moved on while it loaded: another conversation, or another dialog or Ctrl+K is open.
+      const now = target.current.conversation()
+      if (now?.accountId !== accountId || now.id !== id) return
+      if (document.querySelector('[role="dialog"][data-open]')) return
+    }
     if (!sender) return notify('Every message in this conversation is from you.', 'info')
     setPicker({ sender, fromCommand, open: true, seq: ++dialogs.current })
   }

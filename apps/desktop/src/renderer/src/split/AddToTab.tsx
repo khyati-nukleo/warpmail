@@ -47,6 +47,7 @@ export function AddToTab({
   const [busy, setBusy] = useState(false)
   const listId = useId()
   const list = useRef<HTMLDivElement>(null)
+  const field = useRef<HTMLInputElement>(null)
   const rule = (wholeDomain && rules.domain) || rules.address || ''
   const { options, highlight } = pickerOptions(tabs, text)
   const highlighted = Math.max(0, Math.min(active ?? highlight, options.length - 1))
@@ -95,6 +96,7 @@ export function AddToTab({
           >
             <Search size={14} />
             <input
+              ref={field}
               autoFocus
               value={text}
               placeholder="Find or name a tab"
@@ -176,7 +178,14 @@ export function AddToTab({
           )}
           {rules.domain && (
             <label className="checkbox-label flex items-center gap-2.25 text-[12px] mt-4">
-              <Checkbox checked={wholeDomain} onCheckedChange={setWholeDomain} />
+              <Checkbox
+                checked={wholeDomain}
+                onCheckedChange={(checked) => {
+                  setWholeDomain(checked)
+                  // Back to the field, so arrows and Enter keep driving the list.
+                  field.current?.focus()
+                }}
+              />
               Add everyone at {rules.domain} instead
             </label>
           )}

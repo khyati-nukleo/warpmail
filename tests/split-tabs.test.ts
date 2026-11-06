@@ -9,6 +9,7 @@ import {
   editorState,
   matchCountText,
   moveTab,
+  needsWholeConversation,
   pickerOptions,
   pickProblem,
   putTab,
@@ -335,6 +336,20 @@ describe('adding a sender to a tab', () => {
     expect(senderOf([], own)).toBeUndefined()
   })
 
+  it('fetches the whole conversation only when what is on hand may miss the sender', () => {
+    const one = [from('me@work.example', '2026-11-04T10:00:00Z')]
+    expect(needsWholeConversation({ messages: one, count: 1 }, true)).toBe(false)
+    // Every message is on hand and all are the user's: nothing more to find.
+    expect(needsWholeConversation({ messages: one, count: 1 }, false)).toBe(false)
+    expect(needsWholeConversation({ messages: one }, false)).toBe(false)
+    // A list summary holds only the latest message.
+    expect(needsWholeConversation({ messages: one, count: 3 }, false)).toBe(true)
+    // The reader shows the list summary as a placeholder while the conversation loads.
+    expect(needsWholeConversation({ messages: one, partial: true }, false)).toBe(true)
+    expect(needsWholeConversation({ messages: one, partial: true }, true)).toBe(false)
+    expect(needsWholeConversation({}, false)).toBe(true)
+  })
+
   it('offers the sender and their domain, but not free mail or refused domains', () => {
     expect(senderRules('Ana@Client.example', own)).toEqual({
       address: 'ana@client.example',
@@ -418,9 +433,19 @@ describe('adding a sender to a tab', () => {
       expect(kinds('Partner')).toEqual(['create Partner'])
     })
 
-    it('highlights the best matching tab, or the new tab when none match', () => {
+    it('highlights a tab only when the text starts a word of its name', () => {
       expect(pickerOptions(tabs, 'git').highlight).toBe(1)
       expect(pickerOptions(tabs, 'Partner').highlight).toBe(0)
+      // "hub" is inside GitHub, not at the start of a word: Enter makes a tab called "hub".
+      expect(pickerOptions(tabs, 'hub').highlight).toBe(0)
+      const partners = [{ id: 'p', name: 'Partners', rules: [] }]
+      expect(pickerOptions(partners, 'art')).toEqual({
+        options: [
+          { kind: 'create', name: 'art' },
+          { kind: 'tab', tab: partners[0] },
+        ],
+        highlight: 0,
+      })
     })
 
     it('offers no new tab when the text is a tab’s name', () => {

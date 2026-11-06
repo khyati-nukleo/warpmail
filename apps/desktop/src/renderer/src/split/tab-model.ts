@@ -139,6 +139,19 @@ export function senderOf(
     .find((from) => from && !mine.has(from.email.trim().toLowerCase()))
 }
 
+/**
+ * Whether the whole conversation must be fetched to find a sender: none was `found` in the
+ * messages on hand, and they may be only some of them (a list summary, or the reader's
+ * placeholder while the conversation loads).
+ */
+export function needsWholeConversation(
+  known: { messages?: unknown[]; count?: number; partial?: boolean },
+  found: boolean,
+): boolean {
+  if (found) return false
+  return !known.messages || !!known.partial || (known.count ?? 0) > known.messages.length
+}
+
 export interface SenderRules {
   /** The sender's address as a rule, unless it is refused. */
   address?: string
@@ -195,7 +208,8 @@ export type PickerOption =
 
 /**
  * "New tab…" (or a tab named as typed, unless a tab has that name), then the tabs whose name
- * contains the text, those starting with it first. The best matching tab is highlighted.
+ * contains the text, those with a word starting with it first. Such a tab is highlighted;
+ * otherwise the new tab is, so typing "art" makes "Art" rather than picking "Partners".
  */
 export function pickerOptions(
   tabs: SplitTab[],
@@ -204,17 +218,18 @@ export function pickerOptions(
   const typed = text.trim()
   const query = typed.toLowerCase()
   if (!query) return { options: [{ kind: 'new' }, ...tabs.map(asOption)], highlight: 0 }
-  const starts = (name: string) => name.split(/[\s/._-]+/).some((word) => word.startsWith(query))
+  const starts = (t: SplitTab) =>
+    t.name
+      .toLowerCase()
+      .split(/[\s/._-]+/)
+      .some((word) => word.startsWith(query))
   const found = tabs.filter((t) => t.name.toLowerCase().includes(query))
-  const ranked = [
-    ...found.filter((t) => starts(t.name.toLowerCase())),
-    ...found.filter((t) => !starts(t.name.toLowerCase())),
-  ].map(asOption)
+  const ranked = [...found.filter(starts), ...found.filter((t) => !starts(t))].map(asOption)
   if (tabs.some((t) => t.name.trim().toLowerCase() === query))
     return { options: ranked, highlight: 0 }
   return {
     options: [{ kind: 'create', name: typed }, ...ranked],
-    highlight: ranked.length ? 1 : 0,
+    highlight: found.some(starts) ? 1 : 0,
   }
 }
 

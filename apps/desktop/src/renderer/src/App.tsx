@@ -329,10 +329,18 @@ export function App() {
     saveSettings: (patch) => savePreferences(patch),
     addToTab: {
       available: view !== 'drafts' && (!!route.thread || !!focused),
+      // Only called from handlers, once `thread` below has its value.
       conversation: () =>
-        route.thread
-          ? { accountId: route.threadAccount!, id: route.thread, messages: thread.data }
-          : conversations.find((c) => c.key === focused),
+        !route.thread
+          ? conversations.find((c) => c.key === focused)
+          : route.threadAccount
+            ? {
+                accountId: route.threadAccount,
+                id: route.thread,
+                messages: thread.data,
+                partial: thread.isPlaceholderData,
+              }
+            : undefined,
     },
   })
   const currentFolder = boxes.data?.find((b) => b.id === route.folder)
