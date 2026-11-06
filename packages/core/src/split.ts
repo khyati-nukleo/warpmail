@@ -183,6 +183,22 @@ export function tabApplies(query: { view: string; mailboxId?: string; text?: str
   return query.view === 'inbox' && !query.mailboxId && !query.text
 }
 
+/** The most a tab or list may hold; settings and import files are held to them. */
+export const splitLimits = { tabs: 50, rules: 500, important: 500, words: 20 } as const
+
+/** `host` or one of its parent domains is in `domains`. */
+function coveredBy(host: string, domains: Set<string>) {
+  for (let d = host; ; d = d.slice(d.indexOf('.') + 1)) {
+    if (domains.has(d)) return true
+    if (!d.includes('.')) return false
+  }
+}
+
+/**
+ * The scope a query or count sends to the index. Each rule goes once, and rules a domain in the
+ * same tab already covers (its subdomains and addresses) are left out, so a hand-edited file
+ * full of repeats costs no more than the rules it really holds. At most `splitLimits` entries.
+ */
 export function resolveSplitScope(
   tabId: string | undefined,
   settings: Settings,
@@ -191,26 +207,39 @@ export function resolveSplitScope(
   if (!tabId || tabId === 'inbox') return undefined
   if (tabId === 'important') {
     const important = settings.important
+    const always = new Map<string, string[]>()
+    for (const a of important?.always ?? []) {
+      const address = a.address.trim().toLowerCase()
+      if (always.has(address)) continue
+      if (always.size >= splitLimits.important) break
+      const words = (a.words ?? []).map((w) => w.trim().toLowerCase()).filter(Boolean)
+      always.set(address, [...new Set(words)].slice(0, splitLimits.words))
+    }
+    const never = new Set((important?.never ?? []).map((n) => n.trim().toLowerCase()))
     return {
       kind: 'important',
-      always: (important?.always ?? []).map((a) => ({
-        address: a.address.trim().toLowerCase(),
-        words: (a.words ?? []).map((w) => w.trim().toLowerCase()).filter(Boolean),
-      })),
-      never: (important?.never ?? []).map((n) => n.trim().toLowerCase()),
+      always: [...always].map(([address, words]) => ({ address, words })),
+      never: [...never].slice(0, splitLimits.important),
     }
   }
   const tab = settings.splitTabs?.find((t) => t.id === tabId)
   if (!tab) return null
-  const addresses: string[] = []
-  const domains: string[] = []
-  for (const text of tab.rules) {
+  const addresses = new Set<string>()
+  const domains = new Set<string>()
+  for (const text of tab.rules.slice(0, splitLimits.rules)) {
     const rule = parseRule(text)
     if (!rule || refusalReason(rule, own)) continue
-    if (rule.kind === 'address') addresses.push(rule.value)
-    else domains.push(domainKey(rule.value))
+    if (rule.kind === 'address') addresses.add(rule.value)
+    else domains.add(rule.value)
   }
-  return { kind: 'rules', addresses, domains }
+  const parent = (domain: string) => domain.slice(domain.indexOf('.') + 1)
+  return {
+    kind: 'rules',
+    addresses: [...addresses].filter((a) => !coveredBy(hostOf(a), domains)),
+    domains: [...domains]
+      .filter((d) => !d.includes('.') || !coveredBy(parent(d), domains))
+      .map(domainKey),
+  }
 }
 
 /** The file Settings → Inbox exports and imports, as the design defines it. */
@@ -274,10 +303,10 @@ export interface InboxImport {
   skipped: number
 }
 
-const tabsMax = 50
-const rulesMax = 500
-const importantMax = 500
-const wordsMax = 20
+const tabsMax = splitLimits.tabs
+const rulesMax = splitLimits.rules
+const importantMax = splitLimits.important
+const wordsMax = splitLimits.words
 const builtInTabNames = ['inbox', 'important']
 const key = (text: string) => text.trim().toLowerCase()
 const senderAddress = (text: string) => {

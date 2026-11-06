@@ -28,6 +28,39 @@ export function firstEmail(from: readonly { email: string }[]) {
   return address.includes('@') ? address : null
 }
 
+/** Header values as stored: a hostile or broken header can't fill the index. */
+export function storedAutomation(automation: {
+  listId: string | null
+  precedence: string | null
+  autoSubmitted: string | null
+}) {
+  const clip = (value: string | null, max: number) => (value === null ? null : value.slice(0, max))
+  return {
+    listId: clip(automation.listId, 256),
+    precedence: clip(automation.precedence, 64),
+    autoSubmitted: clip(automation.autoSubmitted, 64),
+  }
+}
+
+export const INSERT_PARTICIPANT_SQL = `INSERT INTO participants
+  (account_id, message_seq, thread_id, address, domain, role) VALUES (?, ?, ?, ?, ?, ?)`
+
+/**
+ * Functions the split inbox's SQL calls. SQLite's own `lower()` only folds ASCII, so subject
+ * words (lowercased in JS) would miss "ÉCHEC" for "échec".
+ */
+export function registerSplitFunctions(db: DatabaseSync) {
+  db.function('split_lower', { deterministic: true }, (value) =>
+    typeof value === 'string' ? value.toLowerCase() : value,
+  )
+}
+
+/** A file from a pre-release v4 build lacks `participants.thread_id`; v4 runs again for it. */
+export function needsV4Again(db: DatabaseSync) {
+  const columns = db.prepare('PRAGMA table_info(participants)').all() as { name: string }[]
+  return columns.length > 0 && !columns.some((c) => c.name === 'thread_id')
+}
+
 function parseAddresses(text: string): { email: string }[] {
   try {
     const value = JSON.parse(text)
@@ -40,6 +73,7 @@ function parseAddresses(text: string): { email: string }[] {
 interface Row {
   seq: number
   account_id: string
+  thread_id: string
   from_addr: string
   to_addr: string
   cc_addr: string
@@ -63,22 +97,23 @@ export function migrateToV4(db: DatabaseSync) {
     ['automated', 'INTEGER NOT NULL DEFAULT 0'],
   ])
     if (!have.has(name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${type}`)
-  db.exec(`CREATE TABLE IF NOT EXISTS participants (
+  // Rebuilt whole each time: v4 owns the table, and a run over a v4 file starts again cleanly.
+  // `thread_id` follows the message's (see `assignThread`), so a tab reads threads from the
+  // participant index alone, never a table row per match.
+  db.exec(`DROP TABLE IF EXISTS participants;
+    CREATE TABLE participants (
       account_id TEXT NOT NULL,
       message_seq INTEGER NOT NULL REFERENCES messages (seq) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL,
       address TEXT NOT NULL,
       domain TEXT NOT NULL,
       role TEXT NOT NULL
-    );
-    DELETE FROM participants;
-    CREATE INDEX IF NOT EXISTS participants_message ON participants (message_seq);`)
-  const insert = db.prepare(
-    'INSERT INTO participants (account_id, message_seq, address, domain, role) VALUES (?, ?, ?, ?, ?)',
-  )
+    );`)
+  const insert = db.prepare(INSERT_PARTICIPANT_SQL)
   const update = db.prepare('UPDATE messages SET from_email = ?, automated = ? WHERE seq = ?')
   const page = db.prepare(
-    `SELECT seq, account_id, from_addr, to_addr, cc_addr, unsubscribe, list_id, precedence,
-        auto_submitted
+    `SELECT seq, account_id, thread_id, from_addr, to_addr, cc_addr, unsubscribe, list_id,
+        precedence, auto_submitted
       FROM messages WHERE seq > ? ORDER BY seq LIMIT 1000`,
   )
   // Paged by seq so rows are never loaded all at once or revisited after being updated.
@@ -95,7 +130,7 @@ export function migrateToV4(db: DatabaseSync) {
         to: parseAddresses(row.to_addr),
         cc: parseAddresses(row.cc_addr),
       }))
-        insert.run(row.account_id, row.seq, p.address, p.domain, p.role)
+        insert.run(row.account_id, row.seq, row.thread_id, p.address, p.domain, p.role)
       const automated = isAutomatedMessage({
         fromEmail: fromEmail ?? undefined,
         unsubscribe: row.unsubscribe,
@@ -108,12 +143,15 @@ export function migrateToV4(db: DatabaseSync) {
   }
   // Built after the backfill so the bulk inserts don't maintain them row by row.
   // `messages_mailbox_person` lets Important and the tab counts read only the index: it holds
-  // the thread, date and person test of every inbox row, and `seen` for unread counts.
-  db.exec(`CREATE INDEX IF NOT EXISTS participants_address ON participants (account_id, address);
-    CREATE INDEX IF NOT EXISTS participants_domain ON participants (account_id, domain);
+  // the thread, date and person test of every inbox row, and `seen` and `email_id` for unread
+  // counts. The participant indexes end in `thread_id`, so a rule's threads are read from them.
+  db.exec(`CREATE INDEX participants_message ON participants (message_seq);
+    CREATE INDEX participants_address ON participants (account_id, address, thread_id);
+    CREATE INDEX participants_domain ON participants (account_id, domain, thread_id);
     DROP INDEX IF EXISTS messages_mailbox_sender;
-    CREATE INDEX IF NOT EXISTS messages_mailbox_person
-      ON messages (account_id, mailbox_id, thread_id, received_ms, automated, from_email, seen);
+    DROP INDEX IF EXISTS messages_mailbox_person;
+    CREATE INDEX messages_mailbox_person ON messages
+      (account_id, mailbox_id, thread_id, received_ms, automated, from_email, seen, email_id);
     CREATE INDEX IF NOT EXISTS messages_unchecked_headers
       ON messages (account_id, mailbox_id, uid) WHERE headers_checked = 0;`)
 }

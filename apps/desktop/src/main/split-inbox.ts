@@ -5,6 +5,7 @@ import {
   ownAddresses,
   parseInboxExport,
   resolveSplitScope,
+  splitLimits,
   tabApplies,
   type Account,
   type InboxExport,
@@ -36,10 +37,15 @@ export function isImap(account: Account) {
   return account.protocol === 'imap'
 }
 
-/** The scopes whose unread counts the tab row shows. */
+/**
+ * The scopes whose unread counts the tab row shows: at most `splitLimits.tabs` tabs of
+ * `splitLimits.rules` rules each, however the settings file was edited. Records here and in
+ * `sumUnread` have no prototype, so a tab id such as `__proto__` is a key like any other.
+ */
 export function countScopes(settings: Settings, accounts: Account[]): Record<string, SplitScope> {
-  const scopes: Record<string, SplitScope> = {}
-  for (const id of ['important', ...(settings.splitTabs ?? []).map((t) => t.id)]) {
+  const scopes: Record<string, SplitScope> = Object.create(null)
+  const tabs = (settings.splitTabs ?? []).slice(0, splitLimits.tabs)
+  for (const id of ['important', ...tabs.map((t) => t.id)]) {
     const scope = resolveTab(settings, accounts, id)
     if (scope) scopes[id] = scope
   }
@@ -59,7 +65,8 @@ export type TabCounts = Record<string, { conversations: number; unread: number }
 
 /** Unread per scope, summed over accounts; every scope is present even when nothing answered. */
 export function sumUnread(scopes: Record<string, SplitScope>, perAccount: TabCounts[]) {
-  const total: Record<string, number> = Object.fromEntries(Object.keys(scopes).map((k) => [k, 0]))
+  const total: Record<string, number> = Object.create(null)
+  for (const id of Object.keys(scopes)) total[id] = 0
   for (const counts of perAccount)
     for (const [id, c] of Object.entries(counts)) total[id] = (total[id] ?? 0) + c.unread
   return total

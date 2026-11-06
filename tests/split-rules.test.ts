@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { Account } from '@inlark/core'
+import type { Account, SplitScope } from '@inlark/core'
 import {
   defaultSettings,
   domainKey,
@@ -117,6 +117,61 @@ describe('split rules', () => {
       always: [{ address: 'alerts@x.com', words: ['crash'] }],
       never: ['bot@y.com'],
     })
+  })
+  it('sends each rule once, without ones a domain in the tab already covers', () => {
+    const tab = (rules: string[]) => ({
+      ...defaultSettings,
+      splitTabs: [{ id: 't', name: 'T', rules }],
+    })
+    expect(
+      resolveSplitScope(
+        't',
+        tab([
+          '@client.test',
+          '@Client.test',
+          '@mail.client.test',
+          'ada@mail.client.test',
+          'ada@other.test',
+          'Ada@other.test',
+          '@client-eu.test',
+          '@sub.other.test',
+        ]),
+        own,
+      ),
+    ).toEqual({
+      kind: 'rules',
+      addresses: ['ada@other.test'],
+      domains: [domainKey('client.test'), domainKey('client-eu.test'), domainKey('sub.other.test')],
+    })
+    // A hand-edited file can hold more than the editor allows: only the first 500 count.
+    const many = Array.from({ length: 600 }, (_, n) => `@d${n}.example`)
+    const scope = resolveSplitScope('t', tab(many), own)
+    expect(scope).toMatchObject({ kind: 'rules', addresses: [] })
+    expect((scope as { domains: string[] }).domains).toHaveLength(500)
+    const important = resolveSplitScope(
+      'important',
+      {
+        ...defaultSettings,
+        important: {
+          always: [
+            { address: 'a@x.example', words: ['w', 'W '] },
+            { address: 'A@x.example', words: ['v'] },
+            ...Array.from({ length: 600 }, (_, n) => ({ address: `s${n}@x.example` })),
+          ],
+          never: [
+            'b@x.example',
+            'B@x.example',
+            ...Array.from({ length: 600 }, (_, n) => `n${n}@x.example`),
+          ],
+        },
+      },
+      own,
+    ) as Extract<SplitScope, { kind: 'important' }>
+    expect(important.always[0]).toEqual({ address: 'a@x.example', words: ['w'] })
+    expect(important.always.filter((a) => a.address === 'a@x.example')).toHaveLength(1)
+    expect(important.always).toHaveLength(500)
+    expect(important.never.slice(0, 2)).toEqual(['b@x.example', 'n0@x.example'])
+    expect(important.never).toHaveLength(500)
   })
   it('keeps the new settings and query fields through the schemas', () => {
     expect(querySchema.parse({ view: 'inbox', tab: 'important' }).tab).toBe('important')

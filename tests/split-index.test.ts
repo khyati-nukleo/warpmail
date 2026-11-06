@@ -10,8 +10,9 @@ import {
   SqliteMetadataIndex,
   UNCHECKED_HEADERS_SQL,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
-import { tabCountsQuery } from '../apps/desktop/src/main/imap-index/split-sql'
-import type { FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
+import { registerSplitFunctions } from '../apps/desktop/src/main/imap-index/split-schema'
+import { splitFilter, tabCountQuery } from '../apps/desktop/src/main/imap-index/split-sql'
+import type { ConversationFilter, FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
 
 let directory: string
 let path: string
@@ -134,6 +135,21 @@ describe('schema v4', () => {
         { address: 'me@example.com', domain: 'com.example', role: 'to' },
       ].sort((a, b) => (a.role + a.address < b.role + b.address ? -1 : 1)),
     )
+    expect(
+      read(`SELECT count(*) AS n FROM participants p JOIN messages m ON m.seq = p.message_seq
+        WHERE p.thread_id <> m.thread_id`),
+    ).toEqual([{ n: 0 }])
+    expect(
+      read<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'participants' ORDER BY name",
+      ).map((r) => r.name),
+    ).toEqual(['participants_address', 'participants_domain', 'participants_message'])
+    expect(
+      read<{ name: string }>('PRAGMA index_info(participants_address)').map((r) => r.name),
+    ).toEqual(['account_id', 'address', 'thread_id'])
+    expect(
+      read<{ name: string }>('PRAGMA index_info(participants_domain)').map((r) => r.name),
+    ).toEqual(['account_id', 'domain', 'thread_id'])
     expect(read('SELECT from_email FROM messages ORDER BY uid')).toEqual([
       { from_email: null },
       { from_email: null },
@@ -302,6 +318,79 @@ describe('schema v4', () => {
       ),
     ).toEqual([{ n: 0 }])
     expect(read('SELECT count(*) AS n FROM participants')).toEqual([{ n: 0 }])
+  })
+  it('runs v4 again over a file from a pre-release v4 build', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [message(box, 1)])
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec(`DROP TABLE participants;
+      CREATE TABLE participants (account_id TEXT NOT NULL, message_seq INTEGER NOT NULL,
+        address TEXT NOT NULL, domain TEXT NOT NULL, role TEXT NOT NULL)`)
+    db.close()
+    const migrating: string[] = []
+    new SqliteMetadataIndex(path, { onMigrate: () => migrating.push('v4') }).close()
+    expect(migrating).toEqual(['v4'])
+    expect(read('SELECT count(*) AS n FROM participants WHERE thread_id IS NOT NULL')).toEqual([
+      { n: 2 },
+    ])
+    // A current file opens without migrating.
+    new SqliteMetadataIndex(path, { onMigrate: () => migrating.push('again') }).close()
+    expect(migrating).toEqual(['v4'])
+    index = openInProcessIndex(path)
+  })
+
+  it('keeps participants on their thread when threads merge', async () => {
+    const box = await inbox()
+    const [, archive] = await index.syncMailboxes('a', [folder('INBOX'), folder('Archive')])
+    await index.upsertMessages('a', [
+      message(box, 1, { from: [{ name: '', email: 'one@first.example' }] }),
+      message(box, 2, { from: [{ name: '', email: 'two@second.example' }] }),
+      // A copy without Message-ID, joined to the first only once its server identity is known.
+      message(archive!.id, 3, {
+        messageId: undefined,
+        from: [{ name: '', email: 'three@third.example' }],
+      }),
+    ])
+    // Links the first two threads, then the copy to the first.
+    await index.upsertMessages('a', [
+      message(box, 4, { references: ['m1@example.com', 'm2@example.com'] }),
+    ])
+    await index.upsertMessages('a', [message(box, 1, { emailId: 'e1' })])
+    await index.upsertMessages('a', [
+      message(archive!.id, 3, {
+        messageId: undefined,
+        emailId: 'e1',
+        from: [{ name: '', email: 'three@third.example' }],
+      }),
+    ])
+    expect(
+      read(`SELECT count(*) AS n FROM participants p JOIN messages m ON m.seq = p.message_seq
+        WHERE p.thread_id <> m.thread_id`),
+    ).toEqual([{ n: 0 }])
+    expect(read('SELECT count(DISTINCT thread_id) AS n FROM messages')).toEqual([{ n: 1 }])
+    for (const address of ['two@second.example', 'three@third.example']) {
+      const split: SplitScope = { kind: 'rules', addresses: [address], domains: [] }
+      const page = await index.conversations('a', { mailboxIds: [box], split }, { limit: 10 })
+      expect(page.total).toBe(1)
+    }
+  })
+
+  it('keeps at most 256 characters of List-Id and 64 of the other headers', async () => {
+    const box = await inbox()
+    const long = { listId: 'l'.repeat(5000), precedence: 'p'.repeat(500), autoSubmitted: null }
+    await index.upsertMessages('a', [message(box, 1, { automation: long }), message(box, 2)])
+    await index.setAutomationHeaders('a', box, '1', [
+      { uid: 2, listId: null, precedence: null, autoSubmitted: 'a'.repeat(500) },
+    ])
+    await index.close()
+    expect(
+      read(`SELECT length(list_id) AS l, length(precedence) AS p, length(auto_submitted) AS a
+        FROM messages ORDER BY uid`),
+    ).toEqual([
+      { l: 256, p: 64, a: null },
+      { l: null, p: null, a: 64 },
+    ])
   })
 })
 
@@ -484,7 +573,7 @@ describe('tab filter', () => {
     expect(await index.tabCounts('a', INBOX!, {})).toEqual({})
   })
 
-  it('tab counts in one call', async () => {
+  it('counts every tab', async () => {
     const { INBOX, Archive } = await boxes('INBOX', 'Archive')
     await index.upsertMessages('a', [
       message(INBOX!, 1, from('a@one.example')),
@@ -507,6 +596,94 @@ describe('tab filter', () => {
     })
     for (const [key, split] of Object.entries(scopes))
       expect(counts[key]!.conversations).toBe((await all(split, INBOX!)).total)
+  })
+
+  it('matches subject words beyond ASCII whatever their case', async () => {
+    const { INBOX } = await boxes('INBOX')
+    const alerts = {
+      ...from('alerts@crashlytics.com'),
+      automation: { listId: '<alerts.crashlytics.com>', precedence: null, autoSubmitted: null },
+    }
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, { ...alerts, subject: 'ÉCHEC du déploiement' }),
+      message(INBOX!, 2, { ...alerts, subject: 'Rapport hebdomadaire' }),
+    ])
+    const scope = important([{ address: 'alerts@crashlytics.com', words: ['échec'] }])
+    expect(uids((await all(scope, INBOX!)).items)).toEqual([1])
+    const unseen = await index.conversations(
+      'a',
+      { mailboxIds: [INBOX!], split: scope, unseen: true },
+      { limit: 10 },
+    )
+    expect(uids(unseen.items)).toEqual([1])
+  })
+
+  it('counts and pages the largest tabs and Important lists settings allow', async () => {
+    const { INBOX } = await boxes('INBOX')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, from('a@d7.example')),
+      message(INBOX!, 2, { ...from('s499@robot.example'), subject: 'w19 in here' }),
+      message(INBOX!, 3, from('no-reply@robot.example')),
+    ])
+    const domains = (t: number) =>
+      Array.from({ length: 500 }, (_, n) => domainKey(`d${t * 500 + n}.example`))
+    const scopes: Record<string, SplitScope> = {}
+    for (let t = 0; t < 50; t++)
+      scopes['t' + t] = { kind: 'rules', addresses: [], domains: domains(t) }
+    const imp = important(
+      Array.from({ length: 500 }, (_, n) => ({
+        address: `s${n}@robot.example`,
+        words: Array.from({ length: 20 }, (_, w) => 'w' + w),
+      })),
+      Array.from({ length: 500 }, (_, n) => `never${n}@robot.example`),
+    )
+    const counts = await index.tabCounts('a', INBOX!, { ...scopes, important: imp })
+    expect(counts.t0).toEqual({ conversations: 1, unread: 1 })
+    expect(counts.t1).toEqual({ conversations: 0, unread: 0 })
+    expect(counts.important).toEqual({ conversations: 2, unread: 2 })
+    expect((await all(scopes.t0!, INBOX!)).total).toBe(1)
+    const unseen = await index.conversations(
+      'a',
+      { mailboxIds: [INBOX!], split: imp, unseen: true },
+      { limit: 10 },
+    )
+    expect(uids(unseen.items)).toEqual([1, 2])
+  })
+
+  it('counts a tab whatever its id', async () => {
+    const { INBOX } = await boxes('INBOX')
+    await index.upsertMessages('a', [message(INBOX!, 1)])
+    const scope: SplitScope = { kind: 'rules', addresses: ['ada@example.com'], domains: [] }
+    const scopes = Object.fromEntries([
+      ['__proto__', scope],
+      ['constructor', scope],
+    ]) as Record<string, SplitScope>
+    const counts = await index.tabCounts('a', INBOX!, scopes)
+    expect(Object.keys(counts).sort()).toEqual(['__proto__', 'constructor'])
+    expect(Object.getOwnPropertyDescriptor(counts, 'constructor')?.value).toEqual({
+      conversations: 1,
+      unread: 1,
+    })
+    expect(Object.getOwnPropertyDescriptor(counts, '__proto__')?.value).toEqual({
+      conversations: 1,
+      unread: 1,
+    })
+  })
+
+  it('judges Important in the group only when no other filter is set', () => {
+    const scope = important()
+    expect(splitFilter(scope, 'a', 'i', { mailboxIds: ['i'], split: scope })).toHaveProperty(
+      'having',
+    )
+    expect(
+      splitFilter(scope, 'a', 'i', { mailboxIds: ['i'], split: scope, unseen: undefined }),
+    ).toHaveProperty('having')
+    // A filter key this code doesn't know may drop rows from the group, so it isn't trusted.
+    const future = { mailboxIds: ['i'], split: scope, unknownKey: true } as ConversationFilter
+    const filter = splitFilter(scope, 'a', 'i', future)
+    expect(filter).toHaveProperty('where')
+    expect(filter).not.toHaveProperty('having')
+    expect(filter!.where!.sql).toMatch(/EXISTS/)
   })
 
   it('split needs the inbox scope', async () => {
@@ -548,8 +725,9 @@ describe('tab filter', () => {
       domains: [domainKey('d10.example'), domainKey('d11.example')],
     }
     const imp = important([{ address: sender(4), words: ['subject'] }], [sender(5)])
-    const counted = tabCountsQuery('a', inbox, { rules, important: imp })!
+    const counted = [tabCountQuery('a', inbox, rules)!, tabCountQuery('a', inbox, imp)!]
     const db = new DatabaseSync(join(directory, 'large.sqlite'))
+    registerSplitFunctions(db)
     const plans = {
       rules: sync.explainConversations('a', { mailboxIds: [inbox], split: rules }),
       important: sync.explainConversations('a', { mailboxIds: [inbox], split: imp }),
@@ -558,11 +736,13 @@ describe('tab filter', () => {
         split: imp,
         unseen: true,
       }),
-      tabCounts: (
-        db.prepare('EXPLAIN QUERY PLAN ' + counted.sql).all(...counted.params) as {
-          detail: string
-        }[]
-      ).map((r) => r.detail),
+      tabCounts: counted.flatMap((query) =>
+        (
+          db.prepare('EXPLAIN QUERY PLAN ' + query.sql).all(...query.params) as {
+            detail: string
+          }[]
+        ).map((r) => r.detail),
+      ),
     }
     for (const details of Object.values(plans))
       for (const detail of details) expect(detail).not.toMatch(/^SCAN [pmt]\b/)
@@ -581,6 +761,8 @@ describe('tab filter', () => {
     expect(lookups.some((d) => d.includes('address=?'))).toBe(true)
     expect(lookups.some((d) => /domain[=>]/.test(d))).toBe(true)
     for (const detail of lookups) expect(detail).toMatch(/account_id=\? AND (address|domain)/)
+    // The thread comes from the participant index itself, never a table row per match.
+    for (const detail of lookups) expect(detail).toMatch(/USING COVERING INDEX/)
     // A plain-JS reading of both scopes over the stored rows, to check counts and totals.
     type Row = {
       seq: number

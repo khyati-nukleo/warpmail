@@ -193,6 +193,18 @@ describe('split inbox in the service', () => {
     // Own domain and unparseable rules match nothing.
     expect(await service.tabMatchCount(['@work.example', 'nonsense'])).toBe(0)
   })
+  it('counts a tab whatever its id', async () => {
+    await service.setSettings({
+      ...service.settings,
+      splitTabs: [
+        { ...tab, id: '__proto__' },
+        { ...tab, id: 'constructor', name: 'Client B' },
+      ],
+    })
+    const counts = await service.tabCounts()
+    expect(Object.getOwnPropertyDescriptor(counts, '__proto__')?.value).toBe(2)
+    expect(Object.getOwnPropertyDescriptor(counts, 'constructor')?.value).toBe(2)
+  })
   it("archive all in a tab archives only that tab's conversations", async () => {
     const result = await service.mutateAll({ view: 'inbox', tab: 'client-a' }, 'archive')
     expect(result.failures).toEqual([])

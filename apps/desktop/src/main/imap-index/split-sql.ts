@@ -11,6 +11,10 @@ type Important = Extract<SplitScope, { kind: 'important' }>
 
 const list = (values: readonly unknown[]) => JSON.stringify(values)
 
+// Filter keys whose absence keeps every inbox row of a thread in its group. Any other key set,
+// including one added later, sends Important to the EXISTS form, which is right for any filter.
+const groupSafe = new Set(['mailboxIds', 'split'])
+
 /**
  * The tab as conditions on the inbox messages `m` of a query grouped by `m.thread_id`, or
  * `null` when the scope cannot match anything. Rules look at every participant of every message
@@ -31,16 +35,13 @@ export function splitFilter(
   // for an IN subquery and 135 ms for a correlated EXISTS before that index (100k messages, 40k
   // in the inbox, Inbox page 17 ms). `sum`, not `max`, so the bare `m.seq` still comes from
   // the row with the latest date.
-  if (
-    !filter.ids &&
-    !filter.excludeMailboxIds?.length &&
-    filter.flagged === undefined &&
-    filter.unseen === undefined &&
-    filter.hasAttachment === undefined &&
-    filter.after === undefined &&
-    filter.before === undefined
+  const grouped = Object.entries(filter).every(
+    ([key, value]) =>
+      groupSafe.has(key) ||
+      value === undefined ||
+      (key === 'excludeMailboxIds' && Array.isArray(value) && !value.length),
   )
-    return { having: wrap('sum(', person(scope, 'm'), ') > 0') }
+  if (grouped) return { having: wrap('sum(', person(scope, 'm'), ') > 0') }
   // Other filters drop rows from the group, so the thread's whole inbox is checked instead.
   return {
     where: wrap(
@@ -53,31 +54,40 @@ export function splitFilter(
   }
 }
 
-/** Threads with a participant matching the rules, or `null` without rules. */
+/**
+ * Threads with a participant matching the rules, or `null` without rules. Each list is one
+ * parameter, so a statement's size doesn't grow with the rules. The CROSS JOINs make each rule
+ * drive a lookup on its own key: without index statistics SQLite reads `p.account_id = ?` as
+ * selective and would walk every participant of the account. The thread is the last column of
+ * both participant indexes, so no table row is read per match (a heavy sender's 40k messages
+ * cost one table lookup each before).
+ */
 function ruleThreads(
   scope: Extract<SplitScope, { kind: 'rules' }>,
   accountId: string,
 ): SqlFragment | null {
-  const terms: string[] = []
+  const selects: string[] = []
   const params: SQLInputValue[] = []
   if (scope.addresses.length) {
-    terms.push('p.address IN (SELECT value FROM json_each(?))')
-    params.push(accountId, list(scope.addresses))
+    selects.push(`SELECT p.thread_id FROM json_each(?) r
+      CROSS JOIN participants p ON p.account_id = ? AND p.address = r.value`)
+    params.push(list(scope.addresses), accountId)
   }
-  // Domain keys are label-reversed, so a domain and its subdomains are the one key range
-  // [key, key + '/'); the last test drops siblings such as `key-eu` that sort inside it.
-  for (const domain of scope.domains) {
-    terms.push('p.domain >= ? AND p.domain < ? AND (p.domain = ? OR substr(p.domain, ?, 1) = ?)')
-    params.push(accountId, domain, domain + '/', domain, domain.length + 1, '.')
+  // Domain keys are label-reversed, so a domain is its own key and its subdomains are the key
+  // range (key + '.', key + '/'): siblings such as `key-eu` sort before it. Two index ranges,
+  // with no test left to run on each matching row.
+  if (scope.domains.length) {
+    selects.push(
+      `SELECT p.thread_id FROM json_each(?) r
+        CROSS JOIN participants p ON p.account_id = ? AND p.domain = r.value`,
+      `SELECT p.thread_id FROM json_each(?) r
+        CROSS JOIN participants p ON p.account_id = ? AND p.domain >= r.value || '.'
+          AND p.domain < r.value || '/'`,
+    )
+    params.push(list(scope.domains), accountId, list(scope.domains), accountId)
   }
-  if (!terms.length) return null
-  // One SELECT per rule, not one OR: without index statistics SQLite reads `p.account_id = ?`
-  // as selective and walks every participant of the account (about 7x slower than the inbox
-  // page at 100k messages). Each SELECT here is a lookup on its own address or domain range.
-  // A correlated EXISTS per inbox row measured slower still.
-  const select = (term: string) => `SELECT t.thread_id FROM participants p
-      JOIN messages t ON t.seq = p.message_seq WHERE p.account_id = ? AND ${term}`
-  return { sql: terms.map(select).join(' UNION ALL '), params }
+  if (!selects.length) return null
+  return { sql: selects.join(' UNION ALL '), params }
 }
 
 /**
@@ -85,6 +95,7 @@ function ruleThreads(
  * list (with one of its words in the subject when given), and not on the never list. A message
  * without a From is a person unless its headers say otherwise. Only the subject is outside
  * `messages_mailbox_person`, so it is read by `seq`, and only for always senders with words.
+ * Every list is one JSON parameter, so the expression is the same size for 1 sender or 500.
  */
 function person(scope: Important, alias: string): SqlFragment {
   const params: SQLInputValue[] = []
@@ -96,12 +107,15 @@ function person(scope: Important, alias: string): SqlFragment {
     terms.push(`${alias}.from_email IN (SELECT value FROM json_each(?))`)
     params.push(list(plain))
   }
-  for (const { address, words } of always) {
-    if (!words.length) continue
-    const found = words.map(() => 'instr(lower(x.subject), ?) > 0').join(' OR ')
-    terms.push(`(${alias}.from_email = ? AND
-      (SELECT ${found} FROM messages x WHERE x.seq = ${alias}.seq))`)
-    params.push(address, ...words)
+  const worded = always.filter((a) => a.words.length)
+  if (worded.length) {
+    // The IN test keeps the subject check to these senders' mail; words are lowercased in JS,
+    // and `split_lower` folds the subject beyond ASCII.
+    terms.push(`(${alias}.from_email IN (SELECT value FROM json_each(?)) AND EXISTS (
+      SELECT 1 FROM messages x CROSS JOIN json_each(?) a CROSS JOIN json_each(a.value, '$[1]') w
+      WHERE x.seq = ${alias}.seq AND a.value ->> 0 = ${alias}.from_email
+        AND instr(split_lower(x.subject), w.value) > 0))`)
+    params.push(list(worded.map((a) => a.address)), list(worded.map((a) => [a.address, a.words])))
   }
   let sql = `(${terms.join(' OR ')})`
   if (scope.never.length) {
@@ -121,47 +135,41 @@ function wrap(
   return { sql: before + inner.sql + after, params: [...leading, ...inner.params] }
 }
 
-// Unseen inbox emails, each server identity once. `seen` is in the index, so the table is read
-// only for unseen rows.
-const UNREAD = `count(DISTINCT CASE WHEN m.seen = 0
-  THEN (SELECT coalesce(x.email_id, x.id) FROM messages x WHERE x.seq = m.seq) END)`
+// Unseen inbox emails, each server identity once; a location without one counts alone (`seq`
+// never equals a text identity). Both are in `messages_mailbox_person`, so no table row is read.
+const UNREAD = `count(DISTINCT CASE WHEN m.seen = 0 THEN coalesce(m.email_id, m.seq) END)`
 
 /**
- * One statement for every tab's counts: a `UNION ALL` of one `SELECT` per scope. Threads and
- * server identities are counted, never participant rows, so Gmail's duplicate locations count
- * once. `keys[k]` names row `k`; scopes that match nothing get no row.
+ * One tab's counts as `c` (conversations) and `u` (unread emails), or `null` when the scope
+ * matches nothing. Threads and server identities are counted, never participant rows, so
+ * Gmail's duplicate locations count once.
  *
  * A rules tab starts from its own threads and reads only their inbox entries in
- * `messages_mailbox_person`; Important is the same single grouped pass as its page. At 100k
- * messages (40k in the inbox) 7 rules tabs and Important take about 100 ms; one CTE of the
- * inbox's rows shared by all tabs took 334 ms, because it read every inbox row from the table.
+ * `messages_mailbox_person`; Important is the same single grouped pass as its page. One CTE of
+ * the inbox's rows shared by all tabs took 3x longer, because it read every inbox row from the
+ * table.
  */
-export function tabCountsQuery(
+export function tabCountQuery(
   accountId: string,
   inboxId: string,
-  scopes: Record<string, SplitScope>,
-): (SqlFragment & { keys: string[] }) | null {
-  const keys: string[] = []
-  const selects: string[] = []
-  const params: SQLInputValue[] = []
+  scope: SplitScope,
+): SqlFragment | null {
   const inbox = 'm.account_id = ? AND m.mailbox_id = ?'
-  for (const [key, scope] of Object.entries(scopes)) {
-    if (scope.kind === 'rules') {
-      const threads = ruleThreads(scope, accountId)
-      if (!threads) continue
-      selects.push(`SELECT ${keys.length} AS k, count(DISTINCT m.thread_id) AS c, ${UNREAD} AS u
-        FROM messages m WHERE ${inbox} AND m.thread_id IN (${threads.sql})`)
-      params.push(accountId, inboxId, ...threads.params)
-    } else {
-      // An email belongs to one thread, so per-thread unread counts add up without overlap.
-      const test = person(scope, 'm')
-      selects.push(`SELECT ${keys.length} AS k, count(*) AS c, coalesce(sum(n), 0) AS u
-        FROM (SELECT ${UNREAD} AS n FROM messages m WHERE ${inbox}
-          GROUP BY m.thread_id HAVING sum(${test.sql}) > 0)`)
-      params.push(accountId, inboxId, ...test.params)
+  if (scope.kind === 'rules') {
+    const threads = ruleThreads(scope, accountId)
+    if (!threads) return null
+    return {
+      sql: `SELECT count(DISTINCT m.thread_id) AS c, ${UNREAD} AS u
+        FROM messages m WHERE ${inbox} AND m.thread_id IN (${threads.sql})`,
+      params: [accountId, inboxId, ...threads.params],
     }
-    keys.push(key)
   }
-  if (!selects.length) return null
-  return { sql: selects.join(' UNION ALL '), params, keys }
+  // An email belongs to one thread, so per-thread unread counts add up without overlap.
+  const test = person(scope, 'm')
+  return {
+    sql: `SELECT count(*) AS c, coalesce(sum(n), 0) AS u
+      FROM (SELECT ${UNREAD} AS n FROM messages m WHERE ${inbox}
+        GROUP BY m.thread_id HAVING sum(${test.sql}) > 0)`,
+    params: [accountId, inboxId, ...test.params],
+  }
 }

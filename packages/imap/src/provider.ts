@@ -105,6 +105,11 @@ interface Timing {
   prefetchMaxSize: number
   /** Largest message kept on disk; beyond it only the readable parts load, on open. */
   storedMaxSize: number
+  /**
+   * Header backfill batches per sync pass: after an upgrade the backfill can be long, and
+   * recent bodies download after it. The rest waits for the next pass.
+   */
+  headerBatches: number
   /** Messages and bytes per background download, so the user's own commands wait little. */
   prefetchBatch: number
   prefetchBatchBytes: number
@@ -119,6 +124,7 @@ const defaultTiming: Timing = {
   initialBatch: 200,
   historicalBatch: 500,
   headerBatch: 500,
+  headerBatches: 4,
   previews: 30,
   sentCopyGraceMs: 1500,
   prefetchDays: 30,
@@ -731,7 +737,8 @@ export class ImapProvider implements MailProvider {
     if (!inbox) return
     let written = false
     try {
-      while (!this.disposed && this.pending === 'none') {
+      for (let batch = 0; batch < this.timing.headerBatches; batch++) {
+        if (this.disposed || this.pending !== 'none') break
         const unchecked = await this.index.uncheckedHeaders(
           this.accountId,
           inbox.id,

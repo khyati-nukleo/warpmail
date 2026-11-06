@@ -128,7 +128,10 @@ export function useSplitInbox({
     // Edited tabs keep their old counts until the new ones arrive; another account doesn't.
     placeholderData: (previous, query) => (query?.queryKey[1] === accountId ? previous : undefined),
   })
-  const counts: Record<string, number> = { ...tabCounts.data, inbox: inboxUnread }
+  // Without a prototype, so a tab id such as `constructor` reads its own count or none.
+  const counts: Record<string, number> = Object.assign(Object.create(null), tabCounts.data, {
+    inbox: inboxUnread,
+  })
 
   const select = (id: string) => {
     if (visible && !route.thread && id === active) return

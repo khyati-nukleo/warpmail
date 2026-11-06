@@ -637,6 +637,14 @@ describe('IMAP header backfill for inbox mail', () => {
     expect(await left()).toBe(0)
     expect(await important()).toBe(4)
   })
+  it('checks a few batches per pass, so recent bodies still download early', async () => {
+    const { p, left } = await uncheckedInbox({ timing: { headerBatch: 1, headerBatches: 2 } }, 5)
+    await check(p)
+    expect(headerFetches().map((f) => f.range)).toEqual(['5', '4'])
+    expect(await left()).toBe(3)
+    await check(p)
+    expect(headerFetches().map((f) => f.range)).toEqual(['5', '4', '3', '2'])
+  })
   it('marks a message that vanished from the server as checked', async () => {
     const { p, left } = await uncheckedInbox()
     const box = server.box('INBOX')

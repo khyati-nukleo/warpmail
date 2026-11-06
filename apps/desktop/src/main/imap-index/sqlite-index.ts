@@ -3,8 +3,16 @@ import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { isAutomatedMessage, type SplitScope } from '@inlark/core'
-import { firstEmail, migrateToV4, participantsOf } from './split-schema'
-import { splitFilter, tabCountsQuery } from './split-sql'
+import {
+  firstEmail,
+  INSERT_PARTICIPANT_SQL,
+  migrateToV4,
+  needsV4Again,
+  participantsOf,
+  registerSplitFunctions,
+  storedAutomation,
+} from './split-schema'
+import { splitFilter, tabCountQuery } from './split-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -317,7 +325,8 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   private readonly statements = new Map<string, StatementSync>()
   private closed = false
 
-  constructor(path: string) {
+  /** `onMigrate` runs before an existing file's schema is upgraded, which can take a while. */
+  constructor(path: string, options: { onMigrate?: () => void } = {}) {
     prepareFile(path)
     const db = new DatabaseSync(path, { timeout: 5000 })
     try {
@@ -336,7 +345,10 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY;
           PRAGMA secure_delete = ON`,
       )
-      for (let from = version; from < SCHEMA_VERSION; from++) {
+      // A pre-release v4 file has the v4 version but not all of v4: it runs v4 again.
+      const start = version === SCHEMA_VERSION && needsV4Again(db) ? SCHEMA_VERSION - 1 : version
+      if (start > 0 && start < SCHEMA_VERSION) options.onMigrate?.()
+      for (let from = start; from < SCHEMA_VERSION; from++) {
         db.exec('BEGIN IMMEDIATE')
         try {
           const migration = migrations[from]!
@@ -353,6 +365,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       db.close()
       throw error
     }
+    registerSplitFunctions(db)
     this.db = db
   }
 
@@ -605,6 +618,14 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     found.sort((a, b) => (a.seq ?? Infinity) - (b.seq ?? Infinity) || (a.id < b.id ? -1 : 1))
     const thread = found[0]?.id ?? this.newThread(accountId)
     for (const { id: loser } of found.slice(1)) {
+      // Participants follow their messages, found through the messages' thread index.
+      this.run(
+        `UPDATE participants SET thread_id = ? WHERE message_seq IN (
+          SELECT seq FROM messages WHERE account_id = ? AND thread_id = ?)`,
+        thread,
+        accountId,
+        loser,
+      )
       this.run(
         'UPDATE messages SET thread_id = ? WHERE account_id = ? AND thread_id = ?',
         thread,
@@ -704,7 +725,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         )
         const id = randomUUID()
         const fromEmail = firstEmail(message.from)
-        const automation = message.automation
+        const automation = message.automation && storedAutomation(message.automation)
         const info = this.run(
           `INSERT INTO messages (id, account_id, mailbox_id, uid_validity, uid, modseq, message_id,
             in_reply_to, refs, thread_id, subject, from_addr, to_addr, cc_addr, bcc_addr, reply_to,
@@ -756,14 +777,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         )
         const seq = Number(info.lastInsertRowid)
         for (const p of participantsOf(message))
-          this.run(
-            'INSERT INTO participants (account_id, message_seq, address, domain, role) VALUES (?, ?, ?, ?, ?)',
-            accountId,
-            seq,
-            p.address,
-            p.domain,
-            p.role,
-          )
+          this.run(INSERT_PARTICIPANT_SQL, accountId, seq, threadId, p.address, p.domain, p.role)
         return id
       })
     })
@@ -870,8 +884,9 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     id: string,
     fromEmail: string | null,
     unsubscribe: unknown,
-    automation: { listId: string | null; precedence: string | null; autoSubmitted: string | null },
+    headers: { listId: string | null; precedence: string | null; autoSubmitted: string | null },
   ) {
+    const automation = storedAutomation(headers)
     this.run(
       `UPDATE messages SET list_id = ?, precedence = ?, auto_submitted = ?,
         headers_checked = 1, automated = ? WHERE id = ?`,
@@ -1119,13 +1134,15 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     )
   }
 
+  /** One statement per tab, so no tab's rules can make another's statement too large. */
   tabCounts(accountId: string, inboxId: string, scopes: Record<string, SplitScope>) {
-    const counts: Record<string, { conversations: number; unread: number }> = {}
-    for (const key of Object.keys(scopes)) counts[key] = { conversations: 0, unread: 0 }
-    const query = tabCountsQuery(accountId, inboxId, scopes)
-    if (query)
-      for (const row of this.all<{ k: number; c: number; u: number }>(query.sql, ...query.params))
-        counts[query.keys[row.k]!] = { conversations: row.c, unread: row.u }
+    // Without a prototype, so a tab id such as `__proto__` is a key like any other.
+    const counts: Record<string, { conversations: number; unread: number }> = Object.create(null)
+    for (const [key, scope] of Object.entries(scopes)) {
+      const query = tabCountQuery(accountId, inboxId, scope)
+      const row = query && this.get<{ c: number; u: number }>(query.sql, ...query.params)
+      counts[key] = { conversations: row?.c ?? 0, unread: row?.u ?? 0 }
+    }
     return counts
   }
 
