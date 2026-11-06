@@ -1,4 +1,4 @@
-import type { ImportantSettings, SplitScope, SplitTab } from './split'
+import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -253,8 +253,6 @@ export interface Settings {
   /** Inbox split tabs, in display order. */
   splitTabs?: SplitTab[]
   important?: ImportantSettings
-  /** The one-time offer to import the Superhuman tabs has been answered. */
-  splitImportOffered?: boolean
 }
 export const defaultSettings: Settings = {
   theme: 'dark',
@@ -699,6 +697,10 @@ export interface DesktopMailAPI {
   tabCounts(accountId?: string): Promise<Record<string, number>>
   /** Inbox conversations matching these rules, across IMAP accounts. */
   tabMatchCount(rules: string[]): Promise<number>
+  /** Saves the tabs and Important lists to a file the user picks; false when cancelled. */
+  exportInbox(): Promise<boolean>
+  /** Reads an inbox export the user picks (it isn't applied); undefined when cancelled. */
+  importInbox(): Promise<InboxExport | undefined>
   /** `prefetch` marks a read-ahead load that must never delay the thread being opened. */
   conversation(
     accountId: string,

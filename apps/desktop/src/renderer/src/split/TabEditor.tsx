@@ -265,7 +265,7 @@ function useMatchCount(rules: string[], enabled: boolean): { checking?: boolean;
   return { count: result.count }
 }
 
-function DeleteTabDialog({
+export function DeleteTabDialog({
   open,
   tab,
   onDelete,

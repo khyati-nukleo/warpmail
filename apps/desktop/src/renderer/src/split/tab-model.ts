@@ -468,3 +468,61 @@ export function alwaysShownText(address: string, words: string[]): string {
     quoted.length > 1 ? quoted.slice(0, -1).join(', ') + ' or ' + quoted.at(-1) : quoted[0]
   return address + ' will show in Important when the subject contains ' + list
 }
+
+/**
+ * Undoes "Never show" for one sender on the latest lists, given their `before` status: takes
+ * them off Never and puts back their Always entry, unless they were on Never already or have
+ * an Always entry again. Every other sender's entries stay as they are now.
+ */
+export function undoNever(
+  important: ImportantSettings | undefined,
+  address: string,
+  before: ReturnType<typeof importantStatus>,
+): ImportantSettings {
+  const latest = { always: important?.always ?? [], never: important?.never ?? [] }
+  if (before.never) return latest
+  const key = addressKey(address)
+  if (latest.always.some((a) => addressKey(a.address) === key)) return latest
+  const never = latest.never.filter((n) => addressKey(n) !== key)
+  const restore = before.always && latest.always.length < importantListMax
+  return { always: restore ? [...latest.always, before.always!] : latest.always, never }
+}
+
+/** The address typed into Never show's add field, or why it can't be added. */
+export function neverEntry(
+  text: string,
+  important: ImportantSettings | undefined,
+): { address?: string; problem?: string } {
+  if (!text.trim()) return {}
+  const rule = parseRule(text)
+  if (rule?.kind !== 'address')
+    return { problem: 'Enter one email address, like someone@example.com.' }
+  if (importantStatus(important, rule.value).never)
+    return { problem: rule.value + ' is already on the list.' }
+  const limit = importantLimit(important, rule.value, 'never')
+  return limit ? { problem: limit } : { address: rule.value }
+}
+
+const counted = (n: number, one: string, many = one + 's') =>
+  n.toLocaleString() + ' ' + (n === 1 ? one : many)
+
+/** The toast after an import: what it added, and how much it left out. No addresses. */
+export function importedText(result: {
+  newTabs: number
+  updatedTabs: number
+  senders: number
+  skipped: number
+}): string {
+  const parts = [
+    result.newTabs ? counted(result.newTabs, 'tab') : '',
+    result.updatedTabs ? 'new rules for ' + counted(result.updatedTabs, 'tab') : '',
+    result.senders ? counted(result.senders, 'Important sender') : '',
+  ].filter(Boolean)
+  const skipped = result.skipped ? ' · ' + result.skipped.toLocaleString() + ' skipped' : ''
+  if (!parts.length)
+    return skipped
+      ? 'Nothing imported' + skipped
+      : 'Nothing new to import. You already have everything in this file.'
+  const list = parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts.at(-1) : parts[0]
+  return 'Imported ' + list + skipped
+}

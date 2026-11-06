@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('electron', () => ({
@@ -8,15 +8,21 @@ vi.mock('electron', () => ({
     isEncryptionAvailable: () => false,
     getSelectedStorageBackend: () => 'basic_text',
   },
-  dialog: {},
+  dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
   shell: {},
   Notification: { isSupported: () => false },
 }))
+import { dialog } from 'electron'
 import { MailService, type ProviderFactory } from '../apps/desktop/src/main/service'
 import { JsonStore } from '../apps/desktop/src/main/storage'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import { ImapProvider } from '../packages/imap/src'
-import type { Account, ConnectInput, MailProvider } from '../packages/core/src'
+import {
+  inboxExport,
+  type Account,
+  type ConnectInput,
+  type MailProvider,
+} from '../packages/core/src'
 import { FakeImapServer } from './support/fake-imap'
 
 const connect = (connectionId: string, email: string): ConnectInput => ({
@@ -248,5 +254,69 @@ describe('split inbox in the service', () => {
     // a1 (unread) plus the unread reply in a thread whose first message is read.
     expect((await service.tabCounts(idOf('a')))['client-a']).toBe(2)
     expect(await service.tabMatchCount(['@client.example'])).toBe(4)
+  })
+})
+
+describe('moving tabs to another computer', () => {
+  const saveTo = (filePath: string | undefined) =>
+    vi.mocked(dialog.showSaveDialog).mockResolvedValueOnce({ canceled: !filePath, filePath })
+  const openFrom = (path?: string) =>
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({
+      canceled: !path,
+      filePaths: path ? [path] : [],
+    })
+
+  it('exports a file that import reads back', async () => {
+    await service.setSettings({
+      ...service.settings,
+      important: { always: [{ address: 'alerts@x.example', words: ['crash'] }], never: [] },
+    })
+    const path = join(directory, 'inbox.json')
+    saveTo(path)
+    expect(await service.exportInbox()).toBe(true)
+    expect(vi.mocked(dialog.showSaveDialog).mock.lastCall?.[0]).toMatchObject({
+      defaultPath: 'warpmail-inbox.json',
+    })
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
+    const text = await readFile(path, 'utf8')
+    // Only tabs and Important lists: no ids, accounts or other settings.
+    expect(text).not.toContain('client-a')
+    expect(text).not.toContain('me@work.example')
+    expect(text).not.toContain('theme')
+    openFrom(path)
+    expect(await service.importInbox()).toEqual(inboxExport(service.settings))
+  })
+
+  it('does nothing when either dialog is cancelled', async () => {
+    saveTo(undefined)
+    expect(await service.exportInbox()).toBe(false)
+    openFrom(undefined)
+    expect(await service.importInbox()).toBeUndefined()
+  })
+
+  it('refuses files over 1 MB and files that aren’t exports, without saying where they are', async () => {
+    const big = join(directory, 'big.json')
+    await writeFile(big, ' '.repeat(1024 * 1024 + 1))
+    openFrom(big)
+    await expect(service.importInbox()).rejects.toThrow(
+      'This file is too large to be a Warpmail inbox export.',
+    )
+    const bad = join(directory, 'bad.json')
+    await writeFile(bad, JSON.stringify({ version: 1, tabs: 'no' }))
+    openFrom(bad)
+    await expect(service.importInbox()).rejects.toThrow('This file isn’t a Warpmail inbox export.')
+    openFrom(join(directory, 'missing.json'))
+    const missing = service.importInbox()
+    await expect(missing).rejects.toThrow('The file couldn’t be read.')
+    await expect(missing).rejects.not.toThrow(directory)
+    openFrom(directory)
+    await expect(service.importInbox()).rejects.toThrow('The file couldn’t be read.')
+  })
+
+  it('reports a file it couldn’t write without its path', async () => {
+    saveTo(join(directory, 'no-such-folder', 'inbox.json'))
+    const failed = service.exportInbox()
+    await expect(failed).rejects.toThrow('The file couldn’t be saved.')
+    await expect(failed).rejects.not.toThrow(directory)
   })
 })

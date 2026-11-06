@@ -10,8 +10,10 @@ import {
   editorState,
   importantLimit,
   importantStatus,
+  importedText,
   matchCountText,
   moveTab,
+  neverEntry,
   needsWholeConversation,
   parseWords,
   pickerOptions,
@@ -27,6 +29,7 @@ import {
   tabEntries,
   tabForShortcut,
   tabMoves,
+  undoNever,
   untabbedAccounts,
   whenIdle,
   wordsProblem,
@@ -597,5 +600,81 @@ describe('Important exceptions', () => {
     expect(alwaysShownText('a@x.example', ['crash', 'failure', 'down'])).toBe(
       'a@x.example will show in Important when the subject contains “crash”, “failure” or “down”',
     )
+  })
+})
+
+describe('Never show Undo', () => {
+  const before: ImportantSettings = {
+    always: [{ address: 'alerts@x.example', words: ['crash'] }, { address: 'b@x.example' }],
+    never: ['bot@y.example'],
+  }
+
+  it('reverses only this sender, keeping changes made since', () => {
+    const status = importantStatus(before, 'Alerts@X.example')
+    // After Never: alerts@ moved from Always to Never; then Settings added two entries.
+    const latest: ImportantSettings = {
+      always: [{ address: 'b@x.example' }, { address: 'new@x.example' }],
+      never: ['bot@y.example', 'alerts@x.example', 'other@y.example'],
+    }
+    expect(undoNever(latest, 'alerts@x.example', status)).toEqual({
+      always: [
+        { address: 'b@x.example' },
+        { address: 'new@x.example' },
+        { address: 'alerts@x.example', words: ['crash'] },
+      ],
+      never: ['bot@y.example', 'other@y.example'],
+    })
+  })
+
+  it('takes a sender who was on neither list off Never', () => {
+    const status = importantStatus(before, 'c@x.example')
+    const latest = { always: before.always, never: [...before.never, 'c@x.example'] }
+    expect(undoNever(latest, 'C@x.example', status)).toEqual(before)
+  })
+
+  it('changes nothing for a sender already on Never, or one put on Always since', () => {
+    expect(undoNever(before, 'bot@y.example', importantStatus(before, 'bot@y.example'))).toEqual(
+      before,
+    )
+    const status = importantStatus(before, 'alerts@x.example')
+    const latest = { always: [{ address: 'alerts@x.example', words: ['down'] }], never: [] }
+    expect(undoNever(latest, 'alerts@x.example', status)).toEqual(latest)
+  })
+})
+
+describe('Settings → Inbox', () => {
+  it('checks an address typed into Never show', () => {
+    const important = { always: [{ address: 'a@x.example' }], never: ['n@x.example'] }
+    expect(neverEntry(' New@X.example ', important)).toEqual({ address: 'new@x.example' })
+    expect(neverEntry('<a@x.example>', important)).toEqual({ address: 'a@x.example' })
+    expect(neverEntry('', important)).toEqual({})
+    expect(neverEntry('@x.example', important)).toEqual({
+      problem: 'Enter one email address, like someone@example.com.',
+    })
+    expect(neverEntry('not an address', important)).toEqual({
+      problem: 'Enter one email address, like someone@example.com.',
+    })
+    expect(neverEntry('N@x.example', important)).toEqual({
+      problem: 'n@x.example is already on the list.',
+    })
+    const full = { always: [], never: Array.from({ length: 500 }, (_, i) => i + '@x.example') }
+    expect(neverEntry('new@x.example', full)).toEqual({
+      problem: 'Never show in Important already lists 500 senders, the most it can.',
+    })
+  })
+
+  it('says what an import added', () => {
+    const none = { newTabs: 0, updatedTabs: 0, senders: 0, skipped: 0 }
+    expect(importedText({ ...none, newTabs: 4, senders: 2 })).toBe(
+      'Imported 4 tabs and 2 Important senders',
+    )
+    expect(importedText({ ...none, newTabs: 1, updatedTabs: 2, senders: 1, skipped: 1 })).toBe(
+      'Imported 1 tab, new rules for 2 tabs and 1 Important sender · 1 skipped',
+    )
+    expect(importedText({ ...none, updatedTabs: 1 })).toBe('Imported new rules for 1 tab')
+    expect(importedText(none)).toBe(
+      'Nothing new to import. You already have everything in this file.',
+    )
+    expect(importedText({ ...none, skipped: 3 })).toBe('Nothing imported · 3 skipped')
   })
 })

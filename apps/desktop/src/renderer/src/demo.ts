@@ -4,6 +4,8 @@ import {
   defaultSettings,
   isAutomatedAddress,
   resolveSplitScope,
+  inboxExport,
+  parseInboxExport,
   ruleMatches,
   tabApplies,
   type SplitScope,
@@ -1233,6 +1235,35 @@ export const demoAPI: DesktopMailAPI = {
       }
     return n
   },
+  // The browser's download and file picker stand in for the desktop's dialogs.
+  exportInbox: async () => {
+    const text = JSON.stringify(inboxExport(settings), null, 2) + '\n'
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'warpmail-inbox.json'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    return true
+  },
+  importInbox: () =>
+    new Promise((resolve, reject) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = '.json,application/json'
+      input.addEventListener('cancel', () => resolve(undefined))
+      input.addEventListener('change', () => {
+        const file = input.files?.[0]
+        if (!file) return resolve(undefined)
+        if (file.size > 1024 * 1024)
+          return reject(new Error('This file is too large to be a Warpmail inbox export.'))
+        file
+          .text()
+          .then((text) => resolve(parseInboxExport(text)))
+          .catch(reject)
+      })
+      input.click()
+    }),
   conversation: async (accountId, threadId) => {
     const accountIndex = demoAccounts.findIndex((a) => a.id === accountId)
     const m = get(accountIndex, Number(threadId.replace('thread-', '')))

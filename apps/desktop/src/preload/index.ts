@@ -32,6 +32,8 @@ const methods = [
   'query',
   'tabCounts',
   'tabMatchCount',
+  'exportInbox',
+  'importInbox',
   'conversation',
   'mutate',
   'mutateAll',

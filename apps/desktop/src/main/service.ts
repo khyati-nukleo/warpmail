@@ -21,6 +21,7 @@ import {
   type Alias,
   type AliasInput,
   type Settings,
+  type InboxExport,
   type ConnectInput,
   type ConnectionCheck,
   type ConnectionConfig,
@@ -53,6 +54,8 @@ import { SenderAvatarResolver, rasterType } from './sender-avatar'
 import { planMutation, safeUndoUpdates, undoForUpdated, type UndoEntry } from './mail-mutations'
 import {
   countScopes,
+  exportInboxFile,
+  importInboxFile,
   isImap,
   rulesScope,
   sumMatches,
@@ -975,6 +978,8 @@ export class MailService {
           p.tabCounts?.(a, { draft: rulesScope(rules, this.accounts) }) ?? Promise.resolve({}),
       ),
     )
+  exportInbox = (): Promise<boolean> => exportInboxFile(this.settings)
+  importInbox = (): Promise<InboxExport | undefined> => importInboxFile()
   /** Each IMAP account's tab counts; an account that fails is left out. */
   private async askTabs(
     accountId: string | undefined,

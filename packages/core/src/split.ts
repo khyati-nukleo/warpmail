@@ -1,4 +1,13 @@
+import { z } from 'zod'
 import type { Account, Settings } from './model'
+import {
+  importantListSchema,
+  senderSchema,
+  splitRulesSchema,
+  splitTabNameSchema,
+  splitTabsSchema,
+  subjectWordsSchema,
+} from './schemas'
 
 export type SplitRule = { kind: 'address'; value: string } | { kind: 'domain'; value: string }
 
@@ -202,4 +211,182 @@ export function resolveSplitScope(
     else domains.push(domainKey(rule.value))
   }
   return { kind: 'rules', addresses, domains }
+}
+
+/** The file Settings → Inbox exports and imports, as the design defines it. */
+export interface InboxExport {
+  version: 1
+  tabs: { name: string; rules: string[] }[]
+  important: { always: { sender: string; subjectWords?: string[] }[]; never: string[] }
+}
+
+const inboxExportSchema = z.object({
+  version: z.literal(1),
+  tabs: splitTabsSchema(z.object({ name: splitTabNameSchema, rules: splitRulesSchema })),
+  important: z.object({
+    always: importantListSchema(
+      z.object({ sender: senderSchema, subjectWords: subjectWordsSchema.optional() }),
+    ),
+    never: importantListSchema(senderSchema),
+  }),
+})
+
+/** Only the tabs (names and rules, in order) and Important lists: no ids or other settings. */
+export function inboxExport(settings: Settings): InboxExport {
+  return {
+    version: 1,
+    tabs: (settings.splitTabs ?? []).map(({ name, rules }) => ({ name, rules: [...rules] })),
+    important: {
+      always: (settings.important?.always ?? []).map(({ address, words }) =>
+        words?.length ? { sender: address, subjectWords: [...words] } : { sender: address },
+      ),
+      never: [...(settings.important?.never ?? [])],
+    },
+  }
+}
+
+const notAnExport = 'This file isn’t a Warpmail inbox export.'
+
+/** Reads an export file's text. Untrusted: anything but the known fields is dropped. */
+export function parseInboxExport(text: string): InboxExport {
+  let data: unknown
+  try {
+    data = JSON.parse(text.replace(/^\uFEFF/, ''))
+  } catch {
+    throw new Error(notAnExport)
+  }
+  const parsed = inboxExportSchema.safeParse(data)
+  if (!parsed.success) throw new Error(notAnExport)
+  return parsed.data
+}
+
+/** The settings after an import, and what it changed. */
+export interface InboxImport {
+  splitTabs: SplitTab[]
+  important: ImportantSettings
+  /** Tabs created. */
+  newTabs: number
+  /** Existing tabs that got rules. */
+  updatedTabs: number
+  /** Important senders added or changed. */
+  senders: number
+  /** Tabs, rules and senders left out: unreadable, own, conflicting or over a limit. */
+  skipped: number
+}
+
+const tabsMax = 50
+const rulesMax = 500
+const importantMax = 500
+const wordsMax = 20
+const builtInTabNames = ['inbox', 'important']
+const key = (text: string) => text.trim().toLowerCase()
+const senderAddress = (text: string) => {
+  const rule = parseRule(text)
+  return rule?.kind === 'address' ? rule.value : undefined
+}
+
+/**
+ * Adds an export's tabs and Important senders to these settings. Never deletes anything: rules
+ * join the tab of the same name, new tabs get fresh ids, and an entry that conflicts with these
+ * lists is skipped, as are own addresses (refused as the editor refuses them) and overflow.
+ */
+export function mergeInboxImport(
+  settings: Pick<Settings, 'splitTabs' | 'important'>,
+  file: InboxExport,
+  own: string[],
+  newId: () => string = () => crypto.randomUUID(),
+): InboxImport {
+  let skipped = 0
+  const tabs = (settings.splitTabs ?? []).map((tab) => ({ ...tab, rules: [...tab.rules] }))
+  const created = new Set<string>()
+  const updated = new Set<string>()
+  for (const incoming of file.tabs) {
+    const name = incoming.name.trim()
+    let tab = tabs.find((t) => key(t.name) === key(name))
+    if (!tab) {
+      if (!name || builtInTabNames.includes(key(name)) || tabs.length >= tabsMax) {
+        skipped++
+        continue
+      }
+      tab = { id: newId(), name, rules: [] }
+      tabs.push(tab)
+      created.add(tab.id)
+    }
+    const has = new Set(tab.rules.map(key))
+    for (const text of incoming.rules) {
+      const rule = parseRule(text)
+      if (!rule || refusalReason(rule, own)) {
+        skipped++
+        continue
+      }
+      const formatted = formatRule(rule)
+      if (has.has(formatted)) continue
+      if (tab.rules.length >= rulesMax) {
+        skipped++
+        continue
+      }
+      tab.rules.push(formatted)
+      has.add(formatted)
+      if (!created.has(tab.id)) updated.add(tab.id)
+    }
+  }
+
+  let senders = 0
+  const always = [...(settings.important?.always ?? [])]
+  const never = [...(settings.important?.never ?? [])]
+  for (const entry of file.important.always) {
+    const address = senderAddress(entry.sender)
+    if (!address || never.some((n) => key(n) === address)) {
+      skipped++
+      continue
+    }
+    const words = [...new Set((entry.subjectWords ?? []).map(key).filter(Boolean))]
+    const at = always.findIndex((a) => key(a.address) === address)
+    const current = always[at]
+    if (!current) {
+      if (always.length >= importantMax) skipped++
+      else {
+        always.push(words.length ? { address, words } : { address })
+        senders++
+      }
+      continue
+    }
+    // Without words a sender always shows, which covers any words.
+    if (!current.words?.length) continue
+    if (!words.length) {
+      always[at] = { address: current.address }
+      senders++
+      continue
+    }
+    const merged = [...new Set([...current.words, ...words])]
+    if (merged.length === current.words.length) continue
+    if (merged.length > wordsMax) {
+      skipped++
+      continue
+    }
+    always[at] = { ...current, words: merged }
+    senders++
+  }
+  for (const text of file.important.never) {
+    const address = senderAddress(text)
+    if (!address || always.some((a) => key(a.address) === address)) {
+      skipped++
+      continue
+    }
+    if (never.some((n) => key(n) === address)) continue
+    if (never.length >= importantMax) {
+      skipped++
+      continue
+    }
+    never.push(address)
+    senders++
+  }
+  return {
+    splitTabs: tabs,
+    important: { always, never },
+    newTabs: created.size,
+    updatedTabs: updated.size,
+    senders,
+    skipped,
+  }
 }

@@ -47,7 +47,6 @@ import {
   needsWholeConversation,
   putTab,
   senderOf,
-  serialQueue,
   setAlways,
   setNever,
   tabElementId,
@@ -55,10 +54,12 @@ import {
   tabForShortcut,
   tabMoves,
   tabPanelId,
+  undoNever,
   untabbedAccounts,
   whenIdle,
   type TabAction,
 } from './tab-model'
+import { splitSaves } from './split-saves'
 import type { TabDialogState } from './TabEditor'
 import type { TabMenuState } from './TabRow'
 
@@ -133,8 +134,8 @@ export function useSplitInbox({
     if (visible && !route.thread && id === active) return
     go({ view: 'inbox', account: route.account, tab: id === 'inbox' ? undefined : id })
   }
-  // Tab saves run one at a time, so a later one never races an earlier one.
-  const [queue] = useState(serialQueue)
+  // Split saves run one at a time, here and in Settings → Inbox, so none races another.
+  const queue = splitSaves
   const saveTabs = (tabs: SplitTab[]) => queue(() => saveSettings({ splitTabs: tabs }))
 
   // While reorders save: the order last dropped, and the last one known to be saved.
@@ -358,8 +359,11 @@ export function useSplitInbox({
     if (limit) return notify(limit, 'info')
     const saved = await changeImportant((important) => setNever(important, email, on))
     if (!saved) return
+    // Only this sender, on the latest lists, so changes made since (in Settings) survive.
+    const before = importantStatus(saved.before, email)
     const undo = async () => {
-      if (await changeImportant(() => saved.before)) notify('Undone.')
+      if (await changeImportant((important) => undoNever(important, email, before)))
+        notify('Undone.')
     }
     if (on) showToast({ text: email + ' won’t show in Important', onUndo: () => void undo() })
     else notify(email + ' can show in Important again')

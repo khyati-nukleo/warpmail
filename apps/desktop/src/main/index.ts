@@ -294,6 +294,8 @@ else {
         query: service.query,
         tabCounts: service.tabCounts,
         tabMatchCount: service.tabMatchCount,
+        exportInbox: service.exportInbox,
+        importInbox: service.importInbox,
         conversation: service.conversation,
         mutate: service.mutate,
         mutateAll: service.mutateAll,
