@@ -13,7 +13,6 @@ import {
   resolveSplitScope,
   ruleMatches,
   settingsSchema,
-  superhumanTabs,
 } from '@inlark/core'
 
 const own = ['me@work.example', 'me@gmail.com']
@@ -22,20 +21,19 @@ describe('split rules', () => {
   it('lists every address the user receives mail as, once', () => {
     const accounts = [
       { email: ' Me@Work.example ', aliases: [{ email: 'Team@work.example' }] },
-      { email: 'me.personal@gmail.com' },
+      { email: 'me@gmail.com' },
       { email: 'me@work.example', aliases: [{ email: 'team@WORK.example' }] },
     ] as Account[]
-    expect(ownAddresses(accounts)).toEqual([
-      'me@work.example',
-      'team@work.example',
-      'me.personal@gmail.com',
-    ])
+    expect(ownAddresses(accounts)).toEqual(['me@work.example', 'team@work.example', 'me@gmail.com'])
   })
 
   it('parses addresses and domains', () => {
-    expect(parseRule('  someone@Gmail.COM ')).toEqual({ kind: 'address', value: 'someone@gmail.com' })
-    expect(parseRule('<k@clientc.example>')).toEqual({ kind: 'address', value: 'k@clientc.example' })
-    expect(parseRule('@client.example.')).toEqual({
+    expect(parseRule('  Client.Person@Gmail.COM ')).toEqual({
+      kind: 'address',
+      value: 'client.person@gmail.com',
+    })
+    expect(parseRule('<k@client.example>')).toEqual({ kind: 'address', value: 'k@client.example' })
+    expect(parseRule('@Client.Example.')).toEqual({
       kind: 'domain',
       value: 'client.example',
     })
@@ -47,8 +45,11 @@ describe('split rules', () => {
     expect(parseRule('a@')).toBeUndefined()
   })
   it('reports problems line by line', () => {
-    const r = parseRuleLines('someone@gmail.com\n\n@work.example\nhello\nsomeone@gmail.com', own)
-    expect(r.rules).toEqual(['someone@gmail.com'])
+    const r = parseRuleLines(
+      'client.person@gmail.com\n\n@work.example\nhello\nCLIENT.PERSON@gmail.com',
+      own,
+    )
+    expect(r.rules).toEqual(['client.person@gmail.com'])
     expect(r.problems.map((p) => p.line)).toEqual([3, 4])
   })
   it('refuses own addresses and domains but allows free-mail clients', () => {
@@ -63,7 +64,7 @@ describe('split rules', () => {
     expect(ruleMatches(d, 'x@github.com')).toBe(true)
     expect(ruleMatches(d, 'x@noreply.GitHub.com')).toBe(true)
     expect(ruleMatches(d, 'x@notgithub.com')).toBe(false)
-    expect(domainKey('mail.clientb.example')).toBe('example.clientb.mail')
+    expect(domainKey('mail.Client.example')).toBe('example.client.mail')
   })
   it('detects automated senders', () => {
     for (const e of [
@@ -75,7 +76,7 @@ describe('split rules', () => {
       'postmaster@x.com',
     ])
       expect(isAutomatedAddress(e)).toBe(true)
-    expect(isAutomatedAddress('someone@gmail.com')).toBe(false)
+    expect(isAutomatedAddress('client.person@gmail.com')).toBe(false)
     expect(isAutomatedMessage({ fromEmail: 'a@b.com', listId: '<list.b.com>' })).toBe(true)
     expect(isAutomatedMessage({ fromEmail: 'a@b.com', precedence: 'Bulk' })).toBe(true)
     expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'no' })).toBe(false)
@@ -89,7 +90,11 @@ describe('split rules', () => {
     const settings = {
       ...defaultSettings,
       splitTabs: [
-        { id: 't1', name: 'Client A', rules: ['someone@gmail.com', '@work.example', '@clientc.example'] },
+        {
+          id: 't1',
+          name: 'Client A',
+          rules: ['Client.Person@gmail.com', '@work.example', '@Client.example'],
+        },
       ],
       important: {
         always: [{ address: 'Alerts@X.com', words: [' Crash ', ''] }],
@@ -101,8 +106,8 @@ describe('split rules', () => {
     expect(resolveSplitScope('gone', settings, own)).toBeNull()
     expect(resolveSplitScope('t1', settings, own)).toEqual({
       kind: 'rules',
-      addresses: ['someone@gmail.com'],
-      domains: ['example.clientc'],
+      addresses: ['client.person@gmail.com'],
+      domains: ['example.client'],
     })
     expect(resolveSplitScope('important', settings, own)).toEqual({
       kind: 'important',
@@ -120,13 +125,5 @@ describe('split rules', () => {
     })
     expect(parsed.splitTabs).toHaveLength(1)
     expect(parsed.splitImportOffered).toBe(true)
-  })
-  it('builds the Superhuman tabs', () => {
-    expect(superhumanTabs().map((t) => [t.name, t.rules])).toEqual([
-      ['Client A', ['client.person@gmail.com', 'k@clientc.example']],
-      ['Client B', ['@client.example']],
-      ['GitHub', ['notifications@github.com', '@noreply.github.com']],
-      ['Asana', ['no-reply@asana.com']],
-    ])
   })
 })

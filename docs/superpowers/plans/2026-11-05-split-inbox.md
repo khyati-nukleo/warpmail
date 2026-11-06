@@ -21,7 +21,7 @@
 - Index schema becomes v4 (one-way, like v3; the existing "created by a newer version" guard covers older builds).
 - Shortcuts (all rebindable): Ctrl+1 Inbox, Ctrl+2 Important, Ctrl+3–Ctrl+9 user tabs in order, Ctrl+Tab next, Ctrl+Shift+Tab previous, Shift+T "Add sender to tab…".
 - Automated sender = local part with `.`, `-`, `_` removed starts with `noreply`, `donotreply` or `bounce`, or local part is `mailer-daemon` or `postmaster`; or List-Unsubscribe or List-Id present; or Precedence is `bulk`, `list` or `junk`; or Auto-Submitted present and not `no`.
-- Starting tabs offered once (skippable): Client A `client.person@gmail.com`, `k@clientc.example`; Client B `@client.example`; GitHub `notifications@github.com`, `@noreply.github.com`; Asana `no-reply@asana.com`. No Calendar or Google Docs tab.
+- Starting tabs: none built in. The owner imports them once from a private file outside the repo, in the export format (design "Export file format"). The repo is public: never put real addresses, client names or project names in code, tests, fixtures, docs or commit messages; use example.com addresses.
 - Commands: `corepack pnpm exec vitest run <files>`, `corepack pnpm --filter @inlark/desktop typecheck` (plus `--filter @inlark/core`, `--filter @inlark/imap` typecheck when touched), `corepack pnpm exec prettier --check <files>`.
 - Each commit: run the `engineering-skills:pre-commit-security` check, conventional-commit subject, never stage `design/` or `docs/superpowers/briefs/`, message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, merge or rebase.
 
@@ -34,28 +34,28 @@
 - **Membership is per conversation.** A tab filter is a predicate on `thread_id`, so the tab's rows, order, representative message and keyset paging are identical to Inbox's, just fewer.
 - **Own addresses** = every account's `email` plus its aliases' emails, across all accounts. Refusal is checked in the renderer (with the reason shown) and again in the main process when resolving a tab (refused rules are dropped, so an imported file can't break the rule).
 - **Search hides the tab row.** With a search (`route.q`) or a folder selected, or outside the Inbox view, no tab applies.
-- **Import replaces** the current tabs and lists after a confirmation; export writes one JSON file.
+- **Import merges and never deletes** (design); export writes one JSON file.
 - **Header backfill** marks a requested message as checked even if the server returned nothing for it, so the job always finishes.
 
 ## File Structure
 
-| File                                                                                                                                      | Responsibility                                                                                                                                                                                                                                                                                |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/split.ts` (new)                                                                                                        | Types `SplitTab`, `ImportantSettings`, `SplitScope`, `InboxExport`; pure `parseRule`, `parseRuleLines`, `refusalReason`, `isFreeMailDomain`, `domainKey`, `isAutomatedAddress`, `isAutomatedMessage`, `ruleMatches`, `resolveSplitScope`, `superhumanTabs`, `inboxExport`, `parseInboxExport` |
-| `packages/core/src/model.ts`, `schemas.ts`, `index.ts`                                                                                    | `Settings` fields, `MailQuery.tab`, `ProviderQuery`, optional `MailProvider.tabCounts`, new `DesktopMailAPI` methods, zod schemas                                                                                                                                                             |
-| `packages/imap/src/metadata-index.ts`, `convert.ts`, `provider.ts`                                                                        | `ConversationFilter.split`, `NewMessage.automation`, new index methods, new headers in `metadataQuery`, provider `query`/`tabCounts`/header backfill                                                                                                                                          |
-| `apps/desktop/src/main/imap-index/sqlite-index.ts`, `client.ts`                                                                           | v4 migration, participants writes, split SQL, `tabCounts`, header backfill methods, worker client wrappers                                                                                                                                                                                    |
-| `apps/desktop/src/main/split-inbox.ts` (new)                                                                                              | `ownAddresses(accounts)`, tab resolution from settings, export/import file dialogs                                                                                                                                                                                                            |
-| `apps/desktop/src/main/service.ts`, `index.ts`, `apps/desktop/src/preload/index.ts`                                                       | Thin `tabCounts`, `tabMatchCount`, `exportInbox`, `importInbox`; `query` resolves `tab`                                                                                                                                                                                                       |
-| `apps/desktop/src/renderer/src/split/` (new folder)                                                                                       | `tab-model.ts` (pure), `TabRow.tsx`, `TabEditor.tsx`, `AddToTab.tsx`, `ImportantException.tsx`, `InboxSettings.tsx`, `ImportOffer.tsx`, `useSplitInbox.ts`                                                                                                                                    |
-| `apps/desktop/src/renderer/src/App.tsx`, `main.tsx`, `shortcuts.tsx`, `Reader.tsx`, `Settings.tsx`, `recipient-suggestions.ts`, `demo.ts` | Small wiring edits                                                                                                                                                                                                                                                                            |
-| `tests/split-rules.test.ts`, `tests/split-index.test.ts`, `tests/split-service.test.ts`, `tests/split-tabs.test.ts` (new)                 | Tests per layer; plus additions to `tests/imap-index.test.ts`, `tests/imap-provider.test.ts`, `tests/shortcuts.test.ts`, `tests/recipient-suggestions.test.ts`                                                                                                                                |
+| File                                                                                                                                      | Responsibility                                                                                                                                                                                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core/src/split.ts` (new)                                                                                                        | Types `SplitTab`, `ImportantSettings`, `SplitScope`, `InboxExport`; pure `parseRule`, `parseRuleLines`, `refusalReason`, `isFreeMailDomain`, `domainKey`, `isAutomatedAddress`, `isAutomatedMessage`, `ruleMatches`, `resolveSplitScope`, `inboxExport`, `parseInboxExport` |
+| `packages/core/src/model.ts`, `schemas.ts`, `index.ts`                                                                                    | `Settings` fields, `MailQuery.tab`, `ProviderQuery`, optional `MailProvider.tabCounts`, new `DesktopMailAPI` methods, zod schemas                                                                                                                                           |
+| `packages/imap/src/metadata-index.ts`, `convert.ts`, `provider.ts`                                                                        | `ConversationFilter.split`, `NewMessage.automation`, new index methods, new headers in `metadataQuery`, provider `query`/`tabCounts`/header backfill                                                                                                                        |
+| `apps/desktop/src/main/imap-index/sqlite-index.ts`, `client.ts`                                                                           | v4 migration, participants writes, split SQL, `tabCounts`, header backfill methods, worker client wrappers                                                                                                                                                                  |
+| `apps/desktop/src/main/split-inbox.ts` (new)                                                                                              | `ownAddresses(accounts)`, tab resolution from settings, export/import file dialogs                                                                                                                                                                                          |
+| `apps/desktop/src/main/service.ts`, `index.ts`, `apps/desktop/src/preload/index.ts`                                                       | Thin `tabCounts`, `tabMatchCount`, `exportInbox`, `importInbox`; `query` resolves `tab`                                                                                                                                                                                     |
+| `apps/desktop/src/renderer/src/split/` (new folder)                                                                                       | `tab-model.ts` (pure), `TabRow.tsx`, `TabEditor.tsx`, `AddToTab.tsx`, `ImportantException.tsx`, `InboxSettings.tsx`, `ImportOffer.tsx`, `useSplitInbox.ts`                                                                                                                  |
+| `apps/desktop/src/renderer/src/App.tsx`, `main.tsx`, `shortcuts.tsx`, `Reader.tsx`, `Settings.tsx`, `recipient-suggestions.ts`, `demo.ts` | Small wiring edits                                                                                                                                                                                                                                                          |
+| `tests/split-rules.test.ts`, `tests/split-index.test.ts`, `tests/split-service.test.ts`, `tests/split-tabs.test.ts` (new)                 | Tests per layer; plus additions to `tests/imap-index.test.ts`, `tests/imap-provider.test.ts`, `tests/shortcuts.test.ts`, `tests/recipient-suggestions.test.ts`                                                                                                              |
 
 ## Review Focus
 
 1. **A route or remembered location names a tab that no longer exists** (deleted, or replaced by an import): the app must show Inbox, not a blank list or an error. Pinned in Task 5 (`activeTabId`) and Task 4 (unknown id → empty page, never all mail).
 2. **A tab whose rules are all refused or empty** must show nothing and count 0, never fall back to everything. Pinned in Task 3 (empty `rules` scope) and Task 4.
-3. **Messy rule input** (`"  someone@Gmail.COM "`, `"client.example."`, `"<k@clientc.example>"`, blank lines, `"hello"`): normalised or reported line by line, never silently dropped. Pinned in Task 1 (`parseRuleLines`).
+3. **Messy rule input** (`"  Client.Person@Gmail.COM "`, `"client.example."`, `"<k@client.example>"`, blank lines, `"hello"`): normalised or reported line by line, never silently dropped. Pinned in Task 1 (`parseRuleLines`).
 4. **Messages with no From, or an address without `@`, during v4 backfill** must not abort the migration. Pinned in Task 2.
 5. **JMAP account in the account filter while a tab is active**: empty list with an explanatory note, not "account failed". Pinned in Task 4 (no `failedAccounts`) and Task 6 (note in empty state).
 
@@ -89,7 +89,6 @@
   - `isAutomatedMessage(m: { fromEmail?: string; unsubscribe?: unknown; listId?: string | null; precedence?: string | null; autoSubmitted?: string | null }): boolean`
   - `ruleMatches(rule: SplitRule, email: string): boolean` (domain matches itself and subdomains)
   - `resolveSplitScope(tabId: string | undefined, settings: Settings, own: string[]): SplitScope | null | undefined` — `undefined` for Inbox/absent; `null` for an unknown id; `'important'` → important scope from `settings.important` (lowercased, words lowercased and trimmed, empty words dropped); a user tab → `rules` scope built from its rules minus refused/unparseable ones
-  - `superhumanTabs(): SplitTab[]` (fresh UUIDs each call; names and rules from Global Constraints)
   - `Settings` gains `splitTabs?: SplitTab[]`, `important?: ImportantSettings`, `splitImportOffered?: boolean`; `MailQuery` gains `tab?: string`
   - zod: `querySchema.tab = z.string().min(1).max(64).optional()`; `settingsSchema` adds `splitTabs` (max 50 tabs; `id` 1–64 chars; `name` trimmed 1–60; `rules` max 500 strings ≤ 320), `important` (`always` max 500 of `{address ≤ 320, words?: max 20 strings ≤ 100}`, `never` max 500 strings ≤ 320), `splitImportOffered: z.boolean().optional()`
 
@@ -104,9 +103,12 @@ Refusal reasons (exact copy, `X` is the rule as written):
 ```ts
 const own = ['me@work.example', 'me@gmail.com']
 it('parses addresses and domains', () => {
-  expect(parseRule('  someone@Gmail.COM ')).toEqual({ kind: 'address', value: 'someone@gmail.com' })
-  expect(parseRule('<k@clientc.example>')).toEqual({ kind: 'address', value: 'k@clientc.example' })
-  expect(parseRule('@client.example.')).toEqual({
+  expect(parseRule('  Client.Person@Gmail.COM ')).toEqual({
+    kind: 'address',
+    value: 'client.person@gmail.com',
+  })
+  expect(parseRule('<k@client.example>')).toEqual({ kind: 'address', value: 'k@client.example' })
+  expect(parseRule('@Client.Example.')).toEqual({
     kind: 'domain',
     value: 'client.example',
   })
@@ -118,8 +120,11 @@ it('parses addresses and domains', () => {
   expect(parseRule('a@')).toBeUndefined()
 })
 it('reports problems line by line', () => {
-  const r = parseRuleLines('someone@gmail.com\n\n@work.example\nhello\nsomeone@gmail.com', own)
-  expect(r.rules).toEqual(['someone@gmail.com'])
+  const r = parseRuleLines(
+    'client.person@gmail.com\n\n@work.example\nhello\nCLIENT.PERSON@gmail.com',
+    own,
+  )
+  expect(r.rules).toEqual(['client.person@gmail.com'])
   expect(r.problems.map((p) => p.line)).toEqual([3, 4])
 })
 it('refuses own addresses and domains but allows free-mail clients', () => {
@@ -134,7 +139,7 @@ it('matches domains and subdomains only', () => {
   expect(ruleMatches(d, 'x@github.com')).toBe(true)
   expect(ruleMatches(d, 'x@noreply.GitHub.com')).toBe(true)
   expect(ruleMatches(d, 'x@notgithub.com')).toBe(false)
-  expect(domainKey('mail.clientb.example')).toBe('example.clientb.mail')
+  expect(domainKey('mail.Client.example')).toBe('example.client.mail')
 })
 it('detects automated senders', () => {
   for (const e of [
@@ -146,7 +151,7 @@ it('detects automated senders', () => {
     'postmaster@x.com',
   ])
     expect(isAutomatedAddress(e)).toBe(true)
-  expect(isAutomatedAddress('someone@gmail.com')).toBe(false)
+  expect(isAutomatedAddress('client.person@gmail.com')).toBe(false)
   expect(isAutomatedMessage({ fromEmail: 'a@b.com', listId: '<list.b.com>' })).toBe(true)
   expect(isAutomatedMessage({ fromEmail: 'a@b.com', precedence: 'Bulk' })).toBe(true)
   expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'no' })).toBe(false)
@@ -160,7 +165,11 @@ it('resolves tabs from settings', () => {
   const settings = {
     ...defaultSettings,
     splitTabs: [
-      { id: 't1', name: 'Client A', rules: ['someone@gmail.com', '@work.example', '@clientc.example'] },
+      {
+        id: 't1',
+        name: 'Client A',
+        rules: ['Client.Person@gmail.com', '@work.example', '@Client.example'],
+      },
     ],
     important: {
       always: [{ address: 'Alerts@X.com', words: [' Crash ', ''] }],
@@ -172,8 +181,8 @@ it('resolves tabs from settings', () => {
   expect(resolveSplitScope('gone', settings, own)).toBeNull()
   expect(resolveSplitScope('t1', settings, own)).toEqual({
     kind: 'rules',
-    addresses: ['someone@gmail.com'],
-    domains: ['example.clientc'],
+    addresses: ['client.person@gmail.com'],
+    domains: ['example.client'],
   })
   expect(resolveSplitScope('important', settings, own)).toEqual({
     kind: 'important',
@@ -191,14 +200,6 @@ it('keeps the new settings and query fields through the schemas', () => {
   })
   expect(parsed.splitTabs).toHaveLength(1)
   expect(parsed.splitImportOffered).toBe(true)
-})
-it('builds the Superhuman tabs', () => {
-  expect(superhumanTabs().map((t) => [t.name, t.rules])).toEqual([
-    ['Client A', ['client.person@gmail.com', 'k@clientc.example']],
-    ['Client B', ['@client.example']],
-    ['GitHub', ['notifications@github.com', '@noreply.github.com']],
-    ['Asana', ['no-reply@asana.com']],
-  ])
 })
 ```
 
@@ -261,7 +262,7 @@ SQL shape (the implementer writes it; these are the decisions):
 - Keep the predicate in `WHERE` before `GROUP BY`, so `total`, keyset `after`, and `offset` paging work unchanged.
 
 - [ ] **Step 1: Write failing tests** (fixture: INBOX + Archive + Sent; threads built with `references`):
-  - `rules tab matches any participant on any message of the thread`: thread A inbox message from `julia@client.example`; thread B inbox message from a colleague with `cc: julia@mail.client.example`; thread C whose inbox message is from Khyati's colleague but an archived message in the same thread is from `client.person@gmail.com`; thread D only archived (no inbox message) from Someone; thread E from `x@notclient.example`. Scope `{kind:'rules', addresses:['client.person@gmail.com'], domains:[domainKey('client.example')]}` → threads A, B, C; total 3.
+  - `rules tab matches any participant on any message of the thread`: thread A inbox message from `julia@client.example`; thread B inbox message from a colleague with `cc: julia@mail.client.example`; thread C whose inbox message is from a work colleague but an archived message in the same thread is from `client.person@gmail.com`; thread D only archived (no inbox message) from the client person; thread E from `x@notclient.example`. Scope `{kind:'rules', addresses:['client.person@gmail.com'], domains:[domainKey('client.example')]}` → threads A, B, C; total 3.
   - `Gmail duplicates count once`: the same email (same `emailId`) in INBOX and `[Gmail]/All Mail`, unseen; `tabCounts` unread = 1, conversations = 1.
   - `important leaves out automated mail and honours always and never`: inbox threads from a person, from `no-reply@asana.com`, from a sender with `unsubscribe`, from `alerts@crashlytics.com` subject "New crash in app" and another subject "Weekly digest", and from `colleague@work.example`; scope always `[{address:'alerts@crashlytics.com', words:['crash','failure']}]`, never `['colleague@work.example']` → only the person thread and the crash thread.
   - `important looks only at inbox messages`: a thread whose inbox message is automated but whose Sent message is from Khyati is not in Important.
@@ -385,7 +386,7 @@ TabRow behaviour:
 
 Behaviour:
 
-- `Modal` titled `New tab` or `Edit <name>`: name field, then a textarea "Addresses and domains, one per line" with placeholder `someone@gmail.com\n@client.example`. Problems list under the textarea (`Line 3: …reason`). Below it, live: `Matches 12 conversations in your inbox` (debounced 300 ms; `Checking…` while loading; hidden when there are no valid rules).
+- `Modal` titled `New tab` or `Edit <name>`: name field, then a textarea "Addresses and domains, one per line" with placeholder `client.person@gmail.com\n@client.example`. Problems list under the textarea (`Line 3: …reason`). Below it, live: `Matches 12 conversations in your inbox` (debounced 300 ms; `Checking…` while loading; hidden when there are no valid rules).
 - Tab menu (right-click, the keyboard keys from Task 6, and Ctrl+K commands `Edit tab rules`, `Rename tab`, `Delete tab`, `Move tab left`, `Move tab right` for the active user tab): items Edit rules…, Rename…, Move left, Move right, Delete tab. Delete asks `Delete the tab “<name>”? Its rules are removed. No mail is moved or deleted.` and returns to Inbox if it was active. If `Dropdown` can't be opened programmatically, add optional `open`/`onOpenChange` props to `Dropdown` in `packages/ui/src/index.tsx` (pass-through to `Menu.Root`), nothing else.
 
 - [ ] **Step 1: Write failing tests** for `editorState`: duplicate name refused; `Inbox` refused; refused rule reported and `canSave` false while any problem exists; valid input yields normalised rules.
@@ -448,7 +449,7 @@ Behaviour:
 - [ ] **Step 1: Failing tests** for `setAlways`, `setNever`, `parseWords`. **Step 2: Run** — FAIL. **Step 3: Implement.** **Step 4: Run** + typecheck — PASS; manual: a newsletter let in with words shows only on matching subjects.
 - [ ] **Step 5: Commit** `feat(desktop): always and never show a sender in Important`
 
-## Priority 5: settings, export and import, Superhuman offer
+## Priority 5: settings, export and import
 
 ### Task 11: Settings → Inbox with export and import
 
@@ -461,25 +462,16 @@ Behaviour:
 **Interfaces:**
 
 - Produces:
-  - `type InboxExport = { format: 'warpmail-inbox'; version: 1; tabs: SplitTab[]; important: ImportantSettings }`; `inboxExport(settings: Settings): InboxExport`; `parseInboxExport(text: string): InboxExport` (throws `Error('This file isn’t a Warpmail inbox export.')` on bad JSON, wrong format, or schema failure; validated with a zod schema reusing the `settingsSchema` pieces).
+  - `type InboxExport = { version: 1; tabs: { name: string; rules: string[] }[]; important: { always: { sender: string; subjectWords?: string[] }[]; never: string[] } }` (the design's "Export file format"); `inboxExport(settings: Settings): InboxExport`; `parseInboxExport(text: string): InboxExport` (throws `Error('This file isn’t a Warpmail inbox export.')` on bad JSON, wrong version, or schema failure; validated with a zod schema reusing the `settingsSchema` pieces).
   - `DesktopMailAPI.exportInbox(): Promise<boolean>` (save dialog, default name `warpmail-inbox.json`, written with mode `0o600`; `false` when cancelled) and `importInbox(): Promise<InboxExport | undefined>` (open dialog, refuse files over 1 MB, parse; `undefined` when cancelled). Schemas `z.tuple([])`. `exportInbox` reads the service's current settings.
-  - Inbox settings sections: **Tabs** (each user tab: name, rule count, Edit… opening Task 7's editor, Delete; "New tab" button); **Always show in Important** (address, words, edit words inline, remove); **Never show in Important** (list with remove, plus an add field that validates with `parseRule` as an address); **Move to another computer** (Export…, Import…). Import confirms `Replace your <n> tabs and Important lists with the ones in this file?` when anything exists, then saves via settings.
+  - Inbox settings sections: **Tabs** (each user tab: name, rule count, Edit… opening Task 7's editor, Delete; "New tab" button); **Always show in Important** (address, words, edit words inline, remove); **Never show in Important** (list with remove, plus an add field that validates with `parseRule` as an address); **Move to another computer** (Export…, Import…). Import adds tabs, merging rules into a tab of the same name (case-insensitive), never deletes anything: new tabs get fresh ids; an Always entry for an existing sender merges its words (an entry without words means always and wins); imported entries that would conflict with a local Always/Never are skipped and counted. No replace confirmation; a toast says what was added.
 - [ ] **Step 1: Failing tests:** `parseInboxExport(JSON.stringify(inboxExport(settings)))` round trip; rejects `{}` and invalid JSON; service `exportInbox` writes a file that `importInbox` reads back (mock `electron` `dialog` as `tests/electron.stub.ts` allows).
 - [ ] **Step 2: Run** — FAIL. **Step 3: Implement.** **Step 4: Run** + typecheck — PASS; manual: export, change a tab, import, see it restored.
 - [ ] **Step 5: Commit** `feat(desktop): Settings → Inbox with export and import`
 
-### Task 12: One-time Superhuman tabs offer
+### Task 12: One-time starting-tabs offer
 
-**Files:**
-
-- Create: `apps/desktop/src/renderer/src/split/ImportOffer.tsx`
-- Modify: `TabRow.tsx` or `useSplitInbox.ts` (render condition)
-- Test: `tests/split-tabs.test.ts`
-
-**Interfaces:**
-
-- Produces: `shouldOfferImport(settings: Settings): boolean` → no user tabs and `splitImportOffered !== true`. Offer, inline at the end of the tab row: `Bring over your Superhuman splits: Client A, Client B, GitHub and Asana?` with `Import` and `Skip`. Both set `splitImportOffered: true`; Import also sets `splitTabs: superhumanTabs()` and shows toast `Added 4 tabs`.
-- [ ] **Step 1: Failing test** for `shouldOfferImport`. **Step 2–4:** implement, run, manual check. **Step 5: Commit** `feat(desktop): offer to import the Superhuman splits once`
+Dropped: the design (decision 18, changed 2026-11-05) replaced the one-time offer with importing a private file through Task 11.
 
 ### Task 13: Final verification and report
 

@@ -203,17 +203,3 @@ export function resolveSplitScope(
   }
   return { kind: 'rules', addresses, domains }
 }
-
-export function superhumanTabs(): SplitTab[] {
-  const tab = (name: string, rules: string[]): SplitTab => ({
-    id: crypto.randomUUID(),
-    name,
-    rules,
-  })
-  return [
-    tab('Client A', ['client.person@gmail.com', 'k@clientc.example']),
-    tab('Client B', ['@client.example']),
-    tab('GitHub', ['notifications@github.com', '@noreply.github.com']),
-    tab('Asana', ['no-reply@asana.com']),
-  ]
-}

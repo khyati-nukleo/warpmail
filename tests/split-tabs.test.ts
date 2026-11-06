@@ -189,7 +189,7 @@ describe('split tab model', () => {
   })
 
   describe('tab editor', () => {
-    const own = ['me@work.example', 'me.personal@gmail.com']
+    const own = ['me@work.example', 'me@gmail.com']
     const tabs = [
       { id: 'a', name: 'Client', rules: ['@client.example'] },
       { id: 'b', name: 'GitHub', rules: ['notifications@github.com'] },
@@ -324,7 +324,7 @@ describe('split tab model', () => {
 })
 
 describe('adding a sender to a tab', () => {
-  const own = ['me@work.example', 'me.personal@gmail.com']
+  const own = ['me@work.example', 'me@gmail.com']
   const from = (email: string, receivedAt: string) => ({
     from: [{ name: email.split('@')[0], email }],
     receivedAt,
@@ -338,7 +338,7 @@ describe('adding a sender to a tab', () => {
       from('cleo@client.example', '2026-11-02T10:00:00Z'),
     ]
     expect(senderOf(messages, own)).toEqual({ name: 'ben', email: 'ben@partner.example' })
-    expect(senderOf([from('me.personal@gmail.com', '2026-11-04T10:00:00Z')], own)).toBeUndefined()
+    expect(senderOf([from('me@gmail.com', '2026-11-04T10:00:00Z')], own)).toBeUndefined()
     expect(senderOf([{ from: [], receivedAt: '2026-11-04T10:00:00Z' }], own)).toBeUndefined()
     expect(senderOf([], own)).toBeUndefined()
   })

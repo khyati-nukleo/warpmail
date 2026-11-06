@@ -61,7 +61,7 @@ const sync = async (connectionId: string) => {
 }
 const subjects = async (query: Parameters<MailService['query']>[0]) =>
   (await service.query(query)).items.map((c) => c.subject).sort()
-const tab = { id: 'client-a', name: 'Client B', rules: ['@client.example'] }
+const tab = { id: 'client-a', name: 'Client A', rules: ['@client.example'] }
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'warpmail-split-'))

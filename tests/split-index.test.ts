@@ -85,7 +85,7 @@ describe('schema v4', () => {
       message(box, 3, {
         to: [
           { name: '', email: 'me@example.com' },
-          { name: '', email: 'Bob@Mail.clientb.example' },
+          { name: '', email: 'Bob@Mail.Client.example' },
         ],
         cc: [{ name: '', email: 'cc@example.org' }],
       }),
@@ -130,7 +130,7 @@ describe('schema v4', () => {
       [
         { address: 'ada@example.com', domain: 'com.example', role: 'from' },
         { address: 'cc@example.org', domain: 'org.example', role: 'cc' },
-        { address: 'bob@mail.clientb.example', domain: 'example.clientb.mail', role: 'to' },
+        { address: 'bob@mail.client.example', domain: 'example.client.mail', role: 'to' },
         { address: 'me@example.com', domain: 'com.example', role: 'to' },
       ].sort((a, b) => (a.role + a.address < b.role + b.address ? -1 : 1)),
     )
