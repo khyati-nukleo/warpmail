@@ -1,4 +1,10 @@
-import { resolveSplitScope, type Account, type Settings, type SplitScope } from '@inlark/core'
+import {
+  resolveSplitScope,
+  tabApplies,
+  type Account,
+  type Settings,
+  type SplitScope,
+} from '@inlark/core'
 
 /** Every address the user receives mail as, so rules never match their own mail. */
 export function ownAddresses(accounts: Account[]): string[] {
@@ -25,7 +31,7 @@ export function tabPlan(
   accounts: Account[],
   query: { view: string; tab?: string; mailboxId?: string; text?: string },
 ): { empty: true } | { split: SplitScope } | undefined {
-  if (!query.tab || query.view !== 'inbox' || query.mailboxId || query.text) return undefined
+  if (!query.tab || !tabApplies(query)) return undefined
   const split = resolveTab(settings, accounts, query.tab)
   if (split === null) return { empty: true }
   return split && { split }
@@ -52,4 +58,19 @@ export function rulesScope(rules: string[], accounts: Account[]): SplitScope {
     { splitTabs: [{ id: 'draft', name: '', rules }] } as Settings,
     ownAddresses(accounts),
   ) as SplitScope
+}
+
+export type TabCounts = Record<string, { conversations: number; unread: number }>
+
+/** Unread per scope, summed over accounts; every scope is present even when nothing answered. */
+export function sumUnread(scopes: Record<string, SplitScope>, perAccount: TabCounts[]) {
+  const total: Record<string, number> = Object.fromEntries(Object.keys(scopes).map((k) => [k, 0]))
+  for (const counts of perAccount)
+    for (const [id, c] of Object.entries(counts)) total[id] = (total[id] ?? 0) + c.unread
+  return total
+}
+
+/** Conversations matching the rules being edited, summed over accounts. */
+export function sumMatches(perAccount: TabCounts[]) {
+  return perAccount.reduce((n, counts) => n + (counts.draft?.conversations ?? 0), 0)
 }

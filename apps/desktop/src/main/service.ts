@@ -51,7 +51,15 @@ import { publicFetch } from './public-fetch'
 import { remoteImageData } from './remote-image'
 import { SenderAvatarResolver, rasterType } from './sender-avatar'
 import { planMutation, safeUndoUpdates, undoForUpdated, type UndoEntry } from './mail-mutations'
-import { countScopes, isImap, rulesScope, tabPlan } from './split-inbox'
+import {
+  countScopes,
+  isImap,
+  rulesScope,
+  sumMatches,
+  sumUnread,
+  tabPlan,
+  type TabCounts,
+} from './split-inbox'
 import { JsonStore, encryptSecret, decryptSecret, secureStorageAvailable } from './storage'
 
 export type Connection = {
@@ -952,45 +960,31 @@ export class MailService {
       .map((a) => a.id)
     return result
   }
-  /** Sums per-account tab counts over IMAP accounts that can answer, skipping any that fail. */
-  private async sumTabs<T>(
+  tabCounts = async (accountId?: string): Promise<Record<string, number>> => {
+    const scopes = countScopes(this.settings, this.accounts)
+    return sumUnread(
+      scopes,
+      await this.askTabs(accountId, (p, a) => p.tabCounts?.(a, scopes) ?? Promise.resolve({})),
+    )
+  }
+  tabMatchCount = async (rules: string[]): Promise<number> =>
+    sumMatches(
+      await this.askTabs(
+        undefined,
+        (p, a) =>
+          p.tabCounts?.(a, { draft: rulesScope(rules, this.accounts) }) ?? Promise.resolve({}),
+      ),
+    )
+  /** Each IMAP account's tab counts; an account that fails is left out. */
+  private async askTabs(
     accountId: string | undefined,
-    ask: (p: MailProvider, a: Account) => Promise<T>,
-    add: (total: T | undefined, next: T) => T,
-  ): Promise<T | undefined> {
+    ask: (p: MailProvider, a: Account) => Promise<TabCounts>,
+  ) {
     const accounts = this.accounts.filter(
       (a) => isImap(a) && (!accountId || a.id === accountId) && this.providers.has(a.connectionId),
     )
     const settled = await Promise.allSettled(accounts.map((a) => this.guard(a.id, ask)))
-    let total: T | undefined
-    for (const s of settled) if (s.status === 'fulfilled') total = add(total, s.value)
-    return total
-  }
-  tabCounts = async (accountId?: string): Promise<Record<string, number>> => {
-    const scopes = countScopes(this.settings, this.accounts)
-    const counts: Record<string, number> = Object.fromEntries(
-      Object.keys(scopes).map((k) => [k, 0]),
-    )
-    await this.sumTabs(
-      accountId,
-      async (p, a): Promise<Record<string, { unread: number }>> =>
-        (await p.tabCounts?.(a, scopes)) ?? {},
-      (_, next) => {
-        for (const [id, c] of Object.entries(next)) counts[id] = (counts[id] ?? 0) + c.unread
-        return next
-      },
-    )
-    return counts
-  }
-  tabMatchCount = async (rules: string[]): Promise<number> => {
-    const scopes = { draft: rulesScope(rules, this.accounts) }
-    return (
-      (await this.sumTabs(
-        undefined,
-        async (p, a) => (await p.tabCounts?.(a, scopes))?.draft?.conversations ?? 0,
-        (total, n) => (total ?? 0) + n,
-      )) ?? 0
-    )
+    return settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value as TabCounts] : []))
   }
   /**
    * Runs one read-plan-write cycle at a time per account. Each cycle checks the server state it

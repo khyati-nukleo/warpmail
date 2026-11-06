@@ -18,6 +18,7 @@ import {
   type MailQuery,
   type ProviderQuery,
   type SplitScope,
+  tabApplies,
   type Message,
   type MessageChanges,
   type OutgoingMessage,
@@ -897,8 +898,7 @@ export class ImapProvider implements MailProvider {
     const scope = await this.scope(query, boxes)
     if (!scope) return { items: [], total: 0 }
     const search = !!(query.text || query.from || query.to || query.subject)
-    const inboxOnly =
-      query.view === 'inbox' && !query.mailboxId && !search && scope.filter.mailboxIds?.length === 1
+    const inboxOnly = tabApplies(query) && scope.filter.mailboxIds?.length === 1
     const filter: ConversationFilter = {
       ...scope.filter,
       ...(query.view === 'starred' ? { flagged: true } : {}),

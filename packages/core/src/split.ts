@@ -158,6 +158,11 @@ export function ruleMatches(rule: SplitRule, email: string): boolean {
   return rule.kind === 'address' ? e === rule.value : within(hostOf(e), rule.value)
 }
 
+/** A tab narrows the plain inbox view and the filter fields; full-text search leaves it. */
+export function tabApplies(query: { view: string; mailboxId?: string; text?: string }): boolean {
+  return query.view === 'inbox' && !query.mailboxId && !query.text
+}
+
 export function resolveSplitScope(
   tabId: string | undefined,
   settings: Settings,

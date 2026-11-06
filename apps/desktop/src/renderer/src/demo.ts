@@ -5,6 +5,7 @@ import {
   isAutomatedAddress,
   resolveSplitScope,
   ruleMatches,
+  tabApplies,
   type SplitScope,
   folderRoles,
   mergePages,
@@ -376,7 +377,7 @@ function inScope(m: Message, scope: SplitScope): boolean {
 }
 /** Tabs only narrow the inbox view, as in the desktop service. */
 function inTab(m: Message, q: MailQuery): boolean {
-  if (!q.tab || q.view !== 'inbox' || q.mailboxId || q.text) return true
+  if (!q.tab || !tabApplies(q)) return true
   const scope = scopeOf(q.tab)
   if (scope === undefined) return true
   return scope !== null && inScope(m, scope)

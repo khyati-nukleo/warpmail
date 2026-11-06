@@ -175,7 +175,7 @@ describe('split inbox in the service', () => {
     expect(await subjects({ view: 'inbox' })).toContain('From JMAP')
   })
   it('tab counts and match counts sum across accounts', async () => {
-    // Important is every unread email from people: here all but the one already read.
+    // Important counts unread inbox emails in conversations from people: all but the read one.
     await service.setSettings({
       ...service.settings,
       important: { always: [], never: [] },
@@ -194,5 +194,59 @@ describe('split inbox in the service', () => {
     expect(servers.a!.box('INBOX').messages.map((m) => m.input.messageId)).toEqual(['a3@x'])
     expect(servers.b!.box('INBOX').messages.map((m) => m.input.messageId)).toEqual(['b2@x'])
     expect(servers.a!.box('Archive').messages).toHaveLength(2)
+  })
+  it('tabs combine with the filter fields and unknown tabs stay empty', async () => {
+    expect(await subjects({ view: 'inbox', tab: 'client-a', from: 'lee@' })).toEqual([
+      'Course plan',
+    ])
+    expect(await subjects({ view: 'inbox', tab: 'client-a', from: 'colleague@' })).toEqual([])
+    expect(await subjects({ view: 'inbox', tab: 'important', from: 'friend@' })).toEqual(['Hello'])
+    expect(await subjects({ view: 'inbox', tab: 'client-a', unread: true })).toEqual([
+      'Course plan',
+      'Invoice',
+    ])
+    expect(await subjects({ view: 'inbox', tab: 'missing', from: 'lee@' })).toEqual([])
+  })
+  it('the Important tab lists conversations from people', async () => {
+    expect(await subjects({ view: 'inbox', tab: 'important' })).toHaveLength(5)
+  })
+  it('a tab query narrowed to one account only reads that account', async () => {
+    expect(await subjects({ view: 'inbox', tab: 'client-a', accountId: idOf('b') })).toEqual([
+      'Invoice',
+    ])
+  })
+  it('one account failing leaves the others counted and throws nothing', async () => {
+    const counts = ImapProvider.prototype.tabCounts
+    vi.spyOn(ImapProvider.prototype, 'tabCounts').mockImplementation(function (
+      this: ImapProvider,
+      ...args
+    ) {
+      if ((this as any).accountId === idOf('a')) throw new Error('offline')
+      return counts.apply(this, args)
+    })
+    expect(await service.tabCounts()).toEqual({ important: 2, 'client-a': 1 })
+    expect(await service.tabMatchCount(['@client.example'])).toBe(1)
+  })
+  it('unread counts distinct unseen inbox emails in the tab, not conversations', async () => {
+    const a = servers.a!
+    a.deliver('INBOX', {
+      messageId: 'a4@x',
+      subject: 'Course plan',
+      from: person('lee@client.example'),
+      date: '2026-09-22T10:00:00Z',
+      flags: ['\\Seen'],
+    })
+    a.deliver('INBOX', {
+      messageId: 'a5@x',
+      inReplyTo: 'a4@x',
+      references: ['a4@x'],
+      subject: 'Re: Course plan',
+      from: person('lee@client.example'),
+      date: '2026-09-22T11:00:00Z',
+    })
+    await sync('a')
+    // a1 (unread) plus the unread reply in a thread whose first message is read.
+    expect((await service.tabCounts(idOf('a')))['client-a']).toBe(2)
+    expect(await service.tabMatchCount(['@client.example'])).toBe(4)
   })
 })
