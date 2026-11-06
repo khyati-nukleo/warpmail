@@ -101,22 +101,28 @@ function ruleThreads(
 function person(scope: Important, alias: string): SqlFragment {
   const params: SQLInputValue[] = []
   const terms = [`${alias}.automated = 0`]
+  // `from_email` is one of `addresses`. One address, the usual case, is a plain comparison: an
+  // IN over a JSON list costs about 15% on Important's page when 40% of the inbox is automated.
+  const fromOneOf = (addresses: string[]) => {
+    params.push(addresses.length === 1 ? addresses[0]! : list(addresses))
+    return addresses.length === 1
+      ? `${alias}.from_email = ?`
+      : `${alias}.from_email IN (SELECT value FROM json_each(?))`
+  }
   // An empty word would match every subject (`instr(s, '')` is 1).
   const always = scope.always.map((a) => ({ address: a.address, words: a.words.filter(Boolean) }))
   const plain = always.filter((a) => !a.words.length).map((a) => a.address)
-  if (plain.length) {
-    terms.push(`${alias}.from_email IN (SELECT value FROM json_each(?))`)
-    params.push(list(plain))
-  }
+  if (plain.length) terms.push(fromOneOf(plain))
   const worded = always.filter((a) => a.words.length)
   if (worded.length) {
-    // The IN test keeps the subject check to these senders' mail; words are lowercased in JS,
-    // and `split_lower` folds the subject beyond ASCII.
-    terms.push(`(${alias}.from_email IN (SELECT value FROM json_each(?)) AND EXISTS (
+    // The sender test keeps the subject check to these senders' mail; words are lowercased in
+    // JS, and `split_lower` folds the subject beyond ASCII.
+    const guard = fromOneOf(worded.map((a) => a.address))
+    terms.push(`(${guard} AND EXISTS (
       SELECT 1 FROM messages x CROSS JOIN json_each(?) a CROSS JOIN json_each(a.value, '$[1]') w
       WHERE x.seq = ${alias}.seq AND a.value ->> 0 = ${alias}.from_email
         AND instr(split_lower(x.subject), w.value) > 0))`)
-    params.push(list(worded.map((a) => a.address)), list(worded.map((a) => [a.address, a.words])))
+    params.push(list(worded.map((a) => [a.address, a.words])))
   }
   let sql = `(${terms.join(' OR ')})`
   if (scope.never.length) {
