@@ -2,8 +2,9 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlit
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { isAutomatedMessage } from '@inlark/core'
+import { isAutomatedMessage, type SplitScope } from '@inlark/core'
 import { firstEmail, migrateToV4, participantsOf } from './split-schema'
+import { splitCondition, tabCountsQuery } from './split-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -47,6 +48,7 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   resolveThread: true,
   findByMessageId: true,
   conversations: true,
+  tabCounts: true,
   counts: true,
   getMeta: true,
   setMeta: true,
@@ -951,6 +953,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   /** The grouped, filtered conversation set, or `null` when the filter cannot match. */
   private conversationSource(accountId: string, filter: ConversationFilter) {
     const mailboxIds = filter.mailboxIds && [...new Set(filter.mailboxIds)]
+    if (filter.split && mailboxIds?.length !== 1) throw new Error('A tab needs the inbox scope.')
     if (mailboxIds?.length === 0 || filter.ids?.length === 0) return null
     const where: string[] = []
     const params: SQLInputValue[] = []
@@ -992,6 +995,13 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     if (filter.before !== undefined) {
       where.push('m.received_ms < ?')
       params.push(time(filter.before))
+    }
+    // In WHERE, before grouping, so totals and both kinds of paging work as for any filter.
+    if (filter.split) {
+      const condition = splitCondition(filter.split, 'm.thread_id', accountId, mailboxIds![0]!)
+      if (!condition) return null
+      where.push(condition.sql)
+      params.push(...condition.params)
     }
     // With a single max() aggregate, SQLite takes the bare `seq` from the row holding the max.
     return {
@@ -1056,6 +1066,16 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     return this.all<{ detail: string }>('EXPLAIN QUERY PLAN ' + source.sql, ...source.params).map(
       (row) => row.detail,
     )
+  }
+
+  tabCounts(accountId: string, inboxId: string, scopes: Record<string, SplitScope>) {
+    const counts: Record<string, { conversations: number; unread: number }> = {}
+    for (const key of Object.keys(scopes)) counts[key] = { conversations: 0, unread: 0 }
+    const query = tabCountsQuery(accountId, inboxId, scopes)
+    if (query)
+      for (const row of this.all<{ k: number; c: number; u: number }>(query.sql, ...query.params))
+        counts[query.keys[row.k]!] = { conversations: row.c, unread: row.u }
+    return counts
   }
 
   counts(accountId: string) {

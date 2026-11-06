@@ -1,4 +1,4 @@
-import type { Address } from '@inlark/core'
+import type { Address, SplitScope } from '@inlark/core'
 
 /**
  * Persistent IMAP metadata, injected into the provider. The desktop app implements this with
@@ -76,6 +76,15 @@ export interface MetadataIndex {
     filter: ConversationFilter,
     page: { limit: number; offset?: number; after?: ConversationCursor },
   ): Promise<{ items: ConversationRow[]; total: number }>
+  /**
+   * Conversations and unread emails per tab, in one query. `conversations` counts threads with an
+   * inbox message in the tab; `unread` counts unseen inbox emails, each server identity once.
+   */
+  tabCounts(
+    accountId: string,
+    inboxId: string,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>>
   /** Total and unread message counts stored for the account, for progress reporting. */
   counts(accountId: string): Promise<{ messages: number }>
 
@@ -222,6 +231,8 @@ export interface ConversationFilter {
   /** ISO dates, inclusive lower and exclusive upper bound on `receivedAt`. */
   after?: string
   before?: string
+  /** Only conversations in this tab. Needs exactly one `mailboxIds` entry: the inbox. */
+  split?: SplitScope
 }
 
 export interface ConversationCursor {

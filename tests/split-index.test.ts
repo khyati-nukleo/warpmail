@@ -3,9 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { domainKey, type SplitScope } from '@inlark/core'
 import {
   openInProcessIndex,
   SCHEMA_VERSION,
+  SqliteMetadataIndex,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import type { FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
 
@@ -240,4 +242,230 @@ describe('schema v4', () => {
     ).toEqual([{ n: 0 }])
     expect(read('SELECT count(*) AS n FROM participants')).toEqual([{ n: 0 }])
   })
+})
+
+describe('tab filter', () => {
+  async function boxes(...paths: string[]) {
+    const listed = await index.syncMailboxes('a', paths.map(folder))
+    return Object.fromEntries(listed.map((b) => [b.path, b.id])) as Record<string, string>
+  }
+  const from = (email: string) => ({ from: [{ name: '', email }] })
+  const uids = (rows: { latest: { uid: number } }[]) => rows.map((r) => r.latest.uid).sort()
+  const all = (split: SplitScope, mailboxId: string) =>
+    index.conversations('a', { mailboxIds: [mailboxId], split }, { limit: 500 })
+  const important = (always: { address: string; words: string[] }[] = [], never: string[] = []) =>
+    ({ kind: 'important', always, never }) as const
+
+  it('rules tab matches any participant on any message of the thread', async () => {
+    const { INBOX, Archive } = await boxes('INBOX', 'Archive', 'Sent')
+    await index.upsertMessages('a', [
+      message(INBOX!, 10, from('julia@client.example')),
+      message(INBOX!, 20, {
+        ...from('colleague@work.example'),
+        cc: [{ name: '', email: 'julia@mail.client.example' }],
+      }),
+      message(INBOX!, 30, from('colleague@work.example')),
+      message(Archive!, 31, {
+        ...from('client.person@gmail.com'),
+        references: ['m30@example.com'],
+      }),
+      message(Archive!, 40, from('client.person@gmail.com')),
+      message(INBOX!, 50, from('x@notclient.example')),
+      // Its domain key sorts inside the range of `example.client`.
+      message(INBOX!, 60, from('x@client-eu.example')),
+    ])
+    const page = await all(
+      {
+        kind: 'rules',
+        addresses: ['client.person@gmail.com'],
+        domains: [domainKey('client.example')],
+      },
+      INBOX!,
+    )
+    expect(uids(page.items)).toEqual([10, 20, 30])
+    expect(page.total).toBe(3)
+  })
+
+  it('Gmail duplicates count once', async () => {
+    const { INBOX, '[Gmail]/All Mail': allMail } = await boxes('INBOX', '[Gmail]/All Mail')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, { emailId: 'e1' }),
+      message(allMail!, 7, { emailId: 'e1' }),
+    ])
+    const scope: SplitScope = { kind: 'rules', addresses: ['ada@example.com'], domains: [] }
+    expect(await index.tabCounts('a', INBOX!, { x: scope })).toEqual({
+      x: { conversations: 1, unread: 1 },
+    })
+    expect((await all(scope, INBOX!)).total).toBe(1)
+  })
+
+  it('important leaves out automated mail and honours always and never', async () => {
+    const { INBOX } = await boxes('INBOX', 'Archive', 'Sent')
+    const alerts = {
+      ...from('alerts@crashlytics.com'),
+      automation: { listId: '<alerts.crashlytics.com>', precedence: null, autoSubmitted: null },
+    }
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, from('friend@example.org')),
+      message(INBOX!, 2, from('no-reply@asana.com')),
+      message(INBOX!, 3, {
+        ...from('news@shop.example'),
+        unsubscribe: { url: 'https://shop.example/u', oneClick: true },
+      }),
+      message(INBOX!, 4, { ...alerts, subject: 'New crash in app' }),
+      message(INBOX!, 5, { ...alerts, subject: 'Weekly digest' }),
+      message(INBOX!, 6, from('colleague@work.example')),
+    ])
+    const page = await all(
+      important(
+        [{ address: 'alerts@crashlytics.com', words: ['crash', 'failure'] }],
+        ['colleague@work.example'],
+      ),
+      INBOX!,
+    )
+    expect(uids(page.items)).toEqual([1, 4])
+  })
+
+  it('important keeps all mail from an always address without words', async () => {
+    const { INBOX } = await boxes('INBOX')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, from('no-reply@asana.com')),
+      message(INBOX!, 2, from('no-reply@other.example')),
+    ])
+    const page = await all(important([{ address: 'no-reply@asana.com', words: [] }]), INBOX!)
+    expect(uids(page.items)).toEqual([1])
+  })
+
+  it('important looks only at inbox messages', async () => {
+    const { INBOX, Sent } = await boxes('INBOX', 'Archive', 'Sent')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, from('no-reply@robot.example')),
+      message(Sent!, 2, { ...from('me@work.example'), references: ['m1@example.com'] }),
+      message(INBOX!, 3, from('friend@example.org')),
+    ])
+    const page = await all(important(), INBOX!)
+    expect(uids(page.items)).toEqual([3])
+    expect(page.total).toBe(1)
+  })
+
+  it('pages a tab with keyset and offset', async () => {
+    const { INBOX } = await boxes('INBOX', 'Archive', 'Sent')
+    const batch: NewMessage[] = []
+    for (let uid = 1; uid <= 150; uid++)
+      batch.push(message(INBOX!, uid, uid % 5 === 0 ? from('other@else.example') : {}))
+    // 120 matching threads: the rest are from someone else.
+    expect(batch.filter((m) => m.from[0]!.email === 'Ada@Example.com')).toHaveLength(120)
+    await index.upsertMessages('a', batch)
+    const split: SplitScope = { kind: 'rules', addresses: ['ada@example.com'], domains: [] }
+    const filter = { mailboxIds: [INBOX!], split }
+    const first = await index.conversations('a', filter, { limit: 50 })
+    const last = first.items.at(-1)!
+    const second = await index.conversations('a', filter, {
+      limit: 50,
+      after: { receivedAt: last.latest.receivedAt, threadId: last.threadId },
+    })
+    const third = await index.conversations('a', filter, { limit: 50, offset: 100 })
+    expect([first.total, second.total, third.total]).toEqual([120, 120, 120])
+    expect([first.items.length, second.items.length, third.items.length]).toEqual([50, 50, 20])
+    const seen = [...first.items, ...second.items, ...third.items].map((r) => r.threadId)
+    expect(new Set(seen).size).toBe(120)
+  })
+
+  it('an empty rules scope matches nothing', async () => {
+    const { INBOX } = await boxes('INBOX')
+    await index.upsertMessages('a', [message(INBOX!, 1)])
+    const empty: SplitScope = { kind: 'rules', addresses: [], domains: [] }
+    expect(await all(empty, INBOX!)).toEqual({ items: [], total: 0 })
+    expect(await index.tabCounts('a', INBOX!, { empty })).toEqual({
+      empty: { conversations: 0, unread: 0 },
+    })
+    expect(await index.tabCounts('a', INBOX!, {})).toEqual({})
+  })
+
+  it('tab counts in one call', async () => {
+    const { INBOX, Archive } = await boxes('INBOX', 'Archive')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, from('a@one.example')),
+      message(INBOX!, 2, { ...from('a@one.example'), references: ['m1@example.com'] }),
+      message(INBOX!, 3, { ...from('b@two.example'), flags: ['\\Seen'] }),
+      message(INBOX!, 4, from('no-reply@two.example')),
+      message(INBOX!, 5, from('c@three.example')),
+      message(Archive!, 6, { ...from('a@one.example'), references: ['m5@example.com'] }),
+    ])
+    const scopes: Record<string, SplitScope> = {
+      one: { kind: 'rules', addresses: ['a@one.example'], domains: [] },
+      two: { kind: 'rules', addresses: [], domains: [domainKey('two.example')] },
+      important: important(),
+    }
+    const counts = await index.tabCounts('a', INBOX!, scopes)
+    expect(counts).toEqual({
+      one: { conversations: 2, unread: 3 },
+      two: { conversations: 2, unread: 1 },
+      important: { conversations: 3, unread: 3 },
+    })
+    for (const [key, split] of Object.entries(scopes))
+      expect(counts[key]!.conversations).toBe((await all(split, INBOX!)).total)
+  })
+
+  it('split needs the inbox scope', async () => {
+    const { INBOX, Archive } = await boxes('INBOX', 'Archive')
+    const split = important()
+    await expect(index.conversations('a', { split }, { limit: 5 })).rejects.toThrow(
+      'A tab needs the inbox scope.',
+    )
+    await expect(
+      index.conversations('a', { mailboxIds: [INBOX!, Archive!], split }, { limit: 5 }),
+    ).rejects.toThrow('A tab needs the inbox scope.')
+  })
+
+  it('tab queries stay indexed on a large mailbox', () => {
+    const sync = new SqliteMetadataIndex(join(directory, 'large.sqlite'))
+    const [inboxBox, archive, sent] = sync.syncMailboxes('a', [
+      folder('INBOX'),
+      folder('Archive'),
+      folder('Sent'),
+    ])
+    const sender = (n: number) => `u${n % 2000}@d${n % 200}.example`
+    for (let start = 0; start < 50_000; start += 500) {
+      const batch: NewMessage[] = []
+      for (let uid = start + 1; uid <= start + 500; uid++)
+        batch.push(
+          message(uid % 5 < 2 ? inboxBox!.id : uid % 5 < 4 ? archive!.id : sent!.id, uid, {
+            ...from(sender(uid)),
+            references: uid % 5 ? ['m' + (uid - (uid % 5)) + '@example.com'] : [],
+            flags: uid % 7 ? ['\\Seen'] : [],
+            ...(uid % 3 ? {} : { unsubscribe: { url: 'https://x.example/u', oneClick: false } }),
+          }),
+        )
+      sync.upsertMessages('a', batch)
+    }
+    const inbox = inboxBox!.id
+    const rules: SplitScope = {
+      kind: 'rules',
+      addresses: [sender(1), sender(2), sender(3)],
+      domains: [domainKey('d10.example'), domainKey('d11.example')],
+    }
+    const imp = important([{ address: sender(4), words: ['subject'] }], [sender(5)])
+    const plans = {
+      rules: sync.explainConversations('a', { mailboxIds: [inbox], split: rules }),
+      important: sync.explainConversations('a', { mailboxIds: [inbox], split: imp }),
+    }
+    for (const details of Object.values(plans))
+      for (const detail of details) expect(detail).not.toMatch(/^SCAN [pmt]\b/)
+    // Each rule is a lookup on its own key, never a walk of the account's participants.
+    const lookups = plans.rules.filter((d) => /participants_(address|domain)/.test(d))
+    expect(lookups.some((d) => d.includes('address=?'))).toBe(true)
+    expect(lookups.some((d) => /domain[=>]/.test(d))).toBe(true)
+    for (const detail of lookups) expect(detail).toMatch(/account_id=\? AND (address|domain)/)
+    const counts = sync.tabCounts('a', inbox, { rules, important: imp })
+    for (const [key, split] of [
+      ['rules', rules],
+      ['important', imp],
+    ] as const) {
+      const page = sync.conversations('a', { mailboxIds: [inbox], split }, { limit: 50 })
+      expect(page.items).toHaveLength(50)
+      expect(counts[key]!.conversations).toBe(page.total)
+    }
+    sync.close()
+  }, 60_000)
 })
