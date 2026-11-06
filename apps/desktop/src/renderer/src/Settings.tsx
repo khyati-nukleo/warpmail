@@ -209,7 +209,9 @@ export function SettingsPanel({
   }
   const update = async (patch: Partial<Preferences>) => {
     try {
-      const next = await api.settings({ ...bootstrap.settings, ...patch })
+      // The cache, so a split inbox save still running isn't undone, as in App.savePreferences.
+      const latest = queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings
+      const next = await api.settings({ ...(latest ?? bootstrap.settings), ...patch })
       onChange(next)
       return true
     } catch (e) {

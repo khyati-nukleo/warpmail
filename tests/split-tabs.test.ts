@@ -5,6 +5,7 @@ import {
   activeTabId,
   addRule,
   adjacentTab,
+  alwaysEntry,
   alwaysShownText,
   dropIndex,
   editorState,
@@ -660,6 +661,40 @@ describe('Settings → Inbox', () => {
     const full = { always: [], never: Array.from({ length: 500 }, (_, i) => i + '@x.example') }
     expect(neverEntry('new@x.example', full)).toEqual({
       problem: 'Never show in Important already lists 500 senders, the most it can.',
+    })
+  })
+
+  it('checks a sender and words typed into Always show', () => {
+    const important = { always: [{ address: 'a@x.example' }], never: ['n@x.example'] }
+    expect(alwaysEntry(' New@X.example ', '', important)).toEqual({
+      address: 'new@x.example',
+      words: [],
+    })
+    expect(alwaysEntry('new@x.example', ' Crash, failure,, crash ', important)).toEqual({
+      address: 'new@x.example',
+      words: ['crash', 'failure'],
+    })
+    // On Never show it moves to Always, as the email's menu does.
+    expect(alwaysEntry('n@x.example', '', important)).toEqual({
+      address: 'n@x.example',
+      words: [],
+    })
+    expect(alwaysEntry('', 'crash', important)).toEqual({})
+    expect(alwaysEntry('@x.example', '', important)).toEqual({
+      problem: 'Enter one email address, like someone@example.com.',
+    })
+    expect(alwaysEntry('A@x.example', '', important)).toEqual({
+      problem: 'a@x.example is already on the list.',
+    })
+    expect(alwaysEntry('new@x.example', 'w'.repeat(101), important)).toEqual({
+      problem: 'Keep each word to 100 characters or fewer.',
+    })
+    const full = {
+      always: Array.from({ length: 500 }, (_, i) => ({ address: i + '@x.example' })),
+      never: [],
+    }
+    expect(alwaysEntry('new@x.example', '', full)).toEqual({
+      problem: 'Always show in Important already lists 500 senders, the most it can.',
     })
   })
 

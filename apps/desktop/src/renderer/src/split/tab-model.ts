@@ -503,6 +503,24 @@ export function neverEntry(
   return limit ? { problem: limit } : { address: rule.value }
 }
 
+/** A sender and subject words typed into Always show, checked like Never show's address. */
+export function alwaysEntry(
+  text: string,
+  wordsText: string,
+  important: ImportantSettings | undefined,
+): { address?: string; words?: string[]; problem?: string } {
+  if (!text.trim()) return {}
+  const rule = parseRule(text)
+  if (rule?.kind !== 'address')
+    return { problem: 'Enter one email address, like someone@example.com.' }
+  if (importantStatus(important, rule.value).always)
+    return { problem: rule.value + ' is already on the list.' }
+  const limit = importantLimit(important, rule.value, 'always')
+  if (limit) return { problem: limit }
+  const problem = wordsProblem(wordsText)
+  return problem ? { problem } : { address: rule.value, words: parseWords(wordsText) }
+}
+
 const counted = (n: number, one: string, many = one + 's') =>
   n.toLocaleString() + ' ' + (n === 1 ? one : many)
 

@@ -7,14 +7,13 @@ import {
   ownAddresses,
   type Bootstrap,
   type InboxImport,
-  type MailQuery,
   type Settings,
   type SplitTab,
 } from '@inlark/core'
 import { api } from '../api'
-import { queryClient } from '../cache'
 import { saveSplitSettings, splitSaves } from './split-saves'
 import {
+  alwaysEntry,
   importedText,
   importantStatus,
   neverEntry,
@@ -59,7 +58,8 @@ export function InboxSettings({
 
   /**
    * Saves through the split inbox's queue, on the latest settings rather than this render's, so
-   * a change made from the tab row or an email meanwhile is kept. Resolves to whether it saved.
+   * a change made from the tab row or an email meanwhile is kept, and reloads the tab lists it
+   * changes. Resolves to whether it saved.
    */
   const save = async (change: (latest: Settings) => Partial<Settings>) => {
     try {
@@ -68,11 +68,6 @@ export function InboxSettings({
       notify(friendlyError(error), 'error')
       return false
     }
-    // Lists in a tab or in Important may now hold other conversations.
-    void queryClient.invalidateQueries({
-      queryKey: ['mail'],
-      predicate: (query) => !!(query.queryKey[1] as MailQuery | undefined)?.tab,
-    })
     return true
   }
   const lists = (latest: Settings) => ({
@@ -94,9 +89,10 @@ export function InboxSettings({
   const exportFile = async () => {
     setBusy('export')
     try {
-      // After any save still running, so the file has it.
-      if (await splitSaves(() => api.exportInbox()))
-        notify('Exported your tabs and Important lists')
+      // After any save still running, so the file has it; the dialog itself waits outside the
+      // queue, so saves from the tab row meanwhile don't wait for it.
+      await splitSaves(async () => {})
+      if (await api.exportInbox()) notify('Exported your tabs and Important lists')
     } catch (error) {
       notify(friendlyError(error), 'error')
     } finally {
@@ -214,9 +210,21 @@ export function InboxSettings({
           </ul>
         ) : (
           <p className={noteClass}>
-            No senders. Use “Always show in Important…” in an email’s menu to add one.
+            No senders yet. Add one here, or use “Always show in Important…” in an email’s menu.
           </p>
         )}
+        <AlwaysField
+          important={settings.important}
+          onAdd={async (address, words) => {
+            let wasNever = false
+            const saved = await save((latest) => {
+              wasNever = importantStatus(latest.important, address).never
+              return { important: setAlways(latest.important, address, words) }
+            })
+            if (saved && wasNever) notify(address + ' is no longer on Never show')
+            return saved
+          }}
+        />
       </section>
 
       <section className={sectionClass} aria-labelledby="inbox-settings-never">
@@ -364,10 +372,93 @@ function AlwaysRow({
           Remove
         </Button>
       </div>
-      <p id={ids + '-hint'} className={cn(problem ? errorClass : 'sr-only', 'basis-full')}>
-        {problem ?? 'Comma-separated. Leave empty to always show this sender.'}
-      </p>
+      {problem ? (
+        // A new element, so the problem is announced as it appears.
+        <p key="problem" id={ids + '-hint'} className={cn(errorClass, 'basis-full')} role="alert">
+          {problem}
+        </p>
+      ) : (
+        <p key="hint" id={ids + '-hint'} className="sr-only">
+          Comma-separated. Leave empty to always show this sender.
+        </p>
+      )}
     </li>
+  )
+}
+
+/** Adds a sender to Always show, with optional subject words, checked as they're typed. */
+function AlwaysField({
+  important,
+  onAdd,
+}: {
+  important: Settings['important']
+  onAdd: (address: string, words: string[]) => Promise<boolean>
+}) {
+  const [text, setText] = useState('')
+  const [words, setWords] = useState('')
+  const [tried, setTried] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const entry = alwaysEntry(text, words, important)
+  const ids = useId()
+  // A half-typed address isn't wrong yet: say so once Add is tried. Words are checked as typed.
+  const wordsIssue = wordsProblem(words)
+  const addressIssue = tried && entry.problem !== wordsIssue ? entry.problem : undefined
+  const problem = addressIssue ?? wordsIssue
+  return (
+    <form
+      className="mt-3"
+      onSubmit={async (event) => {
+        event.preventDefault()
+        setTried(true)
+        if (!entry.address || saving) return
+        setSaving(true)
+        try {
+          if (await onAdd(entry.address, entry.words ?? [])) {
+            setText('')
+            setWords('')
+            setTried(false)
+          }
+        } finally {
+          setSaving(false)
+        }
+      }}
+    >
+      <div className="flex flex-wrap gap-1.5">
+        <input
+          className={cn(fieldClass, 'flex-[1_1_180px] min-w-0')}
+          value={text}
+          placeholder="someone@example.com"
+          aria-label="Address to always show in Important"
+          aria-invalid={!!addressIssue}
+          aria-describedby={problem ? ids + '-problem' : undefined}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          onChange={(event) => {
+            setText(event.target.value)
+            setTried(false)
+          }}
+        />
+        <input
+          className={cn(fieldClass, 'flex-[1_1_180px] min-w-0')}
+          value={words}
+          placeholder="Any subject"
+          aria-label="Subject words, comma-separated (optional)"
+          aria-invalid={!!wordsIssue}
+          aria-describedby={problem ? ids + '-problem' : undefined}
+          spellCheck={false}
+          onChange={(event) => setWords(event.target.value)}
+        />
+        <Button size="small" type="submit" disabled={!text.trim() || saving}>
+          Add
+        </Button>
+      </div>
+      {problem && (
+        <p id={ids + '-problem'} className={errorClass} role="alert">
+          {problem}
+        </p>
+      )}
+    </form>
   )
 }
 

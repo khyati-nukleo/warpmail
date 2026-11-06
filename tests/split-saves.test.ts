@@ -18,7 +18,7 @@ vi.mock('../apps/desktop/src/renderer/src/api', () => ({
 }))
 const client = new QueryClient()
 vi.mock('../apps/desktop/src/renderer/src/cache', () => ({ queryClient: client }))
-const { saveSplitSettings, splitSaves } =
+const { queueTabSave, saveSplitSettings, splitSaves } =
   await import('../apps/desktop/src/renderer/src/split/split-saves')
 
 const cached = () => client.getQueryData<Bootstrap>(['bootstrap'])!.settings
@@ -73,5 +73,79 @@ describe('split inbox saves', () => {
     expect(cached()).toBe(before)
     await saveSplitSettings(() => ({ important: { always: [], never: [] } }))
     expect(cached().important).toEqual({ always: [], never: [] })
+  })
+
+  it('reload tab lists after a change to rules or Important, not after a reorder', async () => {
+    saved.push(defaultSettings)
+    client.setQueryData(['bootstrap'], {
+      accounts: [],
+      settings: {
+        ...defaultSettings,
+        splitTabs: [
+          { id: 'a', name: 'A', rules: ['@a.example'] },
+          { id: 'b', name: 'B', rules: [] },
+        ],
+      },
+    } as unknown as Bootstrap)
+    const tabList = ['mail', { view: 'inbox', tab: 'a' }]
+    const inbox = ['mail', { view: 'inbox' }]
+    const reset = () => {
+      client.setQueryData(tabList, { pages: [] })
+      client.setQueryData(inbox, { pages: [] })
+    }
+    const stale = () => [tabList, inbox].map((key) => !!client.getQueryState(key)?.isInvalidated)
+    reset()
+    await saveSplitSettings((s) => ({ splitTabs: [...s.splitTabs!].reverse() }))
+    expect(stale()).toEqual([false, false])
+    await saveSplitSettings((s) => ({
+      splitTabs: s.splitTabs!.map((t) => ({ ...t, name: t.name + '!' })),
+    }))
+    expect(stale()).toEqual([false, false])
+    await saveSplitSettings((s) => ({
+      splitTabs: s.splitTabs!.map((t) => (t.id === 'a' ? { ...t, rules: ['@b.example'] } : t)),
+    }))
+    expect(stale()).toEqual([true, false])
+    reset()
+    await saveSplitSettings(() => ({ important: { always: [], never: ['x@y.example'] } }))
+    expect(stale()).toEqual([true, false])
+    reset()
+    const save = async (patch: Partial<Settings>) => {
+      client.setQueryData<Bootstrap>(['bootstrap'], (old) => ({
+        ...old!,
+        settings: { ...old!.settings, ...patch },
+      }))
+      return true
+    }
+    expect(await queueTabSave(save, (tabs) => [...tabs].reverse())).toBe(true)
+    expect(stale()).toEqual([false, false])
+    expect(await queueTabSave(save, (tabs) => tabs.filter((t) => t.id !== 'b'))).toBe(true)
+    expect(stale()).toEqual([true, false])
+  })
+
+  it('build each tab row save on the tabs the last save left', async () => {
+    let release: (() => void) | undefined
+    const save = async (patch: Partial<Settings>) => {
+      if (!release) await new Promise<void>((resolve) => (release = resolve))
+      client.setQueryData<Bootstrap>(['bootstrap'], (old) => ({
+        ...old!,
+        settings: { ...old!.settings, ...patch },
+      }))
+      return true
+    }
+    const first = queueTabSave(save, (tabs) => [...tabs, { id: 'b', name: 'B', rules: [] }])
+    const second = queueTabSave(save, (tabs) => [...tabs, { id: 'c', name: 'C', rules: [] }])
+    // Nothing to save resolves at once, as saved, without a save.
+    const third = queueTabSave(save, () => undefined)
+    await vi.waitFor(() => expect(release).toBeDefined())
+    release!()
+    expect(await Promise.all([first, second, third])).toEqual([true, true, true])
+    expect(cached().splitTabs!.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+    // A failed save resolves false and leaves the next one to build on what was saved.
+    const failed = await queueTabSave(
+      async () => false,
+      (tabs) => tabs.slice(0, 1),
+    )
+    expect(failed).toBe(false)
+    expect(cached().splitTabs!.map((t) => t.id)).toEqual(['a', 'b', 'c'])
   })
 })

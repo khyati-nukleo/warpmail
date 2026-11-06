@@ -55,7 +55,7 @@ export function TabRow({
 }: {
   entries: TabEntry[]
   active: string
-  /** Unread conversations by tab id; zero and missing counts are hidden. */
+  /** Unread emails by tab id; zero and missing counts are hidden. */
   counts: Record<string, number>
   onSelect: (id: string) => void
   /** Moves a user tab to `toIndex` among the user tabs. */

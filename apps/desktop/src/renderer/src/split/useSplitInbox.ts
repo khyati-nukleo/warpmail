@@ -18,7 +18,6 @@ import {
   type Address,
   type Bootstrap,
   type ImportantSettings,
-  type MailQuery,
   type Message,
   type Settings,
   type SplitTab,
@@ -59,7 +58,7 @@ import {
   whenIdle,
   type TabAction,
 } from './tab-model'
-import { splitSaves } from './split-saves'
+import { queueTabSave, reloadTabLists, splitSaves } from './split-saves'
 import type { TabDialogState } from './TabEditor'
 import type { TabMenuState } from './TabRow'
 
@@ -137,9 +136,11 @@ export function useSplitInbox({
     if (visible && !route.thread && id === active) return
     go({ view: 'inbox', account: route.account, tab: id === 'inbox' ? undefined : id })
   }
-  // Split saves run one at a time, here and in Settings → Inbox, so none races another.
+  // Split saves run one at a time, here and in Settings → Inbox, so none races another, and each
+  // builds on the tabs the one before left. Lists of changed tabs reload once saved.
   const queue = splitSaves
-  const saveTabs = (tabs: SplitTab[]) => queue(() => saveSettings({ splitTabs: tabs }))
+  const saveTabs = (change: (latest: SplitTab[]) => SplitTab[] | undefined) =>
+    queueTabSave(saveSettings, change)
 
   // While reorders save: the order last dropped, and the last one known to be saved.
   const shownOrder = useRef<SplitTab[]>(undefined)
@@ -157,7 +158,7 @@ export function useSplitInbox({
     if (!shownOrder.current) savedOrder.current = before
     shownOrder.current = tabs
     showTabs(tabs)
-    void saveTabs(tabs).then((saved) => {
+    void saveTabs((latest) => moveTab(latest, id, toIndex)).then((saved) => {
       if (saved) savedOrder.current = tabs
       // A newer order is waiting to save; keep it on screen over this save's result.
       if (shownOrder.current !== tabs) return showTabs(shownOrder.current!)
@@ -212,10 +213,13 @@ export function useSplitInbox({
    * sender. A failed save keeps the box open.
    */
   const saveTab = async (tab: SplitTab) => {
-    const tabs = latestTabs()
-    const added = !tabs.some((t) => t.id === tab.id)
+    let added = false
     const sender = dialog?.kind === 'edit' ? dialog.added : undefined
-    if (!(await saveTabs(putTab(tabs, tab)))) return
+    const saved = await saveTabs((latest) => {
+      added = !latest.some((t) => t.id === tab.id)
+      return putTab(latest, tab)
+    })
+    if (!saved) return
     closeDialog()
     if (sender) {
       if (tab.rules.some((r) => r.toLowerCase() === sender.toLowerCase()))
@@ -223,7 +227,7 @@ export function useSplitInbox({
     } else if (added) select(tab.id)
   }
   const deleteTab = async (tab: SplitTab) => {
-    if (!(await saveTabs(latestTabs().filter((t) => t.id !== tab.id)))) return
+    if (!(await saveTabs((latest) => latest.filter((t) => t.id !== tab.id)))) return
     // The tab's button is gone, so focus the active tab: Inbox when it was this one.
     closeDialog(true)
     if (tab.id === active) select('inbox')
@@ -268,10 +272,15 @@ export function useSplitInbox({
   }
   /** Adds the rule to a tab, or a new tab named as typed; a failed save keeps the picker open. */
   const pickTab = async (target: { id?: string; name?: string }, rule: string) => {
-    const result = addRule(latestTabs(), target, rule)
-    const tab = result.tabs.find((t) => t.id === result.tabId)
-    if (!tab) return closePicker()
-    if (!result.already && !(await saveTabs(result.tabs))) return
+    let result: ReturnType<typeof addRule> | undefined
+    const saved = await saveTabs((latest) => {
+      result = addRule(latest, target, rule)
+      const found = result.tabs.some((t) => t.id === result!.tabId)
+      return found && !result.already ? result.tabs : undefined
+    })
+    const tab = result?.tabs.find((t) => t.id === result!.tabId)
+    if (!result || !tab) return closePicker()
+    if (!saved) return
     closePicker()
     notify(result.already ? 'Already in ' + tab.name : 'Added ' + rule + ' to ' + tab.name)
   }
@@ -302,11 +311,7 @@ export function useSplitInbox({
     queue(async () => {
       const before = latestImportant()
       if (!(await saveSettings({ important: change(before) }))) return false
-      // Tab counts follow on their own: their key holds these lists.
-      void queryClient.invalidateQueries({
-        queryKey: ['mail'],
-        predicate: (query) => (query.queryKey[1] as MailQuery | undefined)?.tab === 'important',
-      })
+      reloadTabLists('important')
       return { before }
     })
 
