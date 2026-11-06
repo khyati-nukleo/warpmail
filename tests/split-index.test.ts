@@ -155,6 +155,41 @@ describe('schema v4', () => {
     expect(read('SELECT count(*) AS n FROM participants')).toEqual([{ n: 1 }])
   })
 
+  it('keeps header-derived automation when v4 runs again', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [message(box, 1)])
+    await index.upsertMessages('a', [
+      message(box, 1, { automation: { listId: null, precedence: 'bulk', autoSubmitted: null } }),
+    ])
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec('PRAGMA user_version = 3')
+    db.close()
+    index = openInProcessIndex(path)
+    await index.close()
+    expect(read('SELECT automated, headers_checked FROM messages')).toEqual([
+      { automated: 1, headers_checked: 1 },
+    ])
+  })
+
+  it('writes one participant per address and role and skips empty domains', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [
+      message(box, 1, {
+        to: [
+          { name: '', email: 'Me@example.com' },
+          { name: '', email: 'me@example.com' },
+          { name: '', email: 'broken@' },
+        ],
+      }),
+    ])
+    await index.close()
+    expect(read('SELECT address, role, domain FROM participants ORDER BY role')).toEqual([
+      { address: 'ada@example.com', role: 'from', domain: 'com.example' },
+      { address: 'me@example.com', role: 'to', domain: 'com.example' },
+    ])
+  })
+
   it('stores participants and automation for new mail', async () => {
     const box = await inbox()
     await index.upsertMessages('a', [

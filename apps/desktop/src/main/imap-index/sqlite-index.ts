@@ -2,7 +2,8 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlit
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { domainKey, isAutomatedMessage } from '@inlark/core'
+import { isAutomatedMessage } from '@inlark/core'
+import { firstEmail, migrateToV4, participantsOf } from './split-schema'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -169,110 +170,6 @@ const migrations: (string | ((db: DatabaseSync) => void))[] = [
     ON messages (account_id, mailbox_id, received_ms);`,
   migrateToV4,
 ]
-
-type Role = 'from' | 'to' | 'cc'
-
-/** Lowercased addresses with a domain key; entries without an `@` are skipped. */
-function participantsOf(roles: Record<Role, readonly { email: string }[]>) {
-  const rows: { address: string; domain: string; role: Role }[] = []
-  for (const role of ['from', 'to', 'cc'] as const)
-    for (const { email } of roles[role]) {
-      const address = String(email ?? '')
-        .trim()
-        .toLowerCase()
-      const at = address.lastIndexOf('@')
-      if (at < 0) continue
-      rows.push({ address, domain: domainKey(address.slice(at + 1)), role })
-    }
-  return rows
-}
-
-function firstEmail(from: readonly { email: string }[]) {
-  const address = String(from[0]?.email ?? '')
-    .trim()
-    .toLowerCase()
-  return address.includes('@') ? address : null
-}
-
-function parseAddresses(text: string): { email: string }[] {
-  try {
-    const value = JSON.parse(text)
-    return Array.isArray(value) ? value.filter((a) => a && typeof a.email === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-/** Written to run again over a file that already has v4, like the sources migration. */
-function migrateToV4(db: DatabaseSync) {
-  const have = new Set(
-    (db.prepare('PRAGMA table_info(messages)').all() as { name: string }[]).map((c) => c.name),
-  )
-  for (const [name, type] of [
-    ['from_email', 'TEXT'],
-    ['list_id', 'TEXT'],
-    ['precedence', 'TEXT'],
-    ['auto_submitted', 'TEXT'],
-    ['headers_checked', 'INTEGER NOT NULL DEFAULT 0'],
-    ['automated', 'INTEGER NOT NULL DEFAULT 0'],
-  ])
-    if (!have.has(name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${type}`)
-  db.exec(`CREATE TABLE IF NOT EXISTS participants (
-      account_id TEXT NOT NULL,
-      message_seq INTEGER NOT NULL REFERENCES messages (seq) ON DELETE CASCADE,
-      address TEXT NOT NULL,
-      domain TEXT NOT NULL,
-      role TEXT NOT NULL
-    );
-    DELETE FROM participants;
-    CREATE INDEX IF NOT EXISTS participants_message ON participants (message_seq);
-    CREATE INDEX IF NOT EXISTS participants_address ON participants (account_id, address);
-    CREATE INDEX IF NOT EXISTS participants_domain ON participants (account_id, domain);
-    CREATE INDEX IF NOT EXISTS messages_mailbox_sender
-      ON messages (account_id, mailbox_id, from_email);`)
-  const insert = db.prepare(
-    'INSERT INTO participants (account_id, message_seq, address, domain, role) VALUES (?, ?, ?, ?, ?)',
-  )
-  const update = db.prepare('UPDATE messages SET from_email = ?, automated = ? WHERE seq = ?')
-  const page = db.prepare(
-    `SELECT seq, account_id, from_addr, to_addr, cc_addr, unsubscribe FROM messages
-      WHERE seq > ? ORDER BY seq LIMIT 1000`,
-  )
-  type Row = {
-    seq: number
-    account_id: string
-    from_addr: string
-    to_addr: string
-    cc_addr: string
-    unsubscribe: string | null
-  }
-  // Paged by seq so rows are never loaded all at once or revisited after being updated.
-  let after = 0
-  for (;;) {
-    const rows = page.all(after) as Row[]
-    if (!rows.length) break
-    after = rows[rows.length - 1]!.seq
-    backfill(rows)
-  }
-
-  function backfill(rows: Row[]) {
-    for (const row of rows) {
-      const from = parseAddresses(row.from_addr)
-      const fromEmail = firstEmail(from)
-      for (const p of participantsOf({
-        from,
-        to: parseAddresses(row.to_addr),
-        cc: parseAddresses(row.cc_addr),
-      }))
-        insert.run(row.account_id, row.seq, p.address, p.domain, p.role)
-      const automated = isAutomatedMessage({
-        fromEmail: fromEmail ?? undefined,
-        unsubscribe: row.unsubscribe,
-      })
-      update.run(fromEmail, automated ? 1 : 0, row.seq)
-    }
-  }
-}
 
 interface MailboxRow {
   id: string
