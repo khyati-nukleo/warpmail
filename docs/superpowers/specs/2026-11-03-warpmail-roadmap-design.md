@@ -270,7 +270,7 @@ Not designed yet. Notes so far:
 Raised by the review on 2026-11-03, not answered yet. Each blocks the design pass noted.
 
 1. **Other devices.** Does Khyati also read or send mail on a phone, another computer or Gmail on the web? If yes, projects, reminders and read-status data need to sync, and replies sent elsewhere must count. Superhuman's phone app goes away on cancelling. _Blocks: 2, 3._
-2. **Company approval.** Does Khyati's company need to approve sending client email to an AI service and adding read tracking to client mail (company policy, client contracts, Québec's Law 25)? _Blocks: 4, 5._
+2. ~~**Company approval.**~~ **Answered 2026-11-05:** Khyati's company has approved both sending client email to an AI service and tracking opens on client mail. _No longer blocks 4 or 5._
 3. **Where Warpmail runs.** Native Windows, or inside WSL? This affects secure password storage, notifications, and whether the app stays open all day. _Blocks: 1 (testing), 3._
 4. **Switch point.** Which features must exist before cancelling Superhuman? If undo send, snooze or snippets are daily habits, they move ahead of read status. _Affects: order._
 

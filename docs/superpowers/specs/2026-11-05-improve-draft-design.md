@@ -2,7 +2,7 @@
 
 Feature 4 of the [Warpmail roadmap](2026-11-03-warpmail-roadmap-design.md). Decisions made with Khyati on 2026-11-05.
 
-**Status:** designed; **build when Khyati has an Anthropic API key.** Also open: whether Khyati's company must approve sending client email to an AI service (roadmap open question 2).
+**Status:** designed; **build when Khyati has an Anthropic API key.** The company has approved sending client email to an AI service (2026-11-05).
 
 ## What it is
 

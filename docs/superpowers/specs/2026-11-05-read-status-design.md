@@ -2,7 +2,7 @@
 
 Feature 5 of the [Warpmail roadmap](2026-11-03-warpmail-roadmap-design.md). Decisions made with Khyati on 2026-11-03 and 2026-11-05.
 
-**Before switching it on for client mail:** Khyati checks whether the company's policy, or Québec's Law 25, requires approval for tracking opens. This is roadmap open question 2. It doesn't block building.
+**Approved:** Khyati's company has approved tracking opens on client mail (2026-11-05).
 
 ## What it is
 
