@@ -81,6 +81,43 @@ export interface MetadataIndex {
 
   getMeta(accountId: string, key: string): Promise<string | undefined>
   setMeta(accountId: string, key: string, value: string | undefined): Promise<void>
+
+  /**
+   * Original sources kept on disk so recent mail opens without the server. An entry is keyed by
+   * the server identity when known (Gmail's copies share one), otherwise by location. It is
+   * dropped when its email is gone from every indexed location, so a removed message or a
+   * UIDVALIDITY reset takes it along. Only what the server sent is stored, never decrypted text.
+   */
+  storedSource(accountId: string, message: SourceLocation): Promise<Uint8Array | undefined>
+  /**
+   * Stores sources of messages still indexed, then drops the oldest mail (by received date)
+   * until the account's sources fit in `limitBytes`. Returns the locations written; the rest
+   * were removed meanwhile or would only have been evicted at once.
+   */
+  storeSources(
+    accountId: string,
+    sources: { message: SourceLocation & { receivedAt: string }; raw: Uint8Array }[],
+    limitBytes: number,
+  ): Promise<MessageLocation[]>
+  /** Messages worth storing next, newest first: unstored, recent, small, and not evicted at once. */
+  sourceCandidates(accountId: string, filter: SourceCandidateFilter): Promise<IndexedMessage[]>
+}
+
+export interface SourceLocation extends MessageLocation {
+  emailId?: string
+}
+
+export interface SourceCandidateFilter {
+  mailboxIds: string[]
+  /** ISO date; only mail received at or after it. */
+  after: string
+  /** Largest RFC822.SIZE to include. */
+  maxSize: number
+  limit: number
+  /** The store's cap: older mail that would only be evicted again is left out. */
+  limitBytes: number
+  /** Message IDs to skip, e.g. ones that could not be downloaded this session. */
+  exclude?: string[]
 }
 
 export interface FolderListing {

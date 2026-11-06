@@ -20,6 +20,7 @@ import type {
   SearchCriteria,
   SelectedMailbox,
 } from './port'
+import { imapPerf } from './perf' // Warpmail perf log (temporary)
 
 const tlsCodes = new Set(['ERR_SSL_WRONG_VERSION_NUMBER', 'EPROTO'])
 
@@ -149,7 +150,10 @@ export class ImapFlowPort implements ImapPort {
   ) {
     this.client = new ImapFlow(imapFlowOptions(options, purpose))
     // Errors also surface as rejected commands and a `close` event; never crash the process.
-    this.client.on('error', () => {})
+    // Warpmail perf log (temporary): record the error code, which explains a following close.
+    this.client.on('error', (error: { code?: unknown }) =>
+      imapPerf('imap:error', { purpose, code: String(error?.code ?? 'unknown') }),
+    )
   }
   get capabilities(): ReadonlySet<string> {
     return new Set([...this.client.capabilities.keys()].map((c) => c.toUpperCase()))
@@ -203,7 +207,10 @@ export class ImapFlowPort implements ImapPort {
         specialUse:
           entry.specialUseSource === 'extension' && entry.specialUse !== '\\Inbox'
             ? entry.specialUse || null
-            : null,
+            : // Gmail's Important folder (RFC 8457), which ImapFlow does not report.
+              [...entry.flags].some((f) => /^\\important$/i.test(f))
+              ? '\\Important'
+              : null,
         guessedSpecialUse:
           entry.specialUseSource === 'name' && entry.specialUse !== '\\Inbox'
             ? entry.specialUse || null
@@ -221,6 +228,7 @@ export class ImapFlowPort implements ImapPort {
         uidValidity: true,
         ...(this.condstore || this.can('CONDSTORE') ? { highestModseq: true } : {}),
       })
+      if (!s) throw new ProviderError('command', 'The server did not report the folder status.')
       return {
         messages: s.messages ?? 0,
         unseen: s.unseen ?? 0,
@@ -299,7 +307,25 @@ export class ImapFlowPort implements ImapPort {
         uid: true,
         maxBytes: maxBytes + 1,
       })
+      if (!content) return undefined
       return bytes(content, maxBytes, false)
+    })
+  }
+  sources(uids: number[], maxBytes: number): Promise<Map<number, Uint8Array>> {
+    return this.wrap(async () => {
+      const result = new Map<number, Uint8Array>()
+      if (!uids.length) return result
+      // ImapFlow's `source` is BODY.PEEK[]: reading ahead must never mark mail read.
+      for await (const m of this.client.fetch(
+        uids.join(','),
+        { uid: true, size: true, source: true },
+        { uid: true },
+      )) {
+        const raw = m.source
+        if (!m.uid || !raw || (m.size ?? 0) > maxBytes || raw.byteLength > maxBytes) continue
+        result.set(m.uid, new Uint8Array(raw))
+      }
+      return result
     })
   }
   download(uid: number, part: string, maxBytes: number, truncate = false): Promise<Uint8Array> {
@@ -309,6 +335,8 @@ export class ImapFlowPort implements ImapPort {
         maxBytes: maxBytes + 1,
         ...(truncate ? { chunkSize: Math.min(65536, Math.max(1024, maxBytes)) } : {}),
       })
+      if (!content)
+        throw new ProviderError('notFound', 'This message part is no longer on the server.')
       return bytes(content, maxBytes, truncate)
     })
   }
@@ -318,9 +346,13 @@ export class ImapFlowPort implements ImapPort {
         uid: true,
         ...(unchangedSince && this.condstore ? { unchangedSince: BigInt(unchangedSince) } : {}),
       }
-      return operation === 'add'
-        ? this.client.messageFlagsAdd(uids.join(','), flags, options)
-        : this.client.messageFlagsRemove(uids.join(','), flags, options)
+      const stored =
+        operation === 'add'
+          ? await this.client.messageFlagsAdd(uids.join(','), flags, options)
+          : await this.client.messageFlagsRemove(uids.join(','), flags, options)
+      // ImapFlow reports a rejected or unsent STORE only by returning false.
+      if (!stored) throw new ProviderError('command', 'The server did not change the flags.')
+      return true
     })
   }
   move(uids: number[], destination: string): Promise<CopyResult | false> {

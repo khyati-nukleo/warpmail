@@ -1,5 +1,6 @@
 import { EncryptionService, type CryptoTransport } from './encryption'
 import { securityKind, maxMessageBytes } from '@inlark/crypto'
+import { perfSpan } from './perf-log' // Warpmail perf log (temporary)
 import { randomUUID, X509Certificate, createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile, copyFile, rm, stat, chmod, open } from 'node:fs/promises'
 import { join, basename, extname } from 'node:path'
@@ -116,9 +117,30 @@ type Journal = {
    */
   sentCopy?: 'pending' | 'appending' | 'uncertain' | 'failed' | 'filed' | 'server' | 'dismissed'
   sentCopyError?: string
+  /** Why a `rejected` attempt was not sent, shown on its draft until the draft is edited. */
+  error?: string
+  errorKind?: DraftErrorKind
+  /** The server draft this message replaced, kept until it has been removed. */
+  previousDraft?: Pick<Draft, 'serverId' | 'serverFingerprint' | 'encryption'>
   /** The user has seen and resolved this attempt. */
   dismissed?: boolean
   at: string
+}
+/** Drafts are saved to the server only after this long without an edit; local saves are instant. */
+const draftIdleMs = 10_000
+const interruptedSend = 'Sending was interrupted before the message left. Review it and send again.'
+/** How long send waits for a draft save already in progress before asking to retry. */
+const draftSaveWaitMs = 60_000
+/** Settles when `promise` does or after `ms`, whichever comes first. Never rejects. */
+const settledWithin = (promise: Promise<unknown>, ms: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    promise.then(
+      () => {},
+      () => {},
+    ),
+    new Promise<void>((resolve) => (timer = setTimeout(resolve, ms))),
+  ]).finally(() => clearTimeout(timer))
 }
 /** Errors that prove nothing left for recipients during submission. */
 const definiteSubmissionCodes = [
@@ -198,8 +220,16 @@ export class MailService {
   private undos = new Map<string, UndoEntry[]>()
   private writes = new Map<string, Promise<unknown>>()
   private busyDrafts = new Set<string>()
+  /** Server draft saves in flight, so send can wait for one instead of refusing. */
+  private draftSyncs = new Map<string, Promise<Draft>>()
   private refreshing = new Set<string>()
   private filing = new Set<string>()
+  /** Accepted sends still filing their Sent copy and tidying up drafts in the background. */
+  private finishing = new Map<string, Promise<void>>()
+  /** Drafts a send has claimed, from the moment it is called. */
+  private sending = new Set<string>()
+  /** Settles as each send call returns, so a quit can wait for them. */
+  private sendRuns = new Set<Promise<void>>()
   private unreadCounts = new Map<string, number>()
   private notificationBaseline = new Map<string, string>()
   private authArrivals = new Map<string, { since: number; seen: Map<string, number> }>()
@@ -258,16 +288,24 @@ export class MailService {
         await this.completeDraft(draft)
       if (journal.state === 'preparing') {
         // Submission only starts after `submitting` is durable, so nothing left the device.
-        this.journals.delete(journal.draftId)
+        // Kept as a refused attempt, so the draft goes on saying why it was not sent.
+        Object.assign(journal, {
+          state: 'rejected',
+          error: interruptedSend,
+          errorKind: 'connection',
+        })
+        journal.mime = undefined
         await this.removeMime(journal.draftId)
-        if (draft)
-          this.localDrafts.set(draft.id, {
-            ...draft,
-            status: 'local',
-            error: 'Sending was interrupted before the message left. Review it and send again.',
-            errorKind: 'connection',
-          })
+        if (draft) this.localDrafts.set(draft.id, { ...draft, status: 'local' })
       }
+      const current = this.localDrafts.get(journal.draftId)
+      const note = current && this.notSentNote(current)
+      if (note && current.error !== note.error)
+        this.localDrafts.set(current.id, {
+          ...current,
+          error: note.error,
+          errorKind: note.errorKind,
+        })
       if (journal.state === 'submitting') {
         journal.state = 'uncertain'
         if (draft)
@@ -355,6 +393,8 @@ export class MailService {
     this.protectionTransition = true
     try {
       await this.draftWrites
+      // Sent messages still filing their copy finish first; that never takes user input.
+      await Promise.all(this.finishing.values())
       if (this.busyDrafts.size)
         throw new Error('Wait for drafts and sends to finish before locking.')
       await this.persistDrafts()
@@ -850,15 +890,29 @@ export class MailService {
       }),
     )
   }
-  conversation = (id: string, threadId: string) =>
+  conversation = (id: string, threadId: string, options?: { prefetch?: boolean }) =>
     this.guard(id, async (p, a) => {
-      const messages = await p.conversation(a, threadId)
-      return Promise.all(
+      const span = perfSpan('conversation:open', { account: id }) // Warpmail perf log (temporary)
+      // Reading ahead waits behind the user's own work on the provider's connection.
+      const background = { background: !!options?.prefetch }
+      const messages = await p.conversation(a, threadId, background)
+      span.mark('providerConversation') // Warpmail perf log (temporary)
+      const rawMessage = p.rawMessage
+      // Largest original read ahead: one short background task on a slow link.
+      const readAheadSourceBytes = 768 * 1024
+      const result = await Promise.all(
         messages.map(async (message) => {
-          const read = p.rawMessage
+          // A large original is downloaded by the open, not by a background task the user's
+          // open would queue behind. Until then it is neither decrypted nor verified, so it
+          // carries no body: the reader shows it loading rather than as plain, unsigned mail.
+          if (rawMessage && options?.prefetch && message.size > readAheadSourceBytes) {
+            const { html: _html, text: _text, ...pending } = message
+            return pending
+          }
+          const read = rawMessage
             ? await this.encryption.read(
                 message,
-                await p.rawMessage(a, message.id, maxMessageBytes),
+                await rawMessage.call(p, a, message.id, maxMessageBytes, background),
               )
             : message
           const candidate = this.messageAuthCandidate(read)
@@ -868,6 +922,9 @@ export class MailService {
           }
         }),
       )
+      span.mark('rawMessageAndDecrypt') // Warpmail perf log (temporary)
+      span.end({ messages: messages.length }) // Warpmail perf log (temporary)
+      return result
     })
   query = async (query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage> => {
     const accounts = this.accounts.filter(
@@ -1102,6 +1159,17 @@ export class MailService {
     const existing = [...this.localDrafts.values()].find(
       (d) => d.accountId === accountId && d.serverId === messageId,
     )
+    const replacedBy = [...this.journals.values()].find(
+      (j) => j.accountId === accountId && j.previousDraft?.serverId === messageId,
+    )
+    if (replacedBy?.state === 'uncertain')
+      throw new Error(
+        replacedBy.dismissed
+          ? 'This message may already have been sent. Check Sent before writing it again.'
+          : 'Delivery isn’t confirmed yet. See Needs attention.',
+      )
+    if (existing?.status === 'sent' || replacedBy)
+      throw new Error('This message has already been sent.')
     if (existing) return existing
     const [message] = await this.guard(accountId, async (p, a) => {
       const [m] = await p.messages(a, [messageId], true)
@@ -1154,7 +1222,12 @@ export class MailService {
     if (this.protectionTransition) throw new Error('Wait for the vault to finish locking.')
     this.account(draft.accountId)
     const old = this.localDrafts.get(draft.id)
-    if (this.busyDrafts.has(draft.id) || old?.status === 'uncertain' || old?.status === 'sent')
+    // A send owns its draft. A server save does not: edits made meanwhile still reach disk.
+    if (
+      (this.busyDrafts.has(draft.id) && !this.draftSyncs.has(draft.id)) ||
+      old?.status === 'uncertain' ||
+      old?.status === 'sent'
+    )
       return old || draft
     if (old && old.updatedAt > draft.updatedAt) return old
     // Server revisions belong to the main process. An edit captured before a sync reply
@@ -1226,10 +1299,31 @@ export class MailService {
     }
     return { ...draft, attachments }
   }
+  /** A draft being sent, or with a send on record, belongs to the send, not to draft saves. */
+  private claimedBySend(id: string) {
+    const journal = this.journals.get(id)
+    return this.sending.has(id) || (!!journal && journal.state !== 'rejected')
+  }
   syncDraft = async (input: Draft): Promise<Draft> => {
     if (this.protectionTransition) throw new Error('The vault is locking.')
-    if (this.busyDrafts.has(input.id)) return this.localDrafts.get(input.id) || input
+    if (this.busyDrafts.has(input.id) || this.claimedBySend(input.id))
+      return this.localDrafts.get(input.id) || input
+    // One server save per draft at a time: a second request joins it. Its content is still
+    // saved locally, and a later background save sends it on.
+    const running = this.draftSyncs.get(input.id)
+    if (running) return this.saveDraft(input).then(() => running)
+    const sync = this.syncDraftNow(input)
+    this.draftSyncs.set(input.id, sync)
+    try {
+      return await sync
+    } finally {
+      if (this.draftSyncs.get(input.id) === sync) this.draftSyncs.delete(input.id)
+    }
+  }
+  private async syncDraftNow(input: Draft): Promise<Draft> {
+    const span = perfSpan('syncDraft', { account: input.accountId }) // Warpmail perf log (temporary)
     input = await this.saveDraft(input)
+    span.mark('saveDraft') // Warpmail perf log (temporary)
     this.busyDrafts.add(input.id)
     let committed: Draft | undefined
     try {
@@ -1260,12 +1354,16 @@ export class MailService {
             'This draft changed in another client. Your local copy is safe; save it as a new draft to keep both versions.',
           )
       }
+      span.mark('serverDraftCheck') // Warpmail perf log (temporary)
       const protectedMime =
         input.encryption === 'encrypt'
           ? await this.protectedMime(input, randomUUID() + '@inlark.local', true)
           : undefined
+      span.mark('protectedMime') // Warpmail perf log (temporary)
       const draft = protectedMime ? input : await this.uploadDraft(input)
+      span.mark('uploadDraft') // Warpmail perf log (temporary)
       const serverId = await provider.createDraft(account, draft, undefined, protectedMime)
+      span.mark('createDraft') // Warpmail perf log (temporary)
       const [remote] = await this.serverMessages(
         provider,
         account,
@@ -1273,19 +1371,25 @@ export class MailService {
         true,
         input.encryption === 'encrypt',
       )
+      // A failed send's reason outlives server saves; editing the draft clears it.
+      const note = this.sending.has(input.id) ? undefined : this.notSentNote(input)
       const saved: Draft = {
         ...draft,
         serverId,
         serverFingerprint: remote ? draftFingerprint(remote) : undefined,
         status: 'synced',
-        error: undefined,
-        errorKind: undefined,
+        error: note?.error,
+        errorKind: note?.errorKind,
       }
+      span.mark('readBackDraft') // Warpmail perf log (temporary)
       committed = saved
-      this.localDrafts.set(saved.id, saved)
+      this.commitSync(saved)
       await this.persistDrafts()
+      span.mark('persistDrafts') // Warpmail perf log (temporary)
       if (input.serverId && input.serverId !== serverId)
         await this.removePreviousDraft(provider, account, input)
+      span.mark('removePreviousDraft') // Warpmail perf log (temporary)
+      span.end({ ok: true, replaced: !!input.serverId }) // Warpmail perf log (temporary)
       this.emit({ type: 'changed', accountId: account.id })
       return saved
     } catch (error) {
@@ -1295,15 +1399,30 @@ export class MailService {
         error: friendlyError(error),
         errorKind: errorKind(error),
       }
-      this.localDrafts.set(saved.id, saved)
+      span.end({ ok: false }) // Warpmail perf log (temporary)
+      this.commitSync(saved)
       await this.persistDrafts()
       return saved
     } finally {
       this.busyDrafts.delete(input.id)
     }
   }
+  /** Records a server save, keeping any newer edit that was saved locally while it ran. */
+  private commitSync(result: Draft) {
+    const current = this.localDrafts.get(result.id)
+    this.localDrafts.set(
+      result.id,
+      current && current.updatedAt > result.updatedAt
+        ? { ...current, serverId: result.serverId, serverFingerprint: result.serverFingerprint }
+        : result,
+    )
+  }
   /** Removes a replaced server draft only if nobody else changed it since it was read. */
-  private async removePreviousDraft(provider: MailProvider, account: Account, draft: Draft) {
+  private async removePreviousDraft(
+    provider: MailProvider,
+    account: Account,
+    draft: Pick<Draft, 'serverId' | 'serverFingerprint' | 'encryption'>,
+  ) {
     const [remote] = await this.serverMessages(
       provider,
       account,
@@ -1327,11 +1446,14 @@ export class MailService {
       throw new Error('Your new draft is saved. The previous server copy could not be removed.')
   }
   private async completeDraft(draft: Draft) {
+    // A replaced server draft not yet removed stays linked, so it is never offered as a draft.
+    const replaced = this.journals.get(draft.id)?.previousDraft
     // Keep a minimal tombstone so a stale renderer copy cannot reappear after a crash.
     this.localDrafts.set(draft.id, {
       id: draft.id,
       accountId: draft.accountId,
       identityId: draft.identityId,
+      ...(replaced ? { serverId: replaced.serverId } : {}),
       to: [],
       cc: [],
       bcc: [],
@@ -1467,8 +1589,11 @@ export class MailService {
       refused.has(a.email.toLowerCase()),
     )
   }
-  private sendResult(journal: Journal, draft?: Draft): SendResult {
-    const pending = ['pending', 'appending', 'uncertain', 'failed'].includes(journal.sentCopy || '')
+  /** `filing` reports a send whose Sent copy is still being filed in the background. */
+  private sendResult(journal: Journal, draft?: Draft, filing = false): SendResult {
+    const pending =
+      !filing && ['pending', 'appending', 'uncertain', 'failed'].includes(journal.sentCopy || '')
+    const sentCopy = filing ? {} : { sentCopy: pending ? ('pending' as const) : ('filed' as const) }
     if (journal.state === 'partial') {
       const rejected = draft ? this.rejectedAddresses(draft, journal) : []
       return {
@@ -1479,25 +1604,101 @@ export class MailService {
           ' refused the message.' +
           (pending ? ' Sent copy pending.' : ''),
         rejected,
-        sentCopy: pending ? 'pending' : 'filed',
+        ...sentCopy,
       }
     }
     return {
       status: 'sent',
       message: pending ? 'Message sent. Sent copy pending.' : 'Message sent.',
-      sentCopy: pending ? 'pending' : 'filed',
+      ...sentCopy,
     }
   }
   send = async (input: Draft): Promise<SendResult> => {
     if (this.protectionTransition) throw new Error('The vault is locking.')
-    let draft = sendDraftSchema.parse(input)
+    const draft = sendDraftSchema.parse(input)
     if (!draft.to.length && !draft.cc.length && !draft.bcc.length)
       throw new Error('Add at least one recipient.')
-    if (this.busyDrafts.has(draft.id))
+    // Already accepted and still filing its copy: report it, never submit again.
+    if (this.finishing.has(draft.id)) return this.reconcile(draft.id)
+    if (this.sending.has(draft.id)) throw new Error('This message is already sending.')
+    // Claimed before any await, so no second send or background save can slip in.
+    this.sending.add(draft.id)
+    let returned!: () => void
+    const run = new Promise<void>((resolve) => (returned = resolve))
+    this.sendRuns.add(run)
+    try {
+      return await this.sendDraft(draft)
+    } catch (error) {
+      // Nothing left the device, so the draft keeps the reason until it is edited.
+      if (!this.journals.has(draft.id) || this.journals.get(draft.id)!.state === 'rejected')
+        await this.noteNotSent(draft.id, friendlyError(error), errorKind(error))
+      throw error
+    } finally {
+      this.sending.delete(draft.id)
+      this.sendRuns.delete(run)
+      returned()
+    }
+  }
+  /**
+   * Settles once no send is submitting or still filing its Sent copy, so quitting can wait for
+   * them. Undefined when nothing is sending.
+   */
+  sendsSettled(): Promise<void> | undefined {
+    const pending = [...this.sendRuns, ...this.finishing.values()]
+    if (!pending.length) return undefined
+    // A send that returns hands over to its finishing work, so check again.
+    return Promise.allSettled(pending).then(() => this.sendsSettled())
+  }
+  /**
+   * Records why a draft was not sent, as a refused attempt, and (unless `onDraft` is false)
+   * notes it on the saved draft. The draft's content is left exactly as saved.
+   */
+  private async noteNotSent(id: string, error: string, kind?: DraftErrorKind, onDraft = true) {
+    const draft = this.localDrafts.get(id)
+    const journal = this.journals.get(id)
+    if (
+      !draft ||
+      this.protectionTransition ||
+      ['sending', 'sent', 'uncertain'].includes(draft.status) ||
+      (journal && journal.state !== 'rejected')
+    )
+      return
+    this.journals.set(id, {
+      ...(journal || { draftId: id, accountId: draft.accountId, subject: draft.subject }),
+      state: 'rejected',
+      at: new Date().toISOString(),
+      error,
+      errorKind: kind,
+    })
+    await this.persistJournal().catch(() => this.log('draft-error-save-failed'))
+    if (!onDraft) return
+    this.localDrafts.set(id, { ...draft, status: 'error', error, errorKind: kind })
+    await this.persistDrafts().catch(() => this.log('draft-error-save-failed'))
+  }
+  /** The reason the draft's last send failed, as long as the draft is unchanged since then. */
+  private notSentNote(draft: Pick<Draft, 'id' | 'updatedAt'>) {
+    const journal = this.journals.get(draft.id)
+    return journal?.state === 'rejected' && journal.error && journal.at >= draft.updatedAt
+      ? journal
+      : undefined
+  }
+  private async sendDraft(draft: Draft): Promise<SendResult> {
+    // A background save in progress finishes first; send then checks the draft it saved.
+    // Should the app quit meanwhile, the next start says it was not sent. Until then it is
+    // still sending, so the draft itself says nothing.
+    if (this.draftSyncs.has(draft.id))
+      await this.noteNotSent(draft.id, interruptedSend, 'connection', false)
+    const deadline = Date.now() + draftSaveWaitMs
+    let saving: Promise<Draft> | undefined
+    while ((saving = this.draftSyncs.get(draft.id)) && Date.now() < deadline)
+      await settledWithin(saving, deadline - Date.now())
+    if (this.busyDrafts.has(draft.id) || this.draftSyncs.has(draft.id))
       throw new Error('This draft is still saving. Try again in a moment.')
     const existing = this.journals.get(draft.id)
     if (existing && existing.state !== 'rejected') return this.reconcile(draft.id)
+    const span = perfSpan('send', { account: draft.accountId }) // Warpmail perf log (temporary)
     draft = sendDraftSchema.parse(await this.saveDraft(draft))
+    span.mark('saveDraft') // Warpmail perf log (temporary)
     const { provider, account } = this.provider(draft.accountId)
     this.busyDrafts.add(draft.id)
     const journal: Journal = {
@@ -1513,11 +1714,14 @@ export class MailService {
     }
     this.journals.set(draft.id, journal)
     let accepted = false
+    // Set once the accepted send is handed to `finishSend`, which then owns the draft.
+    let finishing = false
     // Only set once the durable journal says `submitting` and the network call begins.
     let attempted = false
     let uploaded = draft
     try {
       await this.persistJournal()
+      span.mark('persistJournal') // Warpmail perf log (temporary)
       if (draft.serverId) {
         const [remote] = await this.serverMessages(
           provider,
@@ -1537,18 +1741,22 @@ export class MailService {
             'This draft changed in another client. Save a separate copy before sending.',
           )
       }
+      span.mark('serverDraftCheck') // Warpmail perf log (temporary)
       const protectedMime =
         (draft.encryption && draft.encryption !== 'none') ||
         this.encryption.identity(draft.accountId, draft.identityId)?.enabled
           ? await this.protectedMime(draft, journal.messageId!)
           : undefined
+      span.mark('protectedMime') // Warpmail perf log (temporary)
       uploaded = protectedMime ? draft : await this.uploadDraft(draft)
+      span.mark('uploadDraft') // Warpmail perf log (temporary)
       const outgoing = await provider.prepareSubmission(
         account,
         uploaded,
         journal.messageId!,
         protectedMime,
       )
+      span.mark('prepareSubmission') // Warpmail perf log (temporary)
       journal.emailId = outgoing.emailId
       journal.envelope = outgoing.envelope
       if (outgoing.mime) {
@@ -1556,15 +1764,24 @@ export class MailService {
         journal.mime = true
       }
       if (provider.capabilities.sentCopy === 'client') journal.sentCopy = 'pending'
+      // Once the message is accepted, the server draft it replaces must go, even after a restart.
+      if (draft.serverId && draft.serverId !== journal.emailId)
+        journal.previousDraft = {
+          serverId: draft.serverId,
+          serverFingerprint: draft.serverFingerprint,
+          encryption: draft.encryption,
+        }
       // Everything needed to recover must be durable before anything leaves the device.
       journal.state = 'submitting'
       await this.persistJournal()
       this.localDrafts.set(draft.id, { ...uploaded, status: 'sending' })
       await this.persistDrafts()
+      span.mark('persistBeforeSubmit') // Warpmail perf log (temporary)
       attempted = true
       const outcome = await this.guard(account.id, (p, a) =>
         p.submit(a, outgoing, draft.identityId),
       )
+      span.mark('submit') // Warpmail perf log (temporary)
       accepted = true
       this.outgoing(account.connectionId, undefined)
       journal.accepted = outcome.accepted
@@ -1572,17 +1789,17 @@ export class MailService {
       journal.state = outcome.rejected.length ? 'partial' : 'sent'
       // Acceptance is recorded before filing or cleanup, which may fail independently.
       await this.persistJournal()
-      if (journal.sentCopy) await this.fileSentCopy(journal, outgoing)
+      span.mark('persistAccepted') // Warpmail perf log (temporary)
       // A partial send keeps its content so the refused recipients can be recovered.
       if (journal.state === 'sent') await this.completeDraft(uploaded)
       else this.localDrafts.set(draft.id, { ...uploaded, status: 'sent' })
       await this.persistDrafts()
-      if (draft.serverId && draft.serverId !== journal.emailId)
-        await this.removePreviousDraft(provider, account, draft).catch(() =>
-          this.log('old-draft-cleanup-failed'),
-        )
-      this.emit({ type: 'changed', accountId: draft.accountId })
-      return this.sendResult(journal, uploaded)
+      span.mark('completeDraft') // Warpmail perf log (temporary)
+      this.finishing.set(draft.id, this.finishSend(journal, uploaded, outgoing))
+      finishing = true
+      span.mark('returned') // Warpmail perf log (temporary)
+      span.end({ ok: true, sentCopy: journal.sentCopy, hadServerDraft: !!draft.serverId }) // Warpmail perf log (temporary)
+      return this.sendResult(journal, uploaded, !!journal.sentCopy)
     } catch (error) {
       if (accepted) {
         this.localDrafts.set(draft.id, { ...uploaded, status: 'sent' })
@@ -1599,6 +1816,7 @@ export class MailService {
       journal.state = ambiguous ? 'uncertain' : 'rejected'
       if (!ambiguous) {
         journal.sentCopy = undefined
+        journal.previousDraft = undefined
         await this.removeMime(draft.id)
         journal.mime = undefined
       }
@@ -1618,8 +1836,57 @@ export class MailService {
         }
       throw error
     } finally {
-      this.busyDrafts.delete(draft.id)
+      span.end({ ok: false }) // Warpmail perf log (temporary)
+      if (!finishing) this.busyDrafts.delete(draft.id)
     }
+  }
+  /**
+   * Finishes an accepted send after it has been reported: files the Sent copy and removes the
+   * server draft it replaced. Both are in the journal, so failures are recorded for the user
+   * and a quit is resumed on the next start. The message itself is never sent again.
+   */
+  private async finishSend(journal: Journal, draft: Draft, outgoing: OutgoingMessage) {
+    const span = perfSpan('send:finish', { account: draft.accountId }) // Warpmail perf log (temporary)
+    try {
+      // The old draft goes first: until then it could be opened and sent a second time.
+      await this.removeReplacedDraft(journal)
+      span.mark('removePreviousDraft') // Warpmail perf log (temporary)
+      if (journal.sentCopy) await this.fileSentCopy(journal, outgoing)
+      span.mark('fileSentCopy') // Warpmail perf log (temporary)
+      span.end({ ok: true, sentCopy: journal.sentCopy }) // Warpmail perf log (temporary)
+    } catch {
+      // Filing and cleanup record their own failures; the next refresh retries them.
+      this.log('sent-finish-failed')
+    } finally {
+      span.end({ ok: false }) // Warpmail perf log (temporary)
+      this.finishing.delete(draft.id)
+      this.busyDrafts.delete(draft.id)
+      this.emit({ type: 'submissions', submissions: this.summaries() })
+      this.emit({ type: 'changed', accountId: draft.accountId })
+    }
+  }
+  /** Removes the server draft an accepted message replaced, unless it changed elsewhere. */
+  private async removeReplacedDraft(journal: Journal) {
+    if (!journal.previousDraft) return
+    try {
+      const { provider, account } = this.provider(journal.accountId)
+      await this.removePreviousDraft(provider, account, journal.previousDraft)
+    } catch (error) {
+      this.log('old-draft-cleanup-failed')
+      // A draft changed in another client is preserved; anything else is retried later.
+      if (!(error instanceof ProviderError && error.code === 'conflict')) return
+    }
+    const local = this.localDrafts.get(journal.draftId)
+    if (local?.status === 'sent' && local.serverId === journal.previousDraft.serverId) {
+      this.localDrafts.set(local.id, {
+        ...local,
+        serverId: undefined,
+        serverFingerprint: undefined,
+      })
+      await this.persistDrafts()
+    }
+    journal.previousDraft = undefined
+    await this.persistJournal()
   }
   /**
    * Files the Sent copy of an accepted message. Only filing is ever retried: the provider
@@ -1661,19 +1928,25 @@ export class MailService {
       this.accounts.filter((a) => a.connectionId === connectionId).map((a) => a.id),
     )
     for (const journal of this.journals.values())
-      if (
-        accountIds.has(journal.accountId) &&
-        ['sent', 'partial'].includes(journal.state) &&
-        !journal.dismissed
-      )
-        await this.fileSentCopy(journal)
+      if (accountIds.has(journal.accountId) && !this.finishing.has(journal.draftId)) {
+        const accepted = ['sent', 'partial'].includes(journal.state)
+        if (accepted && !journal.dismissed) await this.fileSentCopy(journal)
+        // Even a dismissed send must not leave its old draft behind to be sent again.
+        if (accepted || (journal.state === 'uncertain' && journal.dismissed))
+          await this.removeReplacedDraft(journal)
+      }
   }
   reconcile = async (id: string): Promise<SendResult> => {
     const journal = this.journals.get(id)
     if (!journal) throw new Error('No send attempt found.')
     const draft = this.localDrafts.get(id)
     if (journal.state === 'sent' || journal.state === 'partial') {
-      if (journal.state === 'sent' && draft && (draft.status !== 'sent' || this.hasContent(draft)))
+      if (
+        journal.state === 'sent' &&
+        draft &&
+        !this.finishing.has(id) &&
+        (draft.status !== 'sent' || this.hasContent(draft))
+      )
         await this.completeDraft(draft)
       return {
         ...this.sendResult(journal, draft),
@@ -1690,6 +1963,7 @@ export class MailService {
         journal.state = 'sent'
         await this.persistJournal()
         if (draft) await this.completeDraft(draft)
+        void this.removeReplacedDraft(journal).catch(() => this.log('old-draft-cleanup-failed'))
         this.emit({ type: 'changed', accountId: journal.accountId })
         return { status: 'sent', message: 'Delivery confirmed.', sentCopy: 'filed' }
       }
@@ -1730,7 +2004,8 @@ export class MailService {
                 : (j.rejected || []).map((r) => ({ name: '', email: r.email })),
             },
           ]
-        if (j.state === 'sent' && copy) return [{ ...base, state: 'sent' }]
+        if (j.state === 'sent' && copy && !this.finishing.has(j.draftId))
+          return [{ ...base, state: 'sent' }]
         return []
       })
   }
@@ -1767,6 +2042,7 @@ export class MailService {
   recoverRejected = async (id: string): Promise<Draft> => {
     const journal = this.journals.get(id)
     const draft = this.localDrafts.get(id)
+    await this.finishing.get(id)
     if (journal?.state !== 'partial' || journal.dismissed || !draft)
       throw new Error('There are no refused recipients to recover for this message.')
     this.requireProtectedDraft(draft)
@@ -1812,6 +2088,7 @@ export class MailService {
     }
   }
   dismissSubmission = async (id: string): Promise<void> => {
+    await this.finishing.get(id)
     const journal = this.journals.get(id)
     if (!journal) return
     const draft = this.localDrafts.get(id)
@@ -1823,6 +2100,8 @@ export class MailService {
     await this.removeMime(id)
     journal.mime = undefined
     await this.persistJournal()
+    // As the dialog says, its draft goes too, so a delivered message is not sent twice.
+    if (journal.state === 'uncertain') await this.removeReplacedDraft(journal)
   }
   stageAttachments = async (protectedDraft = false): Promise<StagedAttachment[]> => {
     const result = await dialog.showOpenDialog({
@@ -2177,10 +2456,11 @@ export class MailService {
         (d) =>
           ['local', 'error'].includes(d.status) &&
           d.identityId &&
+          !this.claimedBySend(d.id) &&
           d.errorKind !== 'conflict' &&
           !d.error?.includes('another client') &&
           this.accounts.some((a) => a.id === d.accountId && a.status === 'connected') &&
-          Date.now() - Date.parse(d.updatedAt) > 2500,
+          Date.now() - Date.parse(d.updatedAt) > draftIdleMs,
       )
       .slice(0, 20)
     for (const draft of pending) {

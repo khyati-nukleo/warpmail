@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProviderError, type Account, type ImapConnectionConfig } from '../packages/core/src'
 import { ImapProvider, limitsFor, imapFlowOptions, ImapFlowPort } from '../packages/imap/src'
+import { SourceCache } from '../packages/imap/src/provider'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
-import { FakeImapServer } from './support/fake-imap'
+import { FakeImapServer, FakePort } from './support/fake-imap'
 
 const config: ImapConnectionConfig = {
   protocol: 'imap',
@@ -118,6 +119,25 @@ describe('IMAP TLS policy', () => {
       expect.objectContaining({ uid: 17, emailId: '18446744073709551615' }),
     ])
   })
+  it('reports Gmail’s Important folder, which ImapFlow does not recognize', async () => {
+    const port = new ImapFlowPort({ ...config.incoming, password: 'x' }, 'command')
+    vi.spyOn((port as any).client, 'list').mockResolvedValue([
+      {
+        path: '[Gmail]/Important',
+        name: 'Important',
+        flags: new Set(['\\HasNoChildren', '\\Important']),
+      },
+      {
+        path: '[Gmail]/All Mail',
+        name: 'All Mail',
+        flags: new Set(['\\All']),
+        specialUse: '\\All',
+        specialUseSource: 'extension',
+      },
+      { path: 'Work', name: 'Work', flags: new Set() },
+    ])
+    expect((await port.list()).map((f) => f.specialUse)).toEqual(['\\Important', '\\All', null])
+  })
   it('verifies certificates and never falls back to plaintext', () => {
     const tls = imapFlowOptions({ ...config.incoming, password: 'x' }, 'command')
     expect(tls).toMatchObject({
@@ -197,6 +217,96 @@ describe('IMAP indexing and reading', () => {
     )
     expect(updated.failures).toEqual([])
     expect(updated.updated).toHaveLength(5)
+  })
+  describe('one Gmail email at three locations', () => {
+    const gmail = () => {
+      server.capabilities.add('X-GM-EXT-1')
+      server.addMailbox('[Gmail]/All Mail', '\\All')
+      server.addMailbox('[Gmail]/Important')
+      const input = {
+        emailId: '777',
+        messageId: 'once@x',
+        subject: 'Once',
+        from: [alex],
+        date: at(1),
+        text: 'Only one email.',
+      }
+      for (const path of ['INBOX', '[Gmail]/All Mail', '[Gmail]/Important'])
+        server.deliver(path, input)
+    }
+    const selects = (from: number) =>
+      server.commands.slice(from).filter((c) => c === 'SELECT').length
+
+    it('lists it with one summary message, preferring the folder being viewed', async () => {
+      gmail()
+      const p = await connected()
+      await sync(p)
+      const boxes = await p.mailboxes(account)
+      const id = (name: string) => boxes.find((b) => b.name === name)!.id
+      const [inbox] = (await p.query(account, { view: 'inbox' })).items
+      expect(inbox.count).toBe(1)
+      expect(inbox.messages.map((m) => Object.keys(m.mailboxIds))).toEqual([[id('Inbox')]])
+      const [all] = (await p.query(account, { view: 'all' })).items
+      expect(all.messages).toHaveLength(1)
+      expect(Object.keys(all.messages[0].mailboxIds)).toEqual([id('Inbox')])
+      const [important] = (await p.query(account, { mailboxId: id('Important'), view: 'folder' }))
+        .items
+      expect(important.messages.map((m) => Object.keys(m.mailboxIds))).toEqual([[id('Important')]])
+      // Mutations still resolve every location from the index.
+      expect(await p.conversationMetadata(account, [inbox.id])).toHaveLength(3)
+    })
+    it('never lets the Important copy represent an email ahead of a real label', async () => {
+      server.capabilities.add('X-GM-EXT-1')
+      server.addMailbox('[Gmail]/Important', '\\Important')
+      server.addMailbox('Work')
+      const input = { emailId: '888', messageId: 'imp@x', subject: 'Imp', date: at(1), text: 'I' }
+      for (const path of ['[Gmail]/Important', 'Work']) server.deliver(path, input)
+      const p = await connected()
+      await sync(p)
+      const work = (await p.mailboxes(account)).find((b) => b.name === 'Work')!.id
+      const [all] = (await p.query(account, { view: 'all' })).items
+      expect(all.messages.map((m) => Object.keys(m.mailboxIds))).toEqual([[work]])
+    })
+    it('opens it with a single SELECT', async () => {
+      gmail()
+      const p = await connected()
+      await sync(p)
+      const [thread] = (await p.query(account, { view: 'inbox' })).items
+      const before = server.commands.length
+      const messages = await p.conversation(account, thread.id)
+      expect(messages.map((m) => m.text?.trim())).toEqual(['Only one email.'])
+      expect(selects(before)).toBe(1)
+    })
+    it('reads the next copy when the preferred location is gone', async () => {
+      gmail()
+      const p = await connected()
+      await sync(p)
+      const [thread] = (await p.query(account, { view: 'inbox' })).items
+      server.remove('INBOX', 1)
+      const before = server.commands.length
+      expect((await p.conversation(account, thread.id)).map((m) => m.text?.trim())).toEqual([
+        'Only one email.',
+      ])
+      expect(selects(before)).toBe(2)
+    })
+  })
+  it('opens a conversation spread over Inbox and Sent from All Mail in one SELECT', async () => {
+    server.capabilities.add('X-GM-EXT-1')
+    server.addMailbox('[Gmail]/All Mail', '\\All')
+    const root = { emailId: '1', messageId: 'r@x', subject: 'Q', date: at(1), text: 'Q?' }
+    const reply = { emailId: '2', messageId: 'a@x', references: ['r@x'], date: at(2), text: 'A.' }
+    for (const path of ['INBOX', '[Gmail]/All Mail']) server.deliver(path, root)
+    for (const path of ['Sent', '[Gmail]/All Mail']) server.deliver(path, reply)
+    const p = await connected()
+    await sync(p)
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    expect(thread.messages).toHaveLength(2)
+    const before = server.commands.length
+    expect((await p.conversation(account, thread.id)).map((m) => m.text?.trim())).toEqual([
+      'Q?',
+      'A.',
+    ])
+    expect(server.commands.slice(before).filter((c) => c === 'SELECT')).toHaveLength(1)
   })
   it('deduplicates by server identity when Message-ID is absent and preserves distinct emails', async () => {
     const same = { emailId: '123', subject: 'No header ID', date: at(1), text: 'One email' }
@@ -458,12 +568,389 @@ describe('IMAP indexing and reading', () => {
   })
 })
 
+describe('IMAP original message sources', () => {
+  const plans = () => {
+    const root = server.deliver('INBOX', {
+      messageId: 'root@x',
+      subject: 'Plans',
+      date: at(1),
+      text: 'Shall we?',
+    })
+    const reply = server.deliver('INBOX', {
+      messageId: 'reply@x',
+      references: ['root@x'],
+      subject: 'Re: Plans',
+      date: at(2),
+      text: 'Yes.',
+    })
+    return { root, reply }
+  }
+  const opened = async (p: ImapProvider) => {
+    await sync(p)
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    return p.conversation(account, thread.id)
+  }
+  const cached = (p: ImapProvider) => (p as any).sources.size as number
+
+  it('returns the source downloaded with the body without another IMAP command', async () => {
+    plans()
+    const p = await connected()
+    const messages = await opened(p)
+    const commands = server.commands.length
+    const raw = await p.rawMessage(account, messages[0].id, 1_000_000)
+    expect(new TextDecoder().decode(raw)).toContain('Shall we?')
+    expect(server.commands.length).toBe(commands)
+    // A caller's smaller limit is still respected.
+    await expect(p.rawMessage(account, messages[0].id, 10)).rejects.toMatchObject({
+      code: 'rawMessage',
+    })
+  })
+  it('forgets downloaded sources of messages removed or renumbered on the server', async () => {
+    const { root } = plans()
+    const p = await connected()
+    await opened(p)
+    expect(cached(p)).toBe(2)
+    server.remove('INBOX', root)
+    await sync(p)
+    expect(cached(p)).toBe(1)
+    server.resetUidValidity('INBOX')
+    await sync(p)
+    expect(cached(p)).toBe(0)
+  })
+  it('bounds downloaded sources by size and evicts the least recently used', () => {
+    const cache = new SourceCache(10, 10)
+    const row = (id: string, uid: number) => ({ id, mailboxId: 'box', uidValidity: '1', uid })
+    const a = row('a', 1),
+      b = row('b', 2),
+      c = row('c', 3)
+    cache.set(a, new Uint8Array(4))
+    cache.set(b, new Uint8Array(4))
+    expect(cache.get(a)).toBeDefined()
+    cache.set(c, new Uint8Array(4))
+    expect(cache.get(b)).toBeUndefined()
+    expect(cache.get(a)).toBeDefined()
+    expect(cache.get(c)).toBeDefined()
+    cache.set(row('huge', 4), new Uint8Array(11))
+    expect(cache.size).toBe(2)
+    // A message moved to another location is downloaded again from there.
+    expect(cache.get({ ...a, uid: 9 })).toBeUndefined()
+  })
+  it('never lets one message take more than a quarter of the cache', () => {
+    const cache = new SourceCache(16)
+    const row = (id: string, uid: number) => ({ id, mailboxId: 'box', uidValidity: '1', uid })
+    cache.set(row('a', 1), new Uint8Array(4))
+    cache.set(row('b', 2), new Uint8Array(5))
+    expect(cache.get(row('a', 1))).toBeDefined()
+    expect(cache.get(row('b', 2))).toBeUndefined()
+  })
+  it('answers for every location of a Gmail email, but only that email', () => {
+    const cache = new SourceCache()
+    const inbox = { id: 'a', mailboxId: 'inbox', uidValidity: '1', uid: 1, emailId: '777' }
+    cache.set(inbox, new Uint8Array([1]))
+    const allMail = { id: 'b', mailboxId: 'all', uidValidity: '9', uid: 40, emailId: '777' }
+    expect(cache.get(allMail)).toEqual(new Uint8Array([1]))
+    expect(cache.get({ ...allMail, emailId: '778' })).toBeUndefined()
+    expect(cache.get({ ...allMail, emailId: undefined })).toBeUndefined()
+  })
+  it('reuses the source of a Gmail email read at another location', async () => {
+    server.capabilities.add('X-GM-EXT-1')
+    server.addMailbox('[Gmail]/All Mail', '\\All')
+    const input = { emailId: '9', messageId: 'g@x', subject: 'G', date: at(1), text: 'Hi' }
+    for (const path of ['INBOX', '[Gmail]/All Mail']) server.deliver(path, input)
+    const p = await connected()
+    await sync(p)
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    const [opened] = await p.conversation(account, thread.id)
+    const locations = await p.conversationMetadata(account, [thread.id])
+    const other = locations.find((m) => m.id !== opened.id)!
+    const commands = server.commands.length
+    expect(new TextDecoder().decode(await p.rawMessage(account, other.id, 1_000_000))).toContain(
+      'Hi',
+    )
+    expect(server.commands.length).toBe(commands)
+  })
+  it('downloads the original of a message over the body limit only once', async () => {
+    server.deliver('INBOX', { messageId: 'big@x', subject: 'Big', date: at(1), text: 'Big' })
+    const p = await connected()
+    // The index believes the message is large; its real source stays small.
+    const port = server.commandPorts[0]
+    const fetch = port.fetch.bind(port)
+    vi.spyOn(port, 'fetch').mockImplementation(async (...args) =>
+      (await fetch(...args)).map((m) => ({ ...m, ...(args[1].size ? { size: 10_000_001 } : {}) })),
+    )
+    await sync(p)
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    const source = vi.spyOn(port, 'source')
+    for (let i = 0; i < 2; i++)
+      expect(
+        new TextDecoder().decode(await p.rawMessage(account, thread.messages[0].id, 20_000_000)),
+      ).toContain('Big')
+    expect(source).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('IMAP read-ahead', () => {
+  it('opens the thread the user chose before conversations read ahead in the background', async () => {
+    for (let i = 1; i <= 4; i++)
+      server.deliver('INBOX', { messageId: 'm' + i + '@x', subject: 'Thread ' + i, date: at(i) })
+    const p = await connected()
+    await sync(p)
+    const threads = (await p.query(account, { view: 'inbox' })).items.reverse()
+    const select = FakePort.prototype.select
+    let release!: () => void
+    const busy = new Promise<void>((resolve) => (release = resolve))
+    // The first read-ahead holds the command connection while the others queue behind it.
+    vi.spyOn(FakePort.prototype, 'select').mockImplementationOnce(async function (
+      this: FakePort,
+      path,
+    ) {
+      await busy
+      return select.call(this, path)
+    })
+    const order: string[] = []
+    const open = (i: number, background?: boolean) =>
+      p
+        .conversation(account, threads[i].id, background ? { background } : undefined)
+        .then(([m]) => order.push(m.subject))
+    const loads = [open(0, true), open(1, true), open(2, true)]
+    await new Promise((r) => setTimeout(r, 20))
+    loads.push(open(3))
+    await new Promise((r) => setTimeout(r, 20))
+    release()
+    await Promise.all(loads)
+    expect(order).toEqual(['Thread 1', 'Thread 4', 'Thread 2', 'Thread 3'])
+  })
+  it('lets the user’s open in between a long background read-ahead after one message', async () => {
+    for (let i = 1; i <= 8; i++)
+      server.deliver('INBOX', {
+        messageId: 'long' + i + '@x',
+        references: i > 1 ? ['long1@x'] : [],
+        subject: 'Long',
+        date: at(i),
+        text: 'Long ' + i,
+      })
+    server.deliver('INBOX', { messageId: 'other@x', subject: 'Other', date: at(20), text: 'Hi' })
+    const p = await connected()
+    await sync(p)
+    const [other, long] = (await p.query(account, { view: 'inbox' })).items
+    const source = FakePort.prototype.source
+    let release!: () => void
+    const busy = new Promise<void>((resolve) => (release = resolve))
+    const read: number[] = []
+    vi.spyOn(FakePort.prototype, 'source').mockImplementation(async function (
+      this: FakePort,
+      uid,
+      max,
+    ) {
+      if (!read.length) await busy
+      read.push(uid)
+      return source.call(this, uid, max)
+    })
+    const ahead = p.conversation(account, long.id, { background: true })
+    await new Promise((r) => setTimeout(r, 20))
+    const open = p.conversation(account, other.id)
+    await new Promise((r) => setTimeout(r, 20))
+    release()
+    await Promise.all([ahead, open])
+    // UID 9 is the message the user opened; only the read-ahead message in progress precedes it.
+    expect(read.indexOf(9)).toBe(1)
+  })
+})
+
+describe('IMAP mail stored ahead of time', () => {
+  const ago = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString()
+  const prefetch = (p: ImapProvider) => (p as any).prefetchBodies() as Promise<void>
+
+  it('opens recent mail from disk without any IMAP command, even after a restart', async () => {
+    server.deliver('INBOX', { messageId: 'a@x', subject: 'A', date: ago(1), text: 'Body A' })
+    server.deliver('Sent', { messageId: 'b@x', subject: 'B', date: ago(2), text: 'Body B' })
+    const file = join(directory, 'kept.sqlite')
+    const first = await connected({ index: openInProcessIndex(file) })
+    await sync(first)
+    await prefetch(first)
+    await first.close()
+    const p = await connected({ index: openInProcessIndex(file) })
+    const before = server.commands.length
+    for (const view of ['inbox', 'sent']) {
+      const [thread] = (await p.query(account, { view })).items
+      const [message] = await p.conversation(account, thread.id)
+      expect(message.text?.trim()).toBe(view === 'inbox' ? 'Body A' : 'Body B')
+      expect(new TextDecoder().decode(await p.rawMessage(account, message.id, 1e6))).toContain(
+        view === 'inbox' ? 'Body A' : 'Body B',
+      )
+    }
+    expect(server.commands.slice(before)).toEqual([])
+  })
+  it('downloads recent Inbox and Sent mail newest first, several per FETCH, in short batches', async () => {
+    for (let i = 1; i <= 12; i++)
+      server.deliver('INBOX', { messageId: 'i' + i + '@x', date: ago(13 - i), text: 'Inbox ' + i })
+    server.deliver('Sent', { messageId: 's@x', date: ago(20), text: 'Sent' })
+    server.deliver('INBOX', { messageId: 'old@x', date: ago(24 * 40), text: 'Too old' })
+    server.deliver('Archive', { messageId: 'arch@x', date: ago(1), text: 'Elsewhere' })
+    const big = server.deliver('INBOX', {
+      messageId: 'big@x',
+      date: ago(1),
+      text: 'x'.repeat(3000),
+    })
+    const p = await connected({ timing: { initialBatch: 50, prefetchMaxSize: 2000 } })
+    await sync(p)
+    await prefetch(p)
+    const inbox = (n: number) =>
+      server.box('INBOX').messages.find((m) => m.input.text === 'Inbox ' + n)!.uid
+    expect(server.sourceBatches).toEqual([
+      { path: 'INBOX', uids: [12, 11, 10, 9, 8, 7, 6, 5, 4, 3].map(inbox) },
+      { path: 'INBOX', uids: [2, 1].map(inbox) },
+      { path: 'Sent', uids: [1] },
+    ])
+    expect(server.sourceBatches.flatMap((b) => b.uids)).not.toContain(big)
+    // A second pass has nothing left to do.
+    await prefetch(p)
+    expect(server.sourceBatches).toHaveLength(3)
+  })
+  it('leaves a message too large for one short task to load on open, then keeps it', async () => {
+    const big = { messageId: 'lone@x', subject: 'Lone', date: ago(1), text: 'y'.repeat(1_000_000) }
+    server.deliver('INBOX', big)
+    const index = openInProcessIndex(join(directory, 'lone.sqlite'))
+    const p = await connected({ index })
+    await sync(p)
+    await prefetch(p)
+    expect(server.sourceBatches).toEqual([])
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    const [row] = await index.messages((p as any).accountId, [thread.messages[0].id])
+    await p.conversation(account, thread.id)
+    await vi.waitFor(async () =>
+      expect(await index.storedSource((p as any).accountId, row!)).toBeDefined(),
+    )
+  })
+  it('drains one folder before the next, so batches never alternate SELECTs', async () => {
+    for (let i = 0; i < 6; i++)
+      server.deliver('INBOX', { messageId: 'in' + i + '@x', date: ago(2 * i + 1), text: 'In ' + i })
+    for (let i = 0; i < 4; i++)
+      server.deliver('Sent', {
+        messageId: 'out' + i + '@x',
+        date: ago(2 * i + 2),
+        text: 'Out ' + i,
+      })
+    const p = await connected({ timing: { prefetchBatch: 2 } })
+    await sync(p)
+    await prefetch(p)
+    expect(server.sourceBatches.map((b) => b.path)).toEqual([
+      'INBOX',
+      'INBOX',
+      'INBOX',
+      'Sent',
+      'Sent',
+    ])
+  })
+  it('stops holding back as soon as a sync is requested', async () => {
+    server.deliver('INBOX', { messageId: 'w@x', subject: 'W', date: ago(2), text: 'W' })
+    server.deliver('INBOX', { messageId: 'v@x', subject: 'V', date: ago(1), text: 'V' })
+    const p = await connected({ timing: { prefetchQuietMs: 10_000 } })
+    await sync(p)
+    const [, thread] = (await p.query(account, { view: 'inbox' })).items
+    await p.conversation(account, thread.id)
+    const started = Date.now()
+    const done = prefetch(p)
+    setTimeout(() => p.requestSync('inbox'), 50)
+    await done
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+  it('downloads a message the store declines only once, even when its size was understated', async () => {
+    server.deliver('INBOX', { messageId: 'new@x', date: ago(1), text: 'n'.repeat(1000) })
+    server.deliver('INBOX', { messageId: 'old@x', date: ago(2), text: 'o'.repeat(1000) })
+    const p = await connected({ timing: { storedBytes: 1500 } })
+    // The server reports a tiny RFC822.SIZE, so the older one still seems to fit.
+    const port = server.commandPorts[0]
+    const fetch = port.fetch.bind(port)
+    vi.spyOn(port, 'fetch').mockImplementation(async (...args) =>
+      (await fetch(...args)).map((m) => ({ ...m, ...(args[1].size ? { size: 10 } : {}) })),
+    )
+    await sync(p)
+    // A pass that downloaded the declined message forever would never end: stop it after a few.
+    const sources = FakePort.prototype.sources
+    vi.spyOn(FakePort.prototype, 'sources').mockImplementation(async function (this: any, ...a) {
+      if (server.sourceBatches.length >= 4) (p as any).disposed = true
+      return sources.apply(this, a)
+    })
+    await prefetch(p)
+    expect(server.sourceBatches.flatMap((b) => b.uids).sort()).toEqual([1, 2])
+  })
+  it('never marks mail read while downloading ahead', async () => {
+    server.deliver('INBOX', { messageId: 'u@x', date: ago(1), text: 'Unread' })
+    const p = await connected()
+    await sync(p)
+    await prefetch(p)
+    expect(server.sourceBatches).toHaveLength(1)
+    expect(server.commands).not.toContain('STORE')
+    expect(server.box('INBOX').messages[0]!.flags.has('\\Seen')).toBe(false)
+    expect((await p.query(account, { view: 'inbox' })).items[0]!.unread).toBe(true)
+  })
+  it('keeps stored mail within the cap, newest first', async () => {
+    for (let i = 1; i <= 4; i++)
+      server.deliver('INBOX', {
+        messageId: 'c' + i + '@x',
+        date: ago(5 - i),
+        text: 'Capped ' + i + ' ' + 'x'.repeat(1000),
+      })
+    // Each message is a little over 1 KB, so two fit.
+    const p = await connected({ timing: { storedBytes: 2500 } })
+    await sync(p)
+    await prefetch(p)
+    // Only the newest two fit; older mail is not downloaded just to be dropped.
+    expect(server.sourceBatches.flatMap((b) => b.uids)).toEqual([4, 3])
+  })
+  it('holds back while the user is opening mail', async () => {
+    server.deliver('INBOX', { messageId: 'open@x', subject: 'Open', date: ago(2), text: 'O' })
+    server.deliver('INBOX', { messageId: 'next@x', subject: 'Next', date: ago(1), text: 'N' })
+    const p = await connected({ timing: { prefetchQuietMs: 300 } })
+    await sync(p)
+    const [, opened] = (await p.query(account, { view: 'inbox' })).items
+    await p.conversation(account, opened.id)
+    const started = Date.now()
+    await prefetch(p)
+    expect(server.sourceBatches).toHaveLength(1)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+  })
+  it('downloads ahead on its own after a sync pass', async () => {
+    server.deliver('INBOX', { messageId: 'auto@x', date: ago(1), text: 'Auto' })
+    await connected({ background: true })
+    await vi.waitFor(() => expect(server.sourceBatches).toHaveLength(1), { timeout: 3000 })
+  })
+})
+
 describe('IMAP organization', () => {
   async function inboxMessage(p: ImapProvider) {
     await sync(p)
     const [conversation] = (await p.query(account, { view: 'inbox' })).items
     return conversation.messages[0]
   }
+  it('keeps changing other folders when one refuses a flag change, and reports each message', async () => {
+    server.deliver('Archive', { messageId: 'r@x', subject: 'Refused', date: at(1) })
+    server.deliver('INBOX', { messageId: 'k@x', subject: 'Kept', date: at(2) })
+    const p = await connected()
+    await sync(p)
+    const [refused] = await p
+      .messages(
+        account,
+        (await p.query(account, { view: 'all' })).items.flatMap((c) => c.messages.map((m) => m.id)),
+      )
+      .then((all) => all.filter((m) => m.subject === 'Refused'))
+    const [kept] = (await p.query(account, { view: 'inbox' })).items[0]!.messages
+    const store = FakePort.prototype.store
+    vi.spyOn(FakePort.prototype, 'store').mockImplementation(async function (this: any, ...args) {
+      if (this.selected === 'Archive')
+        throw new ProviderError('command', 'The server did not change the flags.')
+      return store.apply(this, args)
+    })
+    // The refused folder is changed first, so the folder after it must not be skipped.
+    const result = await p.update(account, {
+      [refused!.id]: { keywords: { $seen: true } },
+      [kept!.id]: { keywords: { $seen: true } },
+    })
+    expect(result.updated).toEqual([kept!.id])
+    expect(result.failures).toEqual([refused!.id + ': changed on the server'])
+    expect(server.box('INBOX').messages[0]!.flags.has('\\Seen')).toBe(true)
+  })
   it('moves with MOVE and keeps the message ID through the confirmed move', async () => {
     server.deliver('INBOX', { messageId: 'a@x', subject: 'A', date: at(1) })
     const p = await connected()

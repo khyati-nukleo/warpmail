@@ -1,4 +1,5 @@
 import type { MetadataIndex } from '@inlark/imap'
+import { perf } from '../perf-log' // Warpmail perf log (temporary)
 
 /** The part of `worker_threads.Worker` the client uses, so tests can supply a fake. */
 export interface IndexPort {
@@ -9,7 +10,7 @@ export interface IndexPort {
   terminate(): Promise<number>
 }
 
-type Reply = { id: number; result?: unknown; error?: { message: string } }
+type Reply = { id: number; result?: unknown; error?: { message: string }; ms?: number }
 type Args<K extends keyof MetadataIndex> = Parameters<MetadataIndex[K]>
 
 /** Forwards every index call to the worker that owns the SQLite database. */
@@ -17,7 +18,11 @@ export class WorkerMetadataIndex implements MetadataIndex {
   private next = 1
   private readonly pending = new Map<
     number,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    {
+      resolve: (value: unknown) => void
+      reject: (error: Error) => void
+      perf?: { method: string; at: number } // Warpmail perf log (temporary)
+    }
   >()
   private failure: Error | undefined
   private closing: Promise<void> | undefined
@@ -27,6 +32,15 @@ export class WorkerMetadataIndex implements MetadataIndex {
       const call = this.pending.get(reply.id)
       if (!call) return
       this.pending.delete(reply.id)
+      // Warpmail perf log (temporary): round trip from the main thread, and the worker's own time.
+      if (call.perf)
+        perf('index:call', {
+          method: call.perf.method,
+          ms: Math.round((performance.now() - call.perf.at) * 10) / 10,
+          ...(reply.ms !== undefined ? { workerMs: reply.ms } : {}),
+          inFlight: this.pending.size,
+          ok: !reply.error,
+        })
       if (reply.error) call.reject(new Error(reply.error.message))
       else call.resolve(reply.result)
     })
@@ -47,7 +61,7 @@ export class WorkerMetadataIndex implements MetadataIndex {
       if (this.failure) return reject(this.failure)
       if (this.closing && method !== 'close') return reject(new Error('The mail index is closed.'))
       const id = this.next++
-      this.pending.set(id, { resolve, reject })
+      this.pending.set(id, { resolve, reject, perf: { method, at: performance.now() } }) // Warpmail perf log (temporary)
       try {
         this.port.postMessage({ id, method, args })
       } catch (error) {
@@ -131,5 +145,14 @@ export class WorkerMetadataIndex implements MetadataIndex {
   }
   setMeta(...args: Args<'setMeta'>) {
     return this.call('setMeta', args)
+  }
+  storedSource(...args: Args<'storedSource'>) {
+    return this.call('storedSource', args)
+  }
+  storeSources(...args: Args<'storeSources'>) {
+    return this.call('storeSources', args)
+  }
+  sourceCandidates(...args: Args<'sourceCandidates'>) {
+    return this.call('sourceCandidates', args)
   }
 }

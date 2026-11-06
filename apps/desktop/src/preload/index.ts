@@ -80,3 +80,7 @@ contextBridge.exposeInMainWorld('mail', {
     }
   },
 } as unknown as DesktopMailAPI)
+// Warpmail perf log (temporary): one-way timing reports from the renderer.
+contextBridge.exposeInMainWorld('warpmailPerf', (entry: unknown) =>
+  ipcRenderer.send('warpmail:perf', entry),
+)

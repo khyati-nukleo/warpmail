@@ -47,11 +47,18 @@ describe('application updates', () => {
     expect(manager.getStatus()).toEqual({ phase: 'idle' })
   })
 
-  it('still checks for updates in other packaged installations', async () => {
-    new UpdateManager(vi.fn()).start()
-    await vi.advanceTimersByTimeAsync(15_000)
-    expect(mocks.updater.on).toHaveBeenCalledWith('update-available', expect.any(Function))
-    expect(mocks.updater.checkForUpdates).toHaveBeenCalledTimes(1)
+  // Warpmail fork: updates are disabled, so packaged builds never check, download or notify.
+  it('never checks, downloads or notifies in packaged Warpmail builds', async () => {
+    const publish = vi.fn()
+    const manager = new UpdateManager(publish)
+    manager.start()
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
+    expect(mocks.updater.on).not.toHaveBeenCalled()
+    expect(mocks.updater.checkForUpdates).not.toHaveBeenCalled()
+    expect(mocks.updater.autoDownload).toBe(false)
+    expect(mocks.fetch).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+    expect(manager.getStatus()).toEqual({ phase: 'idle' })
   })
 
   it('does not check in development builds', async () => {

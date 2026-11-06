@@ -5,6 +5,8 @@ import type { UpdateStatus } from '@inlark/core'
 const { autoUpdater } = electronUpdater as { autoUpdater: AppUpdater }
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000
 const RELEASE_URL = 'https://api.github.com/repos/inlark/inlark/releases/latest'
+// Warpmail fork: never check, download or offer upstream inlark releases.
+export const UPDATES_ENABLED = false
 
 function newerRelease(tag: string, current: string): boolean {
   const parse = (value: string) => /^v?(\d+)\.(\d+)\.(\d+)(-.+)?$/.exec(value)
@@ -35,7 +37,7 @@ export class UpdateManager {
 
   start() {
     // Flatpak's /app is immutable. Bundle users install updates through Flatpak.
-    if (!app.isPackaged || process.env.FLATPAK_ID) return
+    if (!UPDATES_ENABLED || !app.isPackaged || process.env.FLATPAK_ID) return
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.autoRunAppAfterInstall = false

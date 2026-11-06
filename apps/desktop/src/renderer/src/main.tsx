@@ -13,6 +13,7 @@ import { TooltipProvider } from '@inlark/ui'
 import { queryClient, restoreCache } from './cache'
 import { App } from './App'
 import { ShortcutsProvider } from './ShortcutsProvider'
+import { observeLongTasks } from './perf' // Warpmail perf log (temporary)
 import '@inlark/ui/styles.css'
 import './styles.css'
 
@@ -87,6 +88,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
     )
   }
 }
+observeLongTasks() // Warpmail perf log (temporary)
 void restoreCache().finally(() =>
   createRoot(document.getElementById('root')!).render(
     <React.StrictMode>

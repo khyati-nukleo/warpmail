@@ -248,6 +248,21 @@ describe('durable mail operations', () => {
     await service.saveDraft({ ...draft, text: 'Newer UI autosave' })
     expect((await service.drafts())[0].status).toBe('uncertain')
   })
+  it('removes the replaced server draft once an unconfirmed send is confirmed', async () => {
+    const original = { ...mail, id: 'original', keywords: { $draft: true } }
+    vi.mocked(JmapProvider.prototype.messages).mockResolvedValue([original])
+    vi.spyOn(JmapProvider.prototype, 'submit').mockRejectedValue(
+      new JmapError('network', 'Response lost'),
+    )
+    vi.spyOn(JmapProvider.prototype, 'submissionExists').mockResolvedValue(true)
+    const synced = { ...draft, serverId: 'original', serverFingerprint: draftFingerprint(original) }
+    expect((await service.send(synced)).status).toBe('uncertain')
+    expect(JmapProvider.prototype.update).not.toHaveBeenCalled()
+    expect((await service.reconcile(draft.id)).status).toBe('sent')
+    await vi.waitFor(() =>
+      expect(vi.mocked(JmapProvider.prototype.update).mock.calls.at(-1)?.[2]).toEqual(['original']),
+    )
+  })
   it('reconciles a lost send response using server submission records', async () => {
     vi.spyOn(JmapProvider.prototype, 'submit').mockRejectedValue(
       new JmapError('network', 'Response lost'),
@@ -396,6 +411,224 @@ describe('durable mail operations', () => {
     })
     expect((await service.drafts())[0].text).toBe('Hello')
   })
+  it('writes edits to disk while a server save is running, and keeps them after it', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    vi.mocked(JmapProvider.prototype.createDraft).mockImplementation(async () => {
+      await held
+      return 'created'
+    })
+    const saving = service.syncDraft(draft)
+    await vi.waitFor(() => expect(JmapProvider.prototype.createDraft).toHaveBeenCalled())
+    const newer = { ...draft, text: 'Newer edit', updatedAt: '2026-09-23T10:05:00.000Z' }
+    expect((await service.saveDraft(newer)).text).toBe('Newer edit')
+    expect((await store.read<Draft[]>('drafts', []))[0].text).toBe('Newer edit')
+    release()
+    expect((await saving).serverId).toBe('created')
+    // The newer edit stays, linked to the copy just saved, and is synced again later.
+    expect((await service.drafts())[0]).toMatchObject({
+      text: 'Newer edit',
+      serverId: 'created',
+      status: 'local',
+    })
+  })
+  it('notes on the saved draft why a send failed before anything left the device', async () => {
+    const submit = vi.spyOn(JmapProvider.prototype, 'submit')
+    await service.saveDraft(draft)
+    await expect(
+      service.send({ ...draft, encryptionRequired: true, updatedAt: '2026-09-23T10:05:00.000Z' }),
+    ).rejects.toThrow('Confirm')
+    expect(submit).not.toHaveBeenCalled()
+    // The note goes on the copy already saved; the unconfirmed content is never stored.
+    const [saved] = await store.read<Draft[]>('drafts', [])
+    expect(saved).toMatchObject({ status: 'error', text: 'Hello' })
+    expect(saved.error).toContain('Confirm')
+    expect(saved.updatedAt).toBe(draft.updatedAt)
+  })
+  it('leaves an interrupted note when the app quits while a send waits for a draft save', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    vi.mocked(JmapProvider.prototype.createDraft).mockImplementation(async () => {
+      await held
+      return 'created'
+    })
+    vi.spyOn(JmapProvider.prototype, 'submit').mockResolvedValue({
+      accepted: ['recipient@example.com'],
+      rejected: [],
+    })
+    const saving = service.syncDraft(draft)
+    await vi.waitFor(() => expect(JmapProvider.prototype.createDraft).toHaveBeenCalled())
+    const sending = service.send(draft)
+    await vi.waitFor(async () =>
+      expect((await store.read<any[]>('submissions', []))[0]?.error).toContain('interrupted'),
+    )
+    // Still sending, so the draft itself doesn't claim the send was interrupted.
+    expect((await service.drafts())[0].error).toBeUndefined()
+    // Quit: a new process reads what the old one left on disk.
+    const old = service
+    service = new MailService(new JsonStore(directory), () => {})
+    await service.init()
+    expect((await service.drafts())[0]).toMatchObject({ text: 'Hello' })
+    expect((await service.drafts())[0].error).toContain('interrupted before the message left')
+    old.dispose()
+    release()
+    await Promise.allSettled([saving, sending])
+  })
+  it('keeps a not-sent note through background server saves until the draft is edited', async () => {
+    vi.mocked(JmapProvider.prototype.messages).mockResolvedValue([
+      { ...mail, id: 'created', keywords: { $draft: true } },
+    ])
+    await service.saveDraft(draft)
+    await expect(service.send({ ...draft, encryptionRequired: true })).rejects.toThrow('Confirm')
+    service.dispose()
+    service = new MailService(new JsonStore(directory), () => {})
+    await service.init()
+    await service.connect({
+      config: { protocol: 'jmap', serverUrl: 'https://mail.example', username: 'test' },
+      password: 'disposable',
+      name: 'Test',
+      remember: false,
+      connectionId: 'connection',
+    })
+    await service.refresh()
+    expect(JmapProvider.prototype.createDraft).toHaveBeenCalled()
+    expect((await service.drafts())[0].error).toContain('Confirm')
+    // An edit made after the failure is new work: the note goes.
+    await service.saveDraft({
+      ...draft,
+      text: 'Fixed',
+      error: undefined,
+      updatedAt: new Date(Date.now() + 1000).toISOString(),
+    })
+    await service.syncDraft((await service.drafts())[0])
+    expect((await service.drafts())[0]).toMatchObject({ text: 'Fixed', error: undefined })
+  })
+  it('keeps the interrupted note of a send restored at startup through a server save', async () => {
+    await service.saveDraft(draft)
+    await store.write('submissions', [
+      { draftId: draft.id, accountId: account.id, state: 'preparing', at: draft.updatedAt },
+    ])
+    service.dispose()
+    service = new MailService(new JsonStore(directory), () => {})
+    await service.init()
+    expect((await service.drafts())[0].error).toContain('interrupted')
+    await service.connect({
+      config: { protocol: 'jmap', serverUrl: 'https://mail.example', username: 'test' },
+      password: 'disposable',
+      name: 'Test',
+      remember: false,
+      connectionId: 'connection',
+    })
+    await service.refresh()
+    expect(JmapProvider.prototype.createDraft).toHaveBeenCalled()
+    expect((await service.drafts())[0].error).toContain('interrupted')
+  })
+  it('removes the server draft of a dismissed unconfirmed send instead of restoring it', async () => {
+    const original = { ...mail, id: 'original', keywords: { $draft: true } }
+    vi.mocked(JmapProvider.prototype.messages).mockResolvedValue([original])
+    vi.spyOn(JmapProvider.prototype, 'submit').mockRejectedValue(
+      new JmapError('network', 'Response lost'),
+    )
+    const synced = { ...draft, serverId: 'original', serverFingerprint: draftFingerprint(original) }
+    expect((await service.send(synced)).status).toBe('uncertain')
+    await expect(service.resumeDraft(account.id, 'original')).rejects.toThrow(
+      'Delivery isn’t confirmed yet',
+    )
+    await service.dismissSubmission(draft.id)
+    expect(vi.mocked(JmapProvider.prototype.update).mock.calls.at(-1)?.[2]).toEqual(['original'])
+    await expect(service.resumeDraft(account.id, 'original')).rejects.toThrow()
+  })
+  it('logs, rather than leaking, a failure to record a confirmed send’s draft cleanup', async () => {
+    const original = { ...mail, id: 'original', keywords: { $draft: true } }
+    vi.mocked(JmapProvider.prototype.messages).mockResolvedValue([original])
+    vi.spyOn(JmapProvider.prototype, 'submit').mockRejectedValue(
+      new JmapError('network', 'Response lost'),
+    )
+    vi.spyOn(JmapProvider.prototype, 'submissionExists').mockResolvedValue(true)
+    const synced = { ...draft, serverId: 'original', serverFingerprint: draftFingerprint(original) }
+    expect((await service.send(synced)).status).toBe('uncertain')
+    const write = store.write.bind(store)
+    vi.spyOn(store, 'write').mockImplementation((name, data, version) =>
+      name === 'submissions' && (data as any[]).every((j) => !j.previousDraft)
+        ? Promise.reject(new Error('Disk full'))
+        : write(name, data, version),
+    )
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      expect((await service.reconcile(draft.id)).status).toBe('sent')
+      await vi.waitFor(() =>
+        expect(vi.mocked(JmapProvider.prototype.update).mock.calls.at(-1)?.[2]).toEqual([
+          'original',
+        ]),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+  })
+  it('joins a server save already in progress instead of starting a second one', async () => {
+    const [first, second] = await Promise.all([service.syncDraft(draft), service.syncDraft(draft)])
+    expect(JmapProvider.prototype.createDraft).toHaveBeenCalledTimes(1)
+    expect(second.serverId).toBe(first.serverId)
+  })
+  it('does not let a background draft save start while a send is under way', async () => {
+    const submit = vi
+      .spyOn(JmapProvider.prototype, 'submit')
+      .mockResolvedValue({ accepted: ['recipient@example.com'], rejected: [] })
+    const sending = service.send(draft)
+    const saving = service.syncDraft(draft)
+    await service.refresh()
+    expect((await sending).status).toBe('sent')
+    await saving
+    // Only the submission's own email is created; no extra server draft appears mid-send.
+    expect(JmapProvider.prototype.createDraft).toHaveBeenCalledTimes(1)
+    expect((await service.drafts())[0]).toMatchObject({ status: 'sent', text: '' })
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+  it('submits once when the same draft is sent twice at the same moment', async () => {
+    const submit = vi
+      .spyOn(JmapProvider.prototype, 'submit')
+      .mockResolvedValue({ accepted: ['recipient@example.com'], rejected: [] })
+    const results = await Promise.allSettled([service.send(draft), service.send(draft)])
+    expect(results.some((r) => r.status === 'fulfilled' && r.value.status === 'sent')).toBe(true)
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+  it('waits for a draft save in progress, then sends the saved draft once', async () => {
+    const remote = new Map<string, Message>()
+    let release!: () => void
+    const slowSave = new Promise<void>((resolve) => (release = resolve))
+    vi.mocked(JmapProvider.prototype.createDraft).mockImplementation(async (_account, input) => {
+      await slowSave
+      remote.set('saved', {
+        ...mail,
+        id: 'saved',
+        subject: input.subject,
+        to: input.to,
+        html: input.html,
+        text: input.text,
+        keywords: { $draft: true, $seen: true },
+      })
+      return 'saved'
+    })
+    vi.mocked(JmapProvider.prototype.messages).mockImplementation(async (_account, ids) =>
+      ids.flatMap((id) => (remote.has(id) ? [remote.get(id)!] : [])),
+    )
+    const submit = vi
+      .spyOn(JmapProvider.prototype, 'submit')
+      .mockResolvedValue({ accepted: ['recipient@example.com'], rejected: [] })
+    const saving = service.syncDraft(draft)
+    await vi.waitFor(() => expect(JmapProvider.prototype.createDraft).toHaveBeenCalled())
+    const sending = service.send(draft)
+    release()
+    expect((await saving).status).toBe('synced')
+    expect((await sending).status).toBe('sent')
+    expect(submit).toHaveBeenCalledTimes(1)
+    // The save read back its server draft, then send ran its usual conflict check against it.
+    const reads = vi.mocked(JmapProvider.prototype.messages).mock.calls
+    expect(reads.filter(([, ids]) => ids.join() === 'saved')).toHaveLength(2)
+  })
   it('does not send or delete a server draft changed by another client', async () => {
     const submit = vi
       .spyOn(JmapProvider.prototype, 'submit')
@@ -429,6 +662,18 @@ describe('durable mail operations', () => {
     await service.saveDraft(draft)
     await service.refresh()
     expect((await service.drafts())[0].status).toBe('synced')
+    expect(JmapProvider.prototype.createDraft).toHaveBeenCalledTimes(1)
+  })
+  it('leaves a draft still being typed to the composer until it has been idle for 10 seconds', async () => {
+    await service.saveDraft({ ...draft, updatedAt: new Date(Date.now() - 5000).toISOString() })
+    await service.refresh()
+    expect(JmapProvider.prototype.createDraft).not.toHaveBeenCalled()
+    await service.saveDraft({
+      ...draft,
+      id: '3f0b6b8e-9f6e-4c39-9a51-6f7d7b0c2a11',
+      updatedAt: new Date(Date.now() - 11_000).toISOString(),
+    })
+    await service.refresh()
     expect(JmapProvider.prototype.createDraft).toHaveBeenCalledTimes(1)
   })
   it('recovers a completed submission when its final local draft write failed', async () => {

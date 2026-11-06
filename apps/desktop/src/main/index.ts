@@ -2,6 +2,7 @@ import { openCryptoWorker } from './crypto-open'
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   protocol,
   net,
@@ -22,6 +23,8 @@ import { discover } from './discovery-transport'
 import { SenderAvatarResolver } from './sender-avatar'
 import { UpdateManager } from './updates'
 import { configureAppIdentity } from './app-identity'
+import { setImapPerfLogger } from '@inlark/imap' // Warpmail perf log (temporary)
+import { perf, perfTimed, rendererPerf, startPerfLog } from './perf-log' // Warpmail perf log (temporary)
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -37,6 +40,9 @@ protocol.registerSchemesAsPrivileged([
   },
 ])
 configureAppIdentity(app)
+// Warpmail perf log (temporary): <userData>/mail/perf.log, beside the app's other mail data.
+startPerfLog(join(app.getPath('userData'), 'mail'), { version: app.getVersion() })
+setImapPerfLogger(perf) // Warpmail perf log (temporary)
 if (process.platform === 'linux' && process.env.FLATPAK_ID)
   app.setDesktopName(process.env.FLATPAK_ID + '.desktop')
 let window: BrowserWindow | null = null,
@@ -339,8 +345,15 @@ else {
           if (!trusted(event)) throw new Error('Untrusted application frame.')
           const parsed = schema.safeParse(args)
           if (!parsed.success) throw new Error('Invalid input. Check the fields and try again.')
-          return handlers[name as keyof typeof ipcSchemas](...parsed.data)
+          // Warpmail perf log (temporary): every IPC handler's total duration.
+          return perfTimed('ipc', () => handlers[name as keyof typeof ipcSchemas](...parsed.data), {
+            channel: name,
+          })
         })
+      // Warpmail perf log (temporary): renderer timings (thread open, long tasks).
+      ipcMain.on('warpmail:perf', (event, entry: unknown) => {
+        if (trusted(event as unknown as Electron.IpcMainInvokeEvent)) rendererPerf(entry)
+      })
       createWindow()
       try {
         tray = new Tray(trayImage())
@@ -378,8 +391,44 @@ else {
       app.quit()
     })
 }
-app.on('before-quit', () => {
+/** How long quitting waits for a message that is still sending. */
+const quitSendWaitMs = 30_000
+let quitWaiting = false
+app.on('before-quit', (event) => {
   quitting = true
+  const sends = quitWaiting ? undefined : service?.sendsSettled()
+  if (sends) {
+    // The composer closes on Send, so a quit often comes right after it. Let the message
+    // finish (never for long); a second quit request goes straight through.
+    event.preventDefault()
+    quitWaiting = true
+    const options = {
+      type: 'info' as const,
+      title: 'inlark',
+      message: 'Finishing sending…',
+      detail: 'inlark will quit as soon as your message has been sent.',
+      buttons: ['Quit now'],
+    }
+    // Only say so if it takes a moment; a quick finish quits without a flash of dialog.
+    const notice = setTimeout(() => {
+      const parent = window && !window.isDestroyed() && window.isVisible() ? window : undefined
+      void (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options)).then(
+        () => app.quit(),
+      )
+    }, 500)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    void Promise.race([
+      sends,
+      new Promise((resolve) => (timer = setTimeout(resolve, quitSendWaitMs))),
+    ]).then(() => {
+      clearTimeout(timer)
+      clearTimeout(notice)
+      app.quit()
+    })
+    return
+  }
+  // An open “Finishing sending…” box must never keep the app from exiting.
+  if (quitWaiting) setTimeout(() => app.exit(0), 5000).unref()
   service?.dispose()
 })
 app.on('window-all-closed', () => {

@@ -27,7 +27,7 @@ import {
   type ImapConnectionConfig,
   type SubmissionOutcome,
 } from '../packages/core/src'
-import { FakeImapServer } from './support/fake-imap'
+import { FakeImapServer, FakePort } from './support/fake-imap'
 
 const input: ConnectInput = {
   config: {
@@ -285,23 +285,151 @@ describe('IMAP sending', () => {
       return { accepted: envelope.to, rejected: [] }
     })
     const result = await service.send(draft)
-    expect(result).toMatchObject({ status: 'sent', sentCopy: 'filed' })
+    expect(result).toMatchObject({ status: 'sent' })
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
     expect(server.box('Sent').messages).toHaveLength(1)
-    expect((await journal()).sentCopy).toBe('filed')
     await expect(stat(join(directory, 'outgoing', draftId + '.eml'))).rejects.toThrow()
     expect(await service.submissions()).toEqual([])
+  })
+  it('reports a send as soon as the server accepts it and files the Sent copy afterwards', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const file = ImapProvider.prototype.fileSentCopy
+    vi.spyOn(ImapProvider.prototype, 'fileSentCopy').mockImplementation(async function (
+      this: ImapProvider,
+      ...args
+    ) {
+      await held
+      return file.apply(this, args)
+    })
+    try {
+      const result = await Promise.race([
+        service.send(draft),
+        new Promise((resolve) => setTimeout(() => resolve('still sending'), 1000)),
+      ])
+      expect(result).toMatchObject({ status: 'sent', message: 'Message sent.' })
+      // Acceptance and the unfiled copy are durable already, so quitting now loses nothing.
+      expect(await journal()).toMatchObject({
+        state: 'sent',
+        sentCopy: expect.stringMatching(/^(pending|appending)$/),
+      })
+      // Filing that is still under way does not need the user's attention.
+      expect(await service.submissions()).toEqual([])
+    } finally {
+      release()
+    }
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+    expect(server.box('Sent').messages).toHaveLength(1)
+    await vi.waitFor(async () =>
+      expect((await service.drafts())[0]).toMatchObject({ status: 'sent', text: '' }),
+    )
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+  it('tells a quit to wait until sends, including Sent filing, have finished', async () => {
+    expect(service.sendsSettled()).toBeUndefined()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const file = ImapProvider.prototype.fileSentCopy
+    vi.spyOn(ImapProvider.prototype, 'fileSentCopy').mockImplementation(async function (
+      this: ImapProvider,
+      ...args
+    ) {
+      await held
+      return file.apply(this, args)
+    })
+    const sending = service.send(draft)
+    const settled = service.sendsSettled()
+    expect(settled).toBeDefined()
+    let done = false
+    void settled!.then(() => (done = true))
+    expect((await sending).status).toBe('sent')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(done).toBe(false)
+    release()
+    await settled
+    expect((await journal()).sentCopy).toBe('filed')
+    expect(service.sendsSettled()).toBeUndefined()
+  })
+  it('removes the replaced server draft before filing the Sent copy', async () => {
+    const synced = await service.syncDraft(draft)
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const file = ImapProvider.prototype.fileSentCopy
+    vi.spyOn(ImapProvider.prototype, 'fileSentCopy').mockImplementation(async function (
+      this: ImapProvider,
+      ...args
+    ) {
+      await held
+      return file.apply(this, args)
+    })
+    try {
+      expect((await service.send(synced)).status).toBe('sent')
+      await vi.waitFor(() => expect(server.box('Drafts').messages).toHaveLength(0), {
+        timeout: 1000,
+      })
+    } finally {
+      release()
+    }
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+  })
+  it('never offers the replaced server draft again while its removal is pending', async () => {
+    const synced = await service.syncDraft(draft)
+    vi.spyOn(ImapProvider.prototype, 'update').mockRejectedValue(
+      new ProviderError('network', 'Connection lost.'),
+    )
+    expect((await service.send(synced)).status).toBe('sent')
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+    // The sent record stays linked to the old server draft, so Drafts doesn't list it.
+    expect((await service.drafts())[0]).toMatchObject({ status: 'sent', serverId: synced.serverId })
+    await expect(service.resumeDraft(accountId, synced.serverId!)).rejects.toThrow(
+      'already been sent',
+    )
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+  it('removes the replaced server draft of a partial send even after it is dismissed', async () => {
+    const synced = await service.syncDraft(draft)
+    vi.spyOn(ImapProvider.prototype, 'update').mockRejectedValueOnce(
+      new ProviderError('network', 'Connection lost.'),
+    )
+    submit.mockResolvedValueOnce({
+      accepted: ['alex@example.org'],
+      rejected: [{ email: 'sam@example.org', reason: '550 No such user' }],
+    })
+    expect((await service.send(synced)).status).toBe('partial')
+    await service.recoverRejected(draftId)
+    expect(server.box('Drafts').messages).toHaveLength(1)
+    await service.refresh()
+    expect(server.box('Drafts').messages).toHaveLength(0)
+  })
+  it('removes the replaced server draft after a restart when cleanup was interrupted', async () => {
+    const synced = await service.syncDraft(draft)
+    expect(server.box('Drafts').messages).toHaveLength(1)
+    vi.spyOn(ImapProvider.prototype, 'update').mockRejectedValueOnce(
+      new ProviderError('network', 'Connection lost.'),
+    )
+    expect((await service.send(synced)).status).toBe('sent')
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(server.box('Drafts').messages).toHaveLength(1)
+    await restart()
+    await service.refresh()
+    expect(server.box('Drafts').messages).toHaveLength(0)
+    expect(server.box('Sent').messages).toHaveLength(1)
+    expect(submit).toHaveBeenCalledTimes(1)
   })
   it('records acceptance before filing, and a filing failure only retries filing', async () => {
     server.hooks.set('APPEND:before', () => {
       throw new ProviderError('command', 'Over quota')
     })
     const result = await service.send(draft)
-    expect(result).toMatchObject({ status: 'sent', sentCopy: 'pending' })
-    expect(result.message).toContain('Sent copy pending')
+    expect(result).toMatchObject({ status: 'sent', message: 'Message sent.' })
     expect((await journal()).state).toBe('sent')
-    expect(await service.submissions()).toMatchObject([
-      { draftId, state: 'sent', sentCopy: 'failed' },
-    ])
+    // The failure is recorded for the user, never thrown at the send that succeeded.
+    await vi.waitFor(async () =>
+      expect(await service.submissions()).toMatchObject([
+        { draftId, state: 'sent', sentCopy: 'failed' },
+      ]),
+    )
     expect((await service.retrySentCopy(draftId)).sentCopy).toBe('filed')
     expect(submit).toHaveBeenCalledTimes(1)
     expect(server.box('Sent').messages).toHaveLength(1)
@@ -312,7 +440,7 @@ describe('IMAP sending', () => {
       throw new ProviderError('network', 'Connection lost.')
     })
     await service.send(draft)
-    expect((await journal()).sentCopy).toBe('uncertain')
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('uncertain'))
     await service.retrySentCopy(draftId)
     expect((await journal()).sentCopy).toBe('server')
     expect(server.box('Sent').messages).toHaveLength(1)
@@ -395,7 +523,8 @@ describe('IMAP sending', () => {
       { draftId, accountId, state: 'preparing', at: draft.updatedAt },
     ])
     await restart()
-    expect(await journal()).toBeUndefined()
+    // Kept as a refused attempt, so the draft explains it was not sent.
+    expect(await journal()).toMatchObject({ state: 'rejected' })
     // The draft is editable again (and may already be saved to the server), never marked sent.
     expect(['local', 'synced']).toContain((await service.drafts())[0].status)
     expect((await service.drafts())[0].text).toBe('Hello')
@@ -582,7 +711,8 @@ describe('IMAP aliases', () => {
       { email: 'hello@alias.example', name: 'Hello desk' },
     ])
     const result = await service.send({ ...draft, identityId: account.aliases![0].id })
-    expect(result).toMatchObject({ status: 'sent', sentCopy: 'filed' })
+    expect(result).toMatchObject({ status: 'sent' })
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
     expect(submit.mock.calls[0][1].from).toBe('hello@alias.example')
     expect((await journal()).messageId).toMatch(/@alias\.example$/)
     const sent = new TextDecoder().decode(server.box('Sent').messages[0].raw)
@@ -599,5 +729,77 @@ describe('IMAP aliases', () => {
     expect((await journal()).state).toBe('rejected')
     // The draft keeps its address, so the composer asks for a new one instead of guessing.
     expect((await service.drafts())[0]).toMatchObject({ status: 'error', identityId })
+  })
+})
+
+describe('IMAP reading', () => {
+  beforeEach(() => service.connect(input))
+  const thread = () => {
+    server.deliver('INBOX', {
+      messageId: 'root@x',
+      subject: 'Plans',
+      date: '2026-09-20T10:00:00Z',
+      text: 'Shall we?',
+    })
+    server.deliver('INBOX', {
+      messageId: 'reply@x',
+      references: ['root@x'],
+      subject: 'Re: Plans',
+      date: '2026-09-20T10:01:00Z',
+      text: 'Yes.',
+    })
+  }
+  const provider = () => (service as any).provider(accountId).provider as ImapProvider
+  const synced = async () => {
+    await (provider() as any).syncPass('all')
+    return (await service.query({ view: 'inbox' })).items[0]
+  }
+
+  it('downloads each message once when opening a conversation', async () => {
+    thread()
+    const { id } = await synced()
+    const source = vi.spyOn(FakePort.prototype, 'source')
+    const messages = await service.conversation(accountId, id)
+    expect(messages.map((m) => m.text?.trim())).toEqual(['Shall we?', 'Yes.'])
+    expect(source).toHaveBeenCalledTimes(2)
+  })
+  it('reads ahead behind the thread the user opened', async () => {
+    thread()
+    const { id } = await synced()
+    const conversation = vi.spyOn(ImapProvider.prototype, 'conversation')
+    const raw = vi.spyOn(ImapProvider.prototype, 'rawMessage')
+    await service.conversation(accountId, id, { prefetch: true })
+    expect(conversation).toHaveBeenLastCalledWith(expect.anything(), id, { background: true })
+    expect(raw.mock.calls.map((call) => call[3])).toEqual([
+      { background: true },
+      { background: true },
+    ])
+    await service.conversation(accountId, id)
+    expect(conversation).toHaveBeenLastCalledWith(expect.anything(), id, { background: false })
+    expect(raw.mock.calls.slice(2).map((call) => call[3])).toEqual([
+      { background: false },
+      { background: false },
+    ])
+  })
+  it('leaves a large message’s full download to the open, never reading it ahead', async () => {
+    server.deliver('INBOX', {
+      messageId: 'huge@x',
+      subject: 'Huge',
+      date: '2026-09-20T10:00:00Z',
+      text: 'Big report. ' + 'z'.repeat(20_000_000),
+    })
+    const { id } = await synced()
+    const source = vi.spyOn(FakePort.prototype, 'source')
+    const ahead = await service.conversation(accountId, id, { prefetch: true })
+    expect(source).not.toHaveBeenCalled()
+    // Not decrypted or verified yet, so nothing is shown that the open could contradict.
+    expect(ahead).toHaveLength(1)
+    expect(ahead[0]).toMatchObject({ subject: 'Huge' })
+    expect(ahead[0]!.html).toBeUndefined()
+    expect(ahead[0]!.text).toBeUndefined()
+    expect(ahead[0]!.authCandidate).toBeUndefined()
+    const [opened] = await service.conversation(accountId, id)
+    expect(source).toHaveBeenCalledTimes(1)
+    expect(opened!.text).toContain('Big report.')
   })
 })

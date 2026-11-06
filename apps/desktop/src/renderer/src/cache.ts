@@ -2,6 +2,7 @@ import { openDB } from 'idb'
 import { QueryClient, dehydrate, hydrate } from '@tanstack/react-query'
 import type { Draft } from '@inlark/core'
 import { isDemo, api } from './api'
+import { isReadAheadKey } from './read-ahead'
 
 const database = openDB(
   'inlark-' +
@@ -18,6 +19,13 @@ const database = openDB(
     },
   },
 )
+/**
+ * Kept across restarts. Read-ahead copies are not: they are never refetched, so a restored one
+ * could show old bodies and flags as a placeholder.
+ */
+export const persists = (key: readonly unknown[]) =>
+  ['mail', 'thread', 'mailboxes', 'identities'].includes(String(key[0])) && !isReadAheadKey(key)
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -63,9 +71,7 @@ export async function restoreCache() {
       if (suspended) return
       const state = dehydrate(queryClient, {
         shouldDehydrateMutation: () => false,
-        shouldDehydrateQuery: (q) =>
-          ['mail', 'thread', 'mailboxes', 'identities'].includes(String(q.queryKey[0])) &&
-          q.state.status === 'success',
+        shouldDehydrateQuery: (q) => persists(q.queryKey) && q.state.status === 'success',
       })
       for (const query of state.queries) query.state.data = redactEncrypted(query.state.data)
       // Keep recent windows, not an ever-growing mailbox snapshot.
