@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { QueryClient } from '../apps/desktop/node_modules/@tanstack/react-query'
-import type { Account, Settings, SplitTab } from '../packages/core/src'
+import type { Account, ImportantSettings, Settings, SplitTab } from '../packages/core/src'
 import {
   activeTabId,
   addRule,
   adjacentTab,
+  alwaysShownText,
   dropIndex,
   editorState,
+  importantLimit,
+  importantStatus,
   matchCountText,
   moveTab,
   needsWholeConversation,
+  parseWords,
   pickerOptions,
   pickProblem,
   putTab,
@@ -17,12 +21,15 @@ import {
   senderOf,
   senderRules,
   serialQueue,
+  setAlways,
+  setNever,
   tabEmptyCopy,
   tabEntries,
   tabForShortcut,
   tabMoves,
   untabbedAccounts,
   whenIdle,
+  wordsProblem,
 } from '../apps/desktop/src/renderer/src/split/tab-model'
 
 const tab = (id: string): SplitTab => ({ id, name: 'Tab ' + id, rules: [] })
@@ -490,5 +497,105 @@ describe('adding a sender to a tab', () => {
         pickProblem({ kind: 'tab', tab: full }, [full], 'p1@client.example', own),
       ).toBeUndefined()
     })
+  })
+})
+
+describe('Important exceptions', () => {
+  const important: ImportantSettings = {
+    always: [
+      { address: 'alerts@firebase.example', words: ['crash'] },
+      { address: 'ceo@client.example' },
+    ],
+    never: ['bot@team.example'],
+  }
+
+  it('reads comma-separated subject words', () => {
+    expect(parseWords(' Crash, FAILURE ,, ,down ')).toEqual(['crash', 'failure', 'down'])
+    expect(parseWords('')).toEqual([])
+    expect(parseWords(' , ')).toEqual([])
+    expect(parseWords('crash, Crash')).toEqual(['crash'])
+    const many = Array.from({ length: 25 }, (_, i) => 'w' + i).join(',')
+    expect(parseWords(many)).toHaveLength(20)
+    expect(parseWords(many)[19]).toBe('w19')
+  })
+
+  it('explains words the settings can’t hold', () => {
+    expect(wordsProblem('crash, failure')).toBeUndefined()
+    expect(wordsProblem('')).toBeUndefined()
+    const many = Array.from({ length: 21 }, (_, i) => 'w' + i).join(',')
+    expect(wordsProblem(many)).toBe('Use 20 words or fewer.')
+    expect(wordsProblem('x'.repeat(101))).toBe('Keep each word to 100 characters or fewer.')
+    expect(wordsProblem('crash, crash, ' + Array.from({ length: 19 }, (_, i) => 'w' + i))).toBe(
+      undefined,
+    )
+  })
+
+  it('always shows a sender, replacing their entry and taking them off Never', () => {
+    expect(setAlways(undefined, ' New@Client.example ', [])).toEqual({
+      always: [{ address: 'new@client.example' }],
+      never: [],
+    })
+    const edited = setAlways(important, 'Alerts@Firebase.example', ['crash', 'failure'])
+    expect(edited.always).toEqual([
+      { address: 'alerts@firebase.example', words: ['crash', 'failure'] },
+      { address: 'ceo@client.example' },
+    ])
+    expect(setAlways(important, 'alerts@firebase.example', []).always[0]).toEqual({
+      address: 'alerts@firebase.example',
+    })
+    const moved = setAlways(important, 'BOT@team.example', ['report'])
+    expect(moved.never).toEqual([])
+    expect(moved.always[2]).toEqual({ address: 'bot@team.example', words: ['report'] })
+    expect(important.always[0].words).toEqual(['crash'])
+    expect(important.never).toEqual(['bot@team.example'])
+  })
+
+  it('never shows a sender, taking them off Always, and lets them back', () => {
+    const off = setNever(important, 'CEO@client.example', true)
+    expect(off.never).toEqual(['bot@team.example', 'ceo@client.example'])
+    expect(off.always).toEqual([{ address: 'alerts@firebase.example', words: ['crash'] }])
+    expect(setNever(important, 'Bot@Team.example', true)).toEqual(important)
+    expect(setNever(important, 'Bot@Team.example', false)).toEqual({
+      always: important.always,
+      never: [],
+    })
+    expect(setNever(undefined, 'a@b.example', true)).toEqual({ always: [], never: ['a@b.example'] })
+    expect(setNever(undefined, 'a@b.example', false)).toEqual({ always: [], never: [] })
+    expect(important.always).toHaveLength(2)
+  })
+
+  it('tells whether a sender is in either list, ignoring case', () => {
+    expect(importantStatus(important, 'Alerts@firebase.example')).toEqual({
+      always: { address: 'alerts@firebase.example', words: ['crash'] },
+      never: false,
+    })
+    expect(importantStatus(important, 'BOT@team.example')).toEqual({ never: true })
+    expect(importantStatus(undefined, 'x@y.example')).toEqual({ never: false })
+  })
+
+  it('explains a full list, unless the sender is already on it', () => {
+    const full: ImportantSettings = {
+      always: Array.from({ length: 500 }, (_, i) => ({ address: 'a' + i + '@x.example' })),
+      never: Array.from({ length: 500 }, (_, i) => 'n' + i + '@x.example'),
+    }
+    expect(importantLimit(full, 'new@x.example', 'always')).toBe(
+      'Always show in Important already lists 500 senders, the most it can.',
+    )
+    expect(importantLimit(full, 'new@x.example', 'never')).toBe(
+      'Never show in Important already lists 500 senders, the most it can.',
+    )
+    expect(importantLimit(full, 'A1@x.example', 'always')).toBeUndefined()
+    expect(importantLimit(full, 'n1@x.example', 'never')).toBeUndefined()
+    expect(importantLimit(undefined, 'new@x.example', 'always')).toBeUndefined()
+  })
+
+  it('says what Always show will do', () => {
+    expect(alwaysShownText('a@x.example', [])).toBe('a@x.example will always show in Important')
+    expect(alwaysShownText('a@x.example', ['crash'])).toBe(
+      'a@x.example will show in Important when the subject contains “crash”',
+    )
+    expect(alwaysShownText('a@x.example', ['crash', 'failure', 'down'])).toBe(
+      'a@x.example will show in Important when the subject contains “crash”, “failure” or “down”',
+    )
   })
 })

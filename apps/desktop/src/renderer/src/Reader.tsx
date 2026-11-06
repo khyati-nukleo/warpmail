@@ -632,6 +632,9 @@ interface ReaderProps {
   onUnsubscribe: () => void
   /** "Add sender to tab…", when tabs can take this conversation's sender. */
   onAddToTab?: () => void
+  /** "Always show in Important…" and "Never show in Important" for this conversation's sender. */
+  alwaysShow?: { label: string; run: () => void }
+  neverShow?: { label: string; run: () => void }
   /** Messages are list summaries while the full conversation loads. */
   loading?: boolean
   onUnlock?: () => void
@@ -721,6 +724,8 @@ export function Reader({
   unsubscribe,
   onUnsubscribe,
   onAddToTab,
+  alwaysShow,
+  neverShow,
   loading = false,
   onUnlock,
   onOpenEncryption,
@@ -860,6 +865,18 @@ export function Reader({
               <UserRound size={14} />
               Add sender to tab…
               <ShortcutHint id="addToTab" className="menu-shortcut ml-auto" />
+            </MenuItem>
+          )}
+          {alwaysShow && (
+            <MenuItem onClick={alwaysShow.run}>
+              <Star size={14} />
+              {alwaysShow.label}
+            </MenuItem>
+          )}
+          {neverShow && (
+            <MenuItem onClick={neverShow.run}>
+              <MailMinus size={14} />
+              {neverShow.label}
             </MenuItem>
           )}
           {offersAction(view, 'spam') && (

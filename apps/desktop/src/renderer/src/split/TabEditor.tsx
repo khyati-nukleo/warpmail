@@ -3,6 +3,7 @@ import type { SplitTab } from '@inlark/core'
 import { useEffect, useId, useRef, useState, type ComponentProps } from 'react'
 import { api } from '../api'
 import { AddToTab } from './AddToTab'
+import { AlwaysShowDialog } from './ImportantException'
 import { editorState, matchCountText } from './tab-model'
 
 // The design's own examples: no real addresses in the app.
@@ -32,7 +33,10 @@ export type TabDialogState = (
   fromCommand?: boolean
 }
 
-/** The tab editor, the delete confirmation and the add-to-tab picker, for `useSplitInbox`'s `dialogs`. */
+/**
+ * The tab editor, the delete confirmation, the add-to-tab picker and the Always show box, for
+ * `useSplitInbox`'s `dialogs`.
+ */
 export function TabDialogs({
   dialog,
   tabs,
@@ -41,6 +45,7 @@ export function TabDialogs({
   onSave,
   onDelete,
   picker,
+  always,
 }: {
   dialog?: TabDialogState
   tabs: SplitTab[]
@@ -49,6 +54,7 @@ export function TabDialogs({
   onSave: (tab: SplitTab) => Promise<void>
   onDelete: (tab: SplitTab) => Promise<void>
   picker: Omit<ComponentProps<typeof AddToTab>, 'tabs' | 'own'>
+  always: ComponentProps<typeof AlwaysShowDialog>
 }) {
   const edit = dialog?.kind === 'edit' ? dialog : undefined
   return (
@@ -58,6 +64,10 @@ export function TabDialogs({
         {...picker}
         tabs={tabs}
         own={own}
+      />
+      <AlwaysShowDialog
+        key={always.state ? 'always-show-' + always.state.seq : 'always-show'}
+        {...always}
       />
       <TabEditor
         key={edit ? 'tab-editor-' + edit.seq : 'tab-editor'}

@@ -367,13 +367,14 @@ function inScope(m: Message, scope: SplitScope): boolean {
     ]
     return senders.some((e) => rules.some((r) => ruleMatches(r, e)))
   }
-  const always = scope.always.map((a) => a.address)
-  if (senders.some((e) => always.includes(e))) return true
-  return (
-    senders.length > 0 &&
-    !senders.some((e) => isAutomatedAddress(e) || scope.never.includes(e)) &&
-    !m.unsubscribe
+  // As the index: a person, or on Always (with a word in the subject when given), and not on Never.
+  if (senders.some((e) => scope.never.includes(e))) return false
+  const subject = m.subject.toLowerCase()
+  const always = scope.always.some(
+    (a) =>
+      senders.includes(a.address) && (!a.words.length || a.words.some((w) => subject.includes(w))),
   )
+  return always || (senders.length > 0 && !senders.some(isAutomatedAddress) && !m.unsubscribe)
 }
 /** Tabs only narrow the inbox view, as in the desktop service. */
 function inTab(m: Message, q: MailQuery): boolean {

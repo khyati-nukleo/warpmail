@@ -7,6 +7,7 @@ import {
   refusalReason,
   type Account,
   type Address,
+  type ImportantSettings,
   type Message,
   type Settings,
   type SplitTab,
@@ -365,4 +366,105 @@ export function whenIdle(client: QueryClient, queryKey: QueryKey): Promise<void>
       if (!check()) unsubscribe = client.getQueryCache().subscribe(check)
     })
   })
+}
+
+/** The settings schema's limits for Important's Always and Never lists. */
+export const importantListMax = 500
+export const wordsMax = 20
+export const wordLengthMax = 100
+
+const addressKey = (address: string) => address.trim().toLowerCase()
+
+/** Subject words typed comma-separated: trimmed, lowercased, without empties or repeats. */
+export function parseWords(text: string): string[] {
+  return allWords(text).slice(0, wordsMax)
+}
+const allWords = (text: string) => [
+  ...new Set(
+    text
+      .split(',')
+      .map((w) => w.trim().toLowerCase())
+      .filter(Boolean),
+  ),
+]
+
+/** Why the typed words can't be saved, if they can't. */
+export function wordsProblem(text: string): string | undefined {
+  const words = allWords(text)
+  if (words.length > wordsMax) return 'Use ' + wordsMax + ' words or fewer.'
+  if (words.some((w) => w.length > wordLengthMax))
+    return 'Keep each word to ' + wordLengthMax + ' characters or fewer.'
+}
+
+/** Always shows `address` in Important (only for subjects with `words`, when given). */
+export function setAlways(
+  important: ImportantSettings | undefined,
+  address: string,
+  words: string[],
+): ImportantSettings {
+  const key = addressKey(address)
+  const entry = words.length ? { address: key, words } : { address: key }
+  const always = important?.always ?? []
+  const at = always.findIndex((a) => addressKey(a.address) === key)
+  return {
+    always: at < 0 ? [...always, entry] : always.map((a, i) => (i === at ? entry : a)),
+    never: (important?.never ?? []).filter((n) => addressKey(n) !== key),
+  }
+}
+
+/** Keeps `address` out of Important (`on`), or lets it back. Turning it on drops any Always. */
+export function setNever(
+  important: ImportantSettings | undefined,
+  address: string,
+  on: boolean,
+): ImportantSettings {
+  const key = addressKey(address)
+  const always = important?.always ?? []
+  const never = (important?.never ?? []).filter((n) => addressKey(n) !== key)
+  if (!on) return { always, never }
+  const listed = important?.never.some((n) => addressKey(n) === key)
+  return {
+    always: always.filter((a) => addressKey(a.address) !== key),
+    never: listed ? important!.never : [...never, key],
+  }
+}
+
+/** The sender's Always entry, and whether they are on Never. */
+export function importantStatus(
+  important: ImportantSettings | undefined,
+  address: string,
+): { always?: ImportantSettings['always'][number]; never: boolean } {
+  const key = addressKey(address)
+  const always = important?.always.find((a) => addressKey(a.address) === key)
+  const never = !!important?.never.some((n) => addressKey(n) === key)
+  return always ? { always, never } : { never }
+}
+
+/** Why the sender can't be added to a list that is full. */
+export function importantLimit(
+  important: ImportantSettings | undefined,
+  address: string,
+  list: 'always' | 'never',
+): string | undefined {
+  const key = addressKey(address)
+  const keys =
+    list === 'always'
+      ? (important?.always ?? []).map((a) => addressKey(a.address))
+      : (important?.never ?? []).map(addressKey)
+  if (keys.length < importantListMax || keys.includes(key)) return
+  return (
+    (list === 'always' ? 'Always' : 'Never') +
+    ' show in Important already lists ' +
+    importantListMax +
+    ' senders, the most it can.'
+  )
+}
+
+/** The toast after saving an Always entry. */
+export function alwaysShownText(address: string, words: string[]): string {
+  if (!words.length) return address + ' will always show in Important'
+  const quoted = words.map((w) => '“' + w + '”')
+  const list =
+    quoted.length > 1 ? quoted.slice(0, -1).join(', ') + ' or ' + quoted.at(-1) : quoted[0]
+  return address + ' will show in Important when the subject contains ' + list
 }

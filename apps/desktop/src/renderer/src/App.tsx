@@ -326,6 +326,7 @@ export function App() {
     go: (next) => go(next),
     inboxUnread: account ? mailboxCounts.byAccount[account.id] || 0 : mailboxCounts.unread,
     notify,
+    showToast: setToast,
     saveSettings: (patch) => savePreferences(patch),
     addToTab: {
       available: view !== 'drafts' && (!!route.thread || !!focused),
@@ -1213,7 +1214,9 @@ export function App() {
   )
   const savePreferences = async (patch: Partial<typeof settings>) => {
     try {
-      const next = await api.settings({ ...settings, ...patch })
+      // The cache, so a save queued before the last one landed doesn't undo it.
+      const latest = queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings ?? settings
+      const next = await api.settings({ ...latest, ...patch })
       queryClient.setQueryData<Bootstrap>(['bootstrap'], (old) => old && { ...old, settings: next })
       return true
     } catch (e) {
@@ -1741,6 +1744,8 @@ export function App() {
               unsubscribe={unsubscribeState}
               onUnsubscribe={() => void unsubscribe()}
               onAddToTab={split.addSender}
+              alwaysShow={split.important?.alwaysShow}
+              neverShow={split.important?.neverShow}
               onUnlock={() => void unlock()}
               onOpenEncryption={() => openSettings('encryption')}
             />

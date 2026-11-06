@@ -4,8 +4,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Inbox,
+  MailMinus,
   PencilEdit,
   PenLine,
+  Star,
   Trash2,
   UserRound,
 } from '@inlark/ui/icons'
@@ -13,7 +15,10 @@ import {
   friendlyError,
   ownAddresses,
   type Account,
+  type Address,
   type Bootstrap,
+  type ImportantSettings,
+  type MailQuery,
   type Message,
   type Settings,
   type SplitTab,
@@ -22,6 +27,7 @@ import { api } from '../api'
 import { queryClient } from '../cache'
 import type { Command } from '../CommandPalette'
 import type { RouteSearch } from '../main'
+import { openedThreadQuery } from '../read-ahead'
 import {
   ignoreInputsForCommand,
   useShortcutText,
@@ -29,15 +35,21 @@ import {
   type ShortcutId,
 } from '../shortcuts'
 import type { AddToTabState } from './AddToTab'
+import type { AlwaysShowState } from './ImportantException'
 import {
   activeTabId,
   addRule,
   adjacentTab,
+  alwaysShownText,
+  importantLimit,
+  importantStatus,
   moveTab,
   needsWholeConversation,
   putTab,
   senderOf,
   serialQueue,
+  setAlways,
+  setNever,
   tabElementId,
   tabEntries,
   tabForShortcut,
@@ -58,6 +70,7 @@ export function useSplitInbox({
   go,
   inboxUnread,
   notify,
+  showToast,
   saveSettings,
   addToTab,
 }: {
@@ -68,9 +81,14 @@ export function useSplitInbox({
   /** The sidebar's inbox unread count for the accounts in scope. */
   inboxUnread: number
   notify: (text: string, tone?: 'error' | 'info') => void
+  /** A toast with an Undo button. */
+  showToast: (toast: { text: string; onUndo: () => void }) => void
   /** Saves and shows any error itself; resolves to whether the save worked. */
   saveSettings: (patch: Partial<Settings>) => Promise<boolean>
-  /** The conversation "Add sender to tab…" works on: the open one, or the focused one. */
+  /**
+   * The conversation "Add sender to tab…" works on: the open one, or the focused one. "Always
+   * show" and "Never show" in Important work on the open one.
+   */
   addToTab: {
     available: boolean
     /** Read when the picker opens. List summaries hold only the latest message. */
@@ -211,8 +229,11 @@ export function useSplitInbox({
   // The latest render's conversation, for a picker that had to wait for one.
   const target = useRef(addToTab)
   target.current = addToTab
-  /** Opens the add-to-tab picker for the newest sender who isn't the user. */
-  const openPicker = async (fromCommand = false) => {
+  /**
+   * The newest sender in the conversation who isn't the user. Says why when there is none, and
+   * gives nothing if the user moved on while the conversation loaded.
+   */
+  const findSender = async (): Promise<Address | undefined> => {
     const conversation = addToTab.conversation()
     if (!conversation) return
     const { accountId, id } = conversation
@@ -222,15 +243,20 @@ export function useSplitInbox({
       try {
         sender = senderOf(await api.conversation(accountId, id, { prefetch: true }), own)
       } catch (error) {
-        return notify(friendlyError(error), 'error')
+        return void notify(friendlyError(error), 'error')
       }
       // Moved on while it loaded: another conversation, or another dialog or Ctrl+K is open.
       const now = target.current.conversation()
       if (now?.accountId !== accountId || now.id !== id) return
       if (document.querySelector('[role="dialog"][data-open]')) return
     }
-    if (!sender) return notify('Every message in this conversation is from you.', 'info')
-    setPicker({ sender, fromCommand, open: true, seq: ++dialogs.current })
+    if (!sender) return void notify('Every message in this conversation is from you.', 'info')
+    return sender
+  }
+  /** Opens the add-to-tab picker for the newest sender who isn't the user. */
+  const openPicker = async (fromCommand = false) => {
+    const sender = await findSender()
+    if (sender) setPicker({ sender, fromCommand, open: true, seq: ++dialogs.current })
   }
   const closePicker = (refocus = true) => {
     if (refocus) focusActiveTabAfterDialog(!!picker?.fromCommand)
@@ -258,6 +284,88 @@ export function useSplitInbox({
       seq: ++dialogs.current,
     })
   }
+
+  // The cache, not this render's settings, so a quick second change builds on the first.
+  const latestImportant = () =>
+    queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings.important ?? settings.important
+  /**
+   * Saves a change to Important's Always and Never lists, one at a time like tab saves, and
+   * reloads the Important list. Resolves to the lists before the change, or false if it failed.
+   */
+  const changeImportant = (
+    change: (important?: ImportantSettings) => ImportantSettings | undefined,
+  ) =>
+    queue(async () => {
+      const before = latestImportant()
+      if (!(await saveSettings({ important: change(before) }))) return false
+      // Tab counts follow on their own: their key holds these lists.
+      void queryClient.invalidateQueries({
+        queryKey: ['mail'],
+        predicate: (query) => (query.queryKey[1] as MailQuery | undefined)?.tab === 'important',
+      })
+      return { before }
+    })
+
+  // The open conversation's sender, once it has loaded: null when every message is the user's.
+  const openKey =
+    route.thread && route.threadAccount
+      ? openedThreadQuery(api, route.threadAccount, route.thread, {}).queryKey
+      : undefined
+  const openMessages = openKey && queryClient.getQueryData<Message[]>(openKey)
+  const openSender = openMessages ? (senderOf(openMessages, own) ?? null) : undefined
+  const exceptions = addToTab.available && !!route.thread && openSender !== null
+  // Until the conversation loads, the items read as for a sender on neither list.
+  const status = openSender
+    ? importantStatus(settings.important, openSender.email)
+    : { always: undefined, never: false }
+
+  const [always, setAlwaysDialog] = useState<AlwaysShowState>()
+  /** "Always show in Important…": the subject words box, with the sender's words if any. */
+  const openAlways = async (fromCommand = false) => {
+    const sender = await findSender()
+    if (!sender) return
+    const important = latestImportant()
+    const limit = importantLimit(important, sender.email, 'always')
+    if (limit) return notify(limit, 'info')
+    const entry = importantStatus(important, sender.email).always
+    setAlwaysDialog({
+      sender,
+      words: entry?.words ?? [],
+      editing: !!entry,
+      fromCommand,
+      open: true,
+      seq: ++dialogs.current,
+    })
+  }
+  const closeAlways = () => {
+    focusActiveTabAfterDialog(!!always?.fromCommand)
+    setAlwaysDialog((shown) => shown && { ...shown, open: false })
+  }
+  /** Saves the sender's Always entry; a failed save keeps the box open. */
+  const saveAlways = async (words: string[]) => {
+    if (!always) return
+    const { email } = always.sender
+    if (!(await changeImportant((important) => setAlways(important, email, words)))) return
+    closeAlways()
+    notify(alwaysShownText(email, words))
+  }
+  /** "Never show in Important" (`on`), or "Show in Important again"; at once, with Undo. */
+  const neverShow = async (on: boolean) => {
+    const sender = await findSender()
+    if (!sender) return
+    const { email } = sender
+    const limit = on && importantLimit(latestImportant(), email, 'never')
+    if (limit) return notify(limit, 'info')
+    const saved = await changeImportant((important) => setNever(important, email, on))
+    if (!saved) return
+    const undo = async () => {
+      if (await changeImportant(() => saved.before)) notify('Undone.')
+    }
+    if (on) showToast({ text: email + ' won’t show in Important', onUndo: () => void undo() })
+    else notify(email + ' can show in Important again')
+  }
+  const alwaysLabel = status.always ? 'Edit Always show…' : 'Always show in Important…'
+  const neverLabel = status.never ? 'Show in Important again' : 'Never show in Important'
 
   const shortcutHandlers: Partial<Record<ShortcutId, ShortcutHandler>> = {
     addToTab: {
@@ -295,6 +403,25 @@ export function useSplitInbox({
     checked: visible && entry.id === active,
     run: () => select(entry.id),
   }))
+  if (exceptions)
+    commands.unshift(
+      {
+        id: 'important-always',
+        group: 'Tabs',
+        label: alwaysLabel,
+        icon: Star,
+        keywords: 'split inbox important sender exception subject words',
+        run: () => void openAlways(true),
+      },
+      {
+        id: 'important-never',
+        group: 'Tabs',
+        label: neverLabel,
+        icon: MailMinus,
+        keywords: 'split inbox important sender exception hide',
+        run: () => void neverShow(!status.never),
+      },
+    )
   if (addToTab.available)
     commands.unshift({
       id: 'tab-add-sender',
@@ -342,10 +469,17 @@ export function useSplitInbox({
     visible,
     select,
     saveTabs,
-    /** A tab dialog or the add-to-tab picker is open, so the app's shortcuts wait. */
-    dialogOpen: !!dialog?.open || !!picker?.open,
+    /** A tab dialog, the add-to-tab picker or the Always show box is open: shortcuts wait. */
+    dialogOpen: !!dialog?.open || !!picker?.open || !!always?.open,
     /** "Add sender to tab…" for the open conversation, from the reader's menu. */
     addSender: addToTab.available ? () => void openPicker() : undefined,
+    /** The reader menu's "Always show" and "Never show" items for the open conversation. */
+    important: exceptions
+      ? {
+          alwaysShow: { label: alwaysLabel, run: () => void openAlways() },
+          neverShow: { label: neverLabel, run: () => void neverShow(!status.never) },
+        }
+      : undefined,
     /** Props for `TabDialogs`. */
     dialogs: {
       dialog,
@@ -355,6 +489,7 @@ export function useSplitInbox({
       onSave: saveTab,
       onDelete: deleteTab,
       picker: { state: picker, onClose: () => closePicker(), onPick: pickTab, onNewTab: newTabFor },
+      always: { state: always, onClose: closeAlways, onSave: saveAlways },
     },
     shortcutHandlers,
     commands,
