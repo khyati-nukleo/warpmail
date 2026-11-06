@@ -138,7 +138,7 @@ The "expected" column comes from how the Gmail API works, not from measurements.
 
 ## Speed work (item 0)
 
-Done and tested by Khyati on 2026-11-05 (commit 63782ff on `fix/gmail-speed`). Measured with a temporary timing log, removed afterwards.
+Done and tested by Khyati on 2026-11-05 (branch `fix/gmail-speed`, PR #1). Measured with a temporary timing log, removed afterwards.
 
 |                            | Before                               | After                                                         |
 | -------------------------- | ------------------------------------ | ------------------------------------------------------------- |
