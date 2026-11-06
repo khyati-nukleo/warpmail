@@ -1,3 +1,4 @@
+import type { ImportantSettings, SplitTab } from './split'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -182,6 +183,8 @@ export interface MailQuery {
   before?: string
   hasAttachment?: boolean
   unread?: boolean
+  /** Inbox split: `important` or a user tab id. Only applies to the inbox view. */
+  tab?: string
 }
 export interface QueryPage {
   items: Conversation[]
@@ -247,6 +250,11 @@ export interface Settings {
    * pressed in turn, such as `['Mod+K']` or `['G', 'I']`; an empty list turns a shortcut off.
    */
   shortcuts?: Record<string, string[][]>
+  /** Inbox split tabs, in display order. */
+  splitTabs?: SplitTab[]
+  important?: ImportantSettings
+  /** The one-time offer to import the Superhuman tabs has been answered. */
+  splitImportOffered?: boolean
 }
 export const defaultSettings: Settings = {
   theme: 'dark',

@@ -1,13 +1,4 @@
-import type { Address, Message } from '@inlark/core'
-
-/** No-reply and bounce senders show up in mail but can't receive it. */
-function undeliverable(email: string) {
-  const at = email.lastIndexOf('@')
-  const local = (at < 0 ? email : email.slice(0, at)).toLowerCase()
-  if (local === 'mailer-daemon' || local === 'postmaster') return true
-  // Bounce and VERP addresses: bounce, bounces, bounces+id, bounce-123.
-  return /^(noreply|donotreply|bounce)/.test(local.replace(/[.\-_]/g, ''))
-}
+import { isAutomatedAddress, type Address, type Message } from '@inlark/core'
 
 /** People you hear from most come first; your own and undeliverable addresses never appear. */
 export function recipientSuggestions(
@@ -20,7 +11,7 @@ export function recipientSuggestions(
     for (const m of c.messages)
       for (const address of [...m.from, ...m.to, ...m.cc]) {
         const key = address.email.toLowerCase()
-        if (own.has(key) || undeliverable(key)) continue
+        if (own.has(key) || isAutomatedAddress(key)) continue
         const entry = seen.get(key)
         if (entry) {
           entry.count++

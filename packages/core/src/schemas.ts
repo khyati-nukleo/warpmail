@@ -122,6 +122,7 @@ export const querySchema = z.object({
   before: z.string().max(40).optional(),
   hasAttachment: z.boolean().optional(),
   unread: z.boolean().optional(),
+  tab: z.string().min(1).max(64).optional(),
 })
 export const actionSchema = z.enum([
   'archive',
@@ -208,6 +209,30 @@ export const settingsSchema = z.object({
   shortcuts: z
     .record(z.string().max(64), z.array(z.array(z.string().min(1).max(64)).min(1).max(4)).max(16))
     .optional(),
+  splitTabs: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(64),
+        name: z.string().trim().min(1).max(60),
+        rules: z.array(z.string().max(320)).max(500),
+      }),
+    )
+    .max(50)
+    .optional(),
+  important: z
+    .object({
+      always: z
+        .array(
+          z.object({
+            address: z.string().max(320),
+            words: z.array(z.string().max(100)).max(20).optional(),
+          }),
+        )
+        .max(500),
+      never: z.array(z.string().max(320)).max(500),
+    })
+    .optional(),
+  splitImportOffered: z.boolean().optional(),
 })
 export const ipcSchemas = {
   encryptionStatus: z.tuple([]),
