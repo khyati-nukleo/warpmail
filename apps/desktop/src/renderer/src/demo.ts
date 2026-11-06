@@ -4,6 +4,8 @@ import {
   defaultSettings,
   isAutomatedAddress,
   resolveSplitScope,
+  suggestRules,
+  type AddressSeen,
   inboxExport,
   parseInboxExport,
   ruleMatches,
@@ -1234,6 +1236,21 @@ export const demoAPI: DesktopMailAPI = {
         if (m?.mailboxIds.inbox && scope && inScope(m, scope)) n++
       }
     return n
+  },
+  ruleSuggestions: async (text, exclude) => {
+    const seen = new Map<string, AddressSeen>()
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (!m || m.mailboxIds.junk || m.mailboxIds.trash) continue
+        for (const { email, name } of [...m.from, ...m.to]) {
+          const key = email.toLowerCase()
+          const entry = seen.get(key)
+          if (entry) entry.count++
+          else seen.set(key, { email: key, name: name || undefined, count: 1 })
+        }
+      }
+    return suggestRules(text, [...seen.values()], ownDemoAddresses(), { exclude })
   },
   // The browser's download and file picker stand in for the desktop's dialogs.
   exportInbox: async () => {

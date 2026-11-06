@@ -290,6 +290,7 @@ export const ipcSchemas = {
   query: z.tuple([querySchema, z.record(z.string(), z.number().int().nonnegative()).optional()]),
   tabCounts: z.tuple([id.optional()]),
   tabMatchCount: z.tuple([z.array(z.string().max(320)).max(500)]),
+  ruleSuggestions: z.tuple([z.string().max(320), z.array(z.string().max(320)).max(500)]),
   exportInbox: z.tuple([]),
   importInbox: z.tuple([]),
   conversation: z.tuple([

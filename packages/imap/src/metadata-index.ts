@@ -1,4 +1,4 @@
-import type { Address, SplitScope } from '@inlark/core'
+import type { Address, AddressSeen, SplitScope } from '@inlark/core'
 
 /**
  * Persistent IMAP metadata, injected into the provider. The desktop app implements this with
@@ -103,6 +103,16 @@ export interface MetadataIndex {
     inboxId: string,
     scopes: Record<string, SplitScope>,
   ): Promise<Record<string, { conversations: number; unread: number }>>
+  /**
+   * From and To addresses on mail received after `sinceMs` in these mailboxes, whose address or
+   * name contains `term` (lowercase; empty for all), most emails first, for rule suggestions.
+   */
+  addressesSeen(
+    accountId: string,
+    mailboxIds: string[],
+    sinceMs: number,
+    term: string,
+  ): Promise<AddressSeen[]>
   /** Total and unread message counts stored for the account, for progress reporting. */
   counts(accountId: string): Promise<{ messages: number }>
 

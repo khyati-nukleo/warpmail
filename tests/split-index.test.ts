@@ -14,7 +14,11 @@ import {
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import { WorkerMetadataIndex, type IndexPort } from '../apps/desktop/src/main/imap-index/client'
 import { registerSplitFunctions } from '../apps/desktop/src/main/imap-index/split-schema'
-import { splitFilter, tabCountQuery } from '../apps/desktop/src/main/imap-index/split-sql'
+import {
+  addressesSeenQuery,
+  splitFilter,
+  tabCountQuery,
+} from '../apps/desktop/src/main/imap-index/split-sql'
 import type { ConversationFilter, FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
 
 let directory: string
@@ -879,6 +883,74 @@ describe('tab filter', () => {
     }
     sync.close()
   }, 60_000)
+})
+
+describe('addresses seen for rule suggestions', () => {
+  const now = Date.UTC(2026, 10, 6)
+  const ago = (days: number) => new Date(now - days * 86_400_000).toISOString()
+  const since = now - 30 * 86_400_000
+  const person = (email: string, name = '') => [{ name, email }]
+
+  it('counts From and To addresses of recent mail in the given folders', async () => {
+    const listed = await index.syncMailboxes('a', [folder('INBOX'), folder('Sent'), folder('Junk')])
+    const [INBOX, Sent, Junk] = listed.map((b) => b.id) as [string, string, string]
+    await index.upsertMessages('a', [
+      message(INBOX, 1, { from: person('lee@client.example', 'Lee Park'), receivedAt: ago(1) }),
+      message(INBOX, 2, {
+        from: person('LEE@client.example'),
+        cc: person('cc@client.example'),
+        receivedAt: ago(2),
+      }),
+      message(Sent, 3, {
+        from: person('me@work.example'),
+        to: person('sam@client.example', 'Sam'),
+        receivedAt: ago(3),
+      }),
+      // Too old, in a folder not asked for, or not matching the term.
+      message(INBOX, 4, { from: person('old@client.example'), receivedAt: ago(31) }),
+      message(Junk, 5, { from: person('spam@client.example'), receivedAt: ago(1) }),
+      message(INBOX, 6, { from: person('kim@other.example', 'Kim'), receivedAt: ago(1) }),
+      // A Gmail copy of message 1 counts once.
+      message(Sent, 7, {
+        from: person('lee@client.example', 'Lee Park'),
+        receivedAt: ago(1),
+        emailId: 'g1',
+      }),
+      message(INBOX, 8, {
+        from: person('lee@client.example', 'Lee Park'),
+        receivedAt: ago(1),
+        emailId: 'g1',
+      }),
+    ])
+    const seen = await index.addressesSeen('a', [INBOX, Sent], since, 'client')
+    expect(seen.sort((a, b) => a.email.localeCompare(b.email))).toEqual([
+      { email: 'lee@client.example', name: 'Lee Park', count: 3 },
+      { email: 'sam@client.example', name: 'Sam', count: 1 },
+    ])
+    // A name matches too, and an empty term lists every address.
+    expect((await index.addressesSeen('a', [INBOX], since, 'kim')).map((a) => a.email)).toEqual([
+      'kim@other.example',
+    ])
+    expect((await index.addressesSeen('a', [INBOX, Sent], since, '')).length).toBe(5)
+    expect(await index.addressesSeen('a', [], since, '')).toEqual([])
+  })
+
+  it('reads recent mail through the received index', async () => {
+    await index.syncMailboxes('a', [folder('INBOX')])
+    const db = new DatabaseSync(path)
+    registerSplitFunctions(db)
+    try {
+      const query = addressesSeenQuery('a', ['box1', 'box2'], since, 'cli')!
+      const plan = db.prepare('EXPLAIN QUERY PLAN ' + query.sql).all(...query.params) as {
+        detail: string
+      }[]
+      expect(plan.map((row) => row.detail).join('\n')).toMatch(
+        /SEARCH m USING INDEX messages_mailbox_received \(account_id=\? AND mailbox_id=\? AND received_ms>\?\)/,
+      )
+    } finally {
+      db.close()
+    }
+  })
 })
 
 describe('updating the index after an upgrade', () => {

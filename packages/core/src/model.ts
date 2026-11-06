@@ -1,4 +1,5 @@
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
+import type { AddressSeen, RuleSuggestion } from './split-suggest'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -487,6 +488,8 @@ export interface MailProvider {
     account: Account,
     scopes: Record<string, SplitScope>,
   ): Promise<Record<string, { conversations: number; unread: number }>>
+  /** Recent From and To addresses containing `term`, for rule suggestions. Omitted without tabs. */
+  addressesSeen?(account: Account, term: string): Promise<AddressSeen[]>
   /** `background` loads run behind the user's own work, such as reading ahead to nearby threads. */
   conversation(
     account: Account,
@@ -699,6 +702,8 @@ export interface DesktopMailAPI {
   tabCounts(accountId?: string): Promise<Record<string, number>>
   /** Inbox conversations matching these rules, across IMAP accounts. */
   tabMatchCount(rules: string[]): Promise<number>
+  /** Rules to offer for the rules box line being typed, leaving out those in `exclude`. */
+  ruleSuggestions(text: string, exclude: string[]): Promise<RuleSuggestion[]>
   /** Saves the tabs and Important lists to a file the user picks; false when cancelled. */
   exportInbox(): Promise<boolean>
   /** Reads an inbox export the user picks (it isn't applied); undefined when cancelled. */

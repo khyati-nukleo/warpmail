@@ -166,6 +166,9 @@ export class WorkerMetadataIndex implements MetadataIndex {
   tabCounts(...args: Args<'tabCounts'>) {
     return this.call('tabCounts', args)
   }
+  addressesSeen(...args: Args<'addressesSeen'>) {
+    return this.call('addressesSeen', args)
+  }
   counts(...args: Args<'counts'>) {
     return this.call('counts', args)
   }

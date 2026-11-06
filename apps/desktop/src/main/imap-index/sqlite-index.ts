@@ -2,7 +2,7 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlit
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { isAutomatedMessage, type SplitScope } from '@inlark/core'
+import { isAutomatedMessage, type AddressSeen, type SplitScope } from '@inlark/core'
 import {
   firstEmail,
   INSERT_PARTICIPANT_SQL,
@@ -12,7 +12,7 @@ import {
   registerSplitFunctions,
   storedAutomation,
 } from './split-schema'
-import { splitFilter, tabCountQuery } from './split-sql'
+import { addressesSeenQuery, splitFilter, tabCountQuery } from './split-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -59,6 +59,7 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   findByMessageId: true,
   conversations: true,
   tabCounts: true,
+  addressesSeen: true,
   counts: true,
   getMeta: true,
   setMeta: true,
@@ -1144,6 +1145,17 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       counts[key] = { conversations: row?.c ?? 0, unread: row?.u ?? 0 }
     }
     return counts
+  }
+
+  addressesSeen(accountId: string, mailboxIds: string[], sinceMs: number, term: string) {
+    const query = addressesSeenQuery(accountId, mailboxIds, sinceMs, term)
+    if (!query) return []
+    return this.all<{ email: string; name: string | null; count: number }>(
+      query.sql,
+      ...query.params,
+    ).map((row): AddressSeen =>
+      row.name ? { ...row, name: row.name } : { email: row.email, count: row.count },
+    )
   }
 
   counts(accountId: string) {

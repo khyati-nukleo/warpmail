@@ -180,3 +180,42 @@ export function tabCountQuery(
     params: [accountId, inboxId, ...test.params],
   }
 }
+
+const jsonList = (column: string) =>
+  `json_each(CASE WHEN json_valid(${column}) THEN ${column} ELSE '[]' END)`
+
+/**
+ * From and To addresses of mail received after `sinceMs` in these mailboxes whose address or name
+ * contains `term` (lowercase; empty for all), with how many emails each was on. Gmail's copies of
+ * one email count once. Null without mailboxes.
+ */
+export function addressesSeenQuery(
+  accountId: string,
+  mailboxIds: string[],
+  sinceMs: number,
+  term: string,
+  limit = 200,
+): SqlFragment | null {
+  if (!mailboxIds.length) return null
+  return {
+    sql: `WITH recent AS (
+        SELECT coalesce(m.email_id, m.seq) AS e, m.from_addr, m.to_addr FROM messages m
+        WHERE m.account_id = ? AND m.mailbox_id IN (SELECT value FROM json_each(?))
+          AND m.received_ms > ?
+          AND (instr(split_lower(m.from_addr), ?) > 0 OR instr(split_lower(m.to_addr), ?) > 0)
+      ), listed AS (
+        SELECT r.e, a.value AS v FROM recent r, ${jsonList('r.from_addr')} a
+        UNION ALL
+        SELECT r.e, a.value AS v FROM recent r, ${jsonList('r.to_addr')} a
+      ), addresses AS (
+        SELECT e, split_lower(trim(json_extract(v, '$.email'))) AS email,
+          nullif(trim(json_extract(v, '$.name')), '') AS name
+        FROM listed WHERE json_type(v) = 'object'
+      )
+      SELECT email, max(name) AS name, count(DISTINCT e) AS count FROM addresses
+      WHERE email LIKE '_%@_%'
+        AND (instr(email, ?) > 0 OR instr(split_lower(coalesce(name, '')), ?) > 0)
+      GROUP BY email ORDER BY count DESC, email LIMIT ?`,
+    params: [accountId, list(mailboxIds), sinceMs, term, term, term, term, limit],
+  }
+}

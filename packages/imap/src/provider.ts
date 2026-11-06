@@ -18,7 +18,9 @@ import {
   type MailQuery,
   type ProviderQuery,
   type SplitScope,
+  suggestionDays,
   tabApplies,
+  type AddressSeen,
   type Message,
   type MessageChanges,
   type OutgoingMessage,
@@ -957,6 +959,20 @@ export class ImapProvider implements MailProvider {
         Object.keys(scopes).map((id) => [id, { conversations: 0, unread: 0 }]),
       )
     return this.index.tabCounts(this.accountId, inbox.id, scopes)
+  }
+  /** Addresses on the last 30 days of mail outside Junk and Trash, for rule suggestions. */
+  async addressesSeen(_account: Account, term: string): Promise<AddressSeen[]> {
+    const boxes = await this.index.listMailboxes(this.accountId)
+    const roles = rolesByPath(this.review(boxes))
+    const ids = boxes
+      .filter((b) => !b.noSelect && !['junk', 'trash'].includes(roles.get(b.path) || ''))
+      .map((b) => b.id)
+    return this.index.addressesSeen(
+      this.accountId,
+      ids,
+      Date.now() - suggestionDays * 86_400_000,
+      term,
+    )
   }
   async query(
     account: Account,

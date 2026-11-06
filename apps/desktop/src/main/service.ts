@@ -46,6 +46,9 @@ import {
   type ServerSettings,
   type SubmissionSummary,
   type Message,
+  type AddressSeen,
+  type RuleSuggestion,
+  suggestionTerm,
 } from '@inlark/core'
 import { JmapProvider } from '@inlark/jmap'
 import { publicFetch } from './public-fetch'
@@ -58,6 +61,7 @@ import {
   exportInboxFile,
   importInboxFile,
   isImap,
+  ruleSuggestionsFrom,
   rulesScope,
   sumMatches,
   sumUnread,
@@ -988,18 +992,27 @@ export class MailService {
           p.tabCounts?.(a, { draft: rulesScope(rules, this.accounts) }) ?? Promise.resolve({}),
       ),
     )
+  ruleSuggestions = async (text: string, exclude: string[]): Promise<RuleSuggestion[]> => {
+    const term = suggestionTerm(text)
+    if (term === undefined) return []
+    const seen = await this.askTabs(
+      undefined,
+      (p, a) => p.addressesSeen?.(a, term) ?? Promise.resolve([] as AddressSeen[]),
+    )
+    return ruleSuggestionsFrom(text, exclude, this.accounts, seen)
+  }
   exportInbox = (): Promise<boolean> => exportInboxFile(this.settings)
   importInbox = (): Promise<InboxExport | undefined> => importInboxFile()
-  /** Each IMAP account's tab counts; an account that fails is left out. */
-  private async askTabs(
+  /** Each connected IMAP account's answer for the split inbox; an account that fails is left out. */
+  private async askTabs<T = TabCounts>(
     accountId: string | undefined,
-    ask: (p: MailProvider, a: Account) => Promise<TabCounts>,
-  ) {
+    ask: (p: MailProvider, a: Account) => Promise<T>,
+  ): Promise<T[]> {
     const accounts = this.accounts.filter(
       (a) => isImap(a) && (!accountId || a.id === accountId) && this.providers.has(a.connectionId),
     )
     const settled = await Promise.allSettled(accounts.map((a) => this.guard(a.id, ask)))
-    return settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value as TabCounts] : []))
+    return settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value as T] : []))
   }
   /**
    * Runs one read-plan-write cycle at a time per account. Each cycle checks the server state it

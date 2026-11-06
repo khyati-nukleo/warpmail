@@ -269,6 +269,32 @@ export function matchCountText(n: number) {
   )
 }
 
+/**
+ * Problems to show while `typingLine` (1-based) is being typed: an unreadable rule there is
+ * probably half-typed, so it waits; a refused rule says why at once.
+ */
+export function shownProblems(problems: RuleProblem[], typingLine: number | undefined) {
+  return problems.filter((p) => p.line !== typingLine || parseRule(p.text) !== undefined)
+}
+
+/** The rules box line holding the caret, for suggestions. */
+export function ruleLineAt(text: string, caret: number) {
+  const start = caret > 0 ? text.lastIndexOf('\n', caret - 1) + 1 : 0
+  const next = text.indexOf('\n', caret)
+  const end = next < 0 ? text.length : next
+  return { start, end, text: text.slice(start, end) }
+}
+
+/** Puts a chosen suggestion in place of the caret's line; the last line gains a new line after it. */
+export function completeRuleLine(text: string, caret: number, rule: string) {
+  const line = ruleLineAt(text, caret)
+  const after = line.end < text.length ? text.slice(line.end) : '\n'
+  return {
+    text: text.slice(0, line.start) + rule + after,
+    caret: line.start + rule.length + (line.end < text.length ? 0 : 1),
+  }
+}
+
 /** Where focus goes in the tab row for a key, or nothing for keys the row doesn't handle. */
 export function rovingTarget(index: number, count: number, key: string): number | undefined {
   if (key === 'ArrowRight') return (index + 1) % count

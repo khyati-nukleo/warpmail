@@ -204,6 +204,39 @@ describe('split inbox in the service', () => {
     // Own domain and unparseable rules match nothing.
     expect(await service.tabMatchCount(['@work.example', 'nonsense'])).toBe(0)
   })
+  it('suggests rules from both accounts’ recent mail, sent and received', async () => {
+    const recent = new Date(Date.now() - 86_400_000).toISOString()
+    servers.a!.deliver('INBOX', {
+      messageId: 'a4@x',
+      from: [{ name: 'Lee Park', email: 'lee@client.example' }],
+      date: recent,
+    })
+    servers.a!.deliver('Sent', {
+      messageId: 'a5@x',
+      from: person('me@work.example'),
+      to: [{ name: 'Robin', email: 'robin@clientele.example' }],
+      date: recent,
+    })
+    servers.b!.deliver('INBOX', {
+      messageId: 'b3@x',
+      from: [{ name: '', email: 'lee@client.example' }],
+      date: recent,
+    })
+    await sync('a')
+    await sync('b')
+    // Lee's two emails, one per account, put that domain first; older mail isn't counted.
+    expect(await service.ruleSuggestions('@cli', [])).toEqual([
+      { rule: '@client.example' },
+      { rule: '@clientele.example' },
+    ])
+    expect(await service.ruleSuggestions('lee', [])).toEqual([
+      { rule: 'lee@client.example', name: 'Lee Park' },
+    ])
+    expect(await service.ruleSuggestions('rob', ['robin@clientele.example'])).toEqual([])
+    // The own domain is refused as a rule, so it's never offered.
+    expect(await service.ruleSuggestions('@work', [])).toEqual([])
+    expect(await service.ruleSuggestions('', [])).toEqual([])
+  })
   it('marks an account whose index is updating after an upgrade', async () => {
     const updating = () =>
       (

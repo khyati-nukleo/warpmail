@@ -13,8 +13,10 @@ import {
   senderSchema,
   splitLimits,
   splitTabSchema,
+  suggestRules,
   tabApplies,
   type Account,
+  type AddressSeen,
   type InboxExport,
   type Settings,
   type SplitScope,
@@ -77,6 +79,26 @@ export function sumUnread(scopes: Record<string, SplitScope>, perAccount: TabCou
   for (const counts of perAccount)
     for (const [id, c] of Object.entries(counts)) total[id] = (total[id] ?? 0) + c.unread
   return total
+}
+
+/** Suggestions for the typed line from every account's recent addresses, counted together. */
+export function ruleSuggestionsFrom(
+  text: string,
+  exclude: string[],
+  accounts: Account[],
+  perAccount: AddressSeen[][],
+) {
+  const merged = new Map<string, AddressSeen>()
+  for (const seen of perAccount)
+    for (const a of seen) {
+      const entry = merged.get(a.email)
+      if (!entry) merged.set(a.email, { ...a })
+      else {
+        entry.count += a.count
+        entry.name ||= a.name
+      }
+    }
+  return suggestRules(text, [...merged.values()], ownAddresses(accounts), { exclude })
 }
 
 /** Conversations matching the rules being edited, summed over accounts. */
