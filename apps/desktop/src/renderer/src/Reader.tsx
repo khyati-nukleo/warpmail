@@ -54,6 +54,7 @@ import { HintIconButton } from './HintIconButton'
 import { actionLimit } from './account-limits'
 import { ShortcutHint, useShortcutText } from './shortcuts'
 import { emailBodyHtml, emailSanitizeOptions } from './email-html'
+import { markPaperCards, needsPaper, paperClass } from './email-paper'
 import { offersAction } from './view-actions'
 import { SecuritySummary, WithheldBody, withheld } from './MessageSecurity'
 
@@ -124,16 +125,6 @@ function AuthAction({ message }: { message: Message }) {
   )
 }
 
-/**
- * Mail that paints its own backgrounds, lays itself out with tables, or carries images (logos
- * are usually drawn for white) is shown on white paper, as its sender designed it. Everything
- * else adopts the app theme, so a short note reads like part of the app.
- */
-const hasOwnStyling = (root: DocumentFragment) =>
-  !!root.querySelector('[bgcolor],[background],table table,img') ||
-  [...root.querySelectorAll('[style]')].some((element) =>
-    /(?:^|;)\s*background(?:-color|-image)?\s*:/i.test(element.getAttribute('style') || ''),
-  )
 const luminance = (color: string) => {
   const [r, g, b] = (color.match(/[\d.]+/g) || []).slice(0, 3).map((value) => {
     const channel = Number(value) / 255
@@ -146,6 +137,8 @@ const softenColors = (doc: Document, background: string) => {
   const base = luminance(background)
   if (base === null) return
   for (const element of doc.body.querySelectorAll<HTMLElement>('[style*="color"],font[color]')) {
+    // White cards keep the sender's colours.
+    if (element.closest('.' + paperClass)) continue
     const value = luminance(getComputedStyle(element).color)
     if (value === null) continue
     const contrast = (Math.max(base, value) + 0.05) / (Math.min(base, value) + 0.05)
@@ -185,7 +178,13 @@ const adaptiveStyles = (theme: 'light' | 'dark') =>
   token('--text') +
   '}::selection{background:' +
   token('--accent') +
-  '44}'
+  '44}.' +
+  paperClass +
+  '{width:fit-content;max-width:100%;box-sizing:border-box;margin:14px 0;padding:12px 14px;border:0;border-radius:8px;background:#fff;color:#24262b;color-scheme:light}.' +
+  paperClass +
+  ' a{color:#5a4fb0}.' +
+  paperClass +
+  ' blockquote{color:#5d6068;border-color:#d5d5dc}'
 const sharedStyles =
   'img{max-width:100%;height:auto}table{max-width:100%}pre{white-space:pre-wrap}details{margin-top:14px}summary{display:inline-flex;align-items:center;height:18px;padding:0 8px;border:1px solid #d5d5dc;border-radius:9px;cursor:pointer;font-size:11px;letter-spacing:1px;list-style:none;user-select:none}summary::-webkit-details-marker{display:none}details[open]>summary{margin-bottom:10px}'
 
@@ -321,7 +320,8 @@ export function EmailBody({
         }
       })
       // Tracking pixels were removed synchronously above, so they do not count as images.
-      const ownStyling = hasOwnStyling(template.content)
+      const ownStyling = needsPaper(template.content)
+      if (!ownStyling) markPaperCards(template.content)
       const html = () =>
         '<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="' +
         (ownStyling ? 'light' : theme) +

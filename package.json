@@ -25,6 +25,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/smtp-server": "^3.5.13",
+    "happy-dom": "^21.0.4",
     "prettier": "^3.9.8",
     "prettier-plugin-astro": "^1.1.0",
     "smtp-server": "^3.19.13",
