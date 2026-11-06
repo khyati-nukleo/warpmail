@@ -1,11 +1,18 @@
-import { chmod, open, writeFile } from 'node:fs/promises'
-import { dialog } from 'electron'
+import { constants } from 'node:fs'
+import { open, rename, rm, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { BrowserWindow, dialog } from 'electron'
+import type { z } from 'zod'
 import {
+  alwaysSenderSchema,
   inboxExport,
   ownAddresses,
   parseInboxExport,
   resolveSplitScope,
+  senderSchema,
   splitLimits,
+  splitTabSchema,
   tabApplies,
   type Account,
   type InboxExport,
@@ -77,31 +84,87 @@ export function sumMatches(perAccount: TabCounts[]) {
   return perAccount.reduce((n, counts) => n + (counts.draft?.conversations ?? 0), 0)
 }
 
+/**
+ * The split inbox settings as read from disk, which may have been edited by hand: tabs and
+ * Important entries that settings couldn't save are dropped, and the rest kept.
+ */
+export function checkedSplitSettings(settings: Settings): Settings {
+  /** The entries of `value` that `schema` accepts, at most `max` of them. */
+  const valid = <T>(value: unknown, schema: z.ZodType<T>, max: number): T[] =>
+    Array.isArray(value)
+      ? value
+          .flatMap((v) => {
+            const parsed = schema.safeParse(v)
+            return parsed.success ? [parsed.data] : []
+          })
+          .slice(0, max)
+      : []
+  const important = settings.important as { always?: unknown; never?: unknown } | undefined
+  return {
+    ...settings,
+    splitTabs: Array.isArray(settings.splitTabs)
+      ? valid(settings.splitTabs, splitTabSchema, splitLimits.tabs)
+      : undefined,
+    important:
+      important && typeof important === 'object'
+        ? {
+            always: valid(important.always, alwaysSenderSchema, splitLimits.important),
+            never: valid(important.never, senderSchema, splitLimits.important),
+          }
+        : undefined,
+  }
+}
+
 const exportMaxBytes = 1024 * 1024
+
+/** The window the dialog belongs to, so it is modal there. */
+const parentWindow = () => BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+const showSave = (options: Electron.SaveDialogOptions) => {
+  const window = parentWindow()
+  return window ? dialog.showSaveDialog(window, options) : dialog.showSaveDialog(options)
+}
+const showOpen = (options: Electron.OpenDialogOptions) => {
+  const window = parentWindow()
+  return window ? dialog.showOpenDialog(window, options) : dialog.showOpenDialog(options)
+}
 
 /** Saves the tabs and Important lists where the user picks; false when cancelled. */
 export async function exportInboxFile(settings: Settings): Promise<boolean> {
-  const result = await dialog.showSaveDialog({
+  const result = await showSave({
     title: 'Export inbox tabs',
     defaultPath: 'warpmail-inbox.json',
     filters: [{ name: 'Warpmail inbox export', extensions: ['json'] }],
   })
   if (result.canceled || !result.filePath) return false
-  const text = JSON.stringify(inboxExport(settings), null, 2) + '\n'
+  await writePrivately(result.filePath, JSON.stringify(inboxExport(settings), null, 2) + '\n')
+  return true
+}
+
+/**
+ * Writes a new private file beside `path` and renames it over `path`, so the file is never
+ * readable by others, even for a moment, and a failed write leaves any old file as it was.
+ */
+async function writePrivately(path: string, text: string) {
+  const temporary = join(dirname(path), '.warpmail-' + randomUUID() + '.tmp')
   try {
-    await writeFile(result.filePath, text, { mode: 0o600 })
-    // The mode only applies to a new file; an overwritten one keeps its own.
-    await chmod(result.filePath, 0o600)
+    const file = await open(temporary, 'wx', 0o600)
+    try {
+      await file.writeFile(text)
+      await file.sync()
+    } finally {
+      await file.close()
+    }
+    await rename(temporary, path)
   } catch {
+    await rm(temporary, { force: true }).catch(() => {})
     // File system errors name the path, and IPC errors are logged.
     throw new Error('The file couldn’t be saved. Choose another folder and try again.')
   }
-  return true
 }
 
 /** Reads an inbox export the user picks, without applying it; undefined when cancelled. */
 export async function importInboxFile(): Promise<InboxExport | undefined> {
-  const result = await dialog.showOpenDialog({
+  const result = await showOpen({
     title: 'Import inbox tabs',
     properties: ['openFile'],
     filters: [{ name: 'Warpmail inbox export', extensions: ['json'] }],
@@ -114,7 +177,13 @@ export async function importInboxFile(): Promise<InboxExport | undefined> {
 /** The file's text, refusing anything but a regular file of at most 1 MB before reading it. */
 async function readSmallFile(path: string): Promise<string> {
   const unreadable = () => new Error('The file couldn’t be read.')
-  const file = await open(path, 'r').catch(() => {
+  // Checked before opening, since opening a pipe waits for a writer; and opened without
+  // blocking, in case the file was swapped for one since.
+  const before = await stat(path).catch(() => {
+    throw unreadable()
+  })
+  if (!before.isFile()) throw unreadable()
+  const file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)).catch(() => {
     throw unreadable()
   })
   try {

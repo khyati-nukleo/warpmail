@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('electron', () => ({
@@ -9,10 +10,11 @@ vi.mock('electron', () => ({
     getSelectedStorageBackend: () => 'basic_text',
   },
   dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
+  BrowserWindow: { getFocusedWindow: vi.fn(), getAllWindows: vi.fn(() => []) },
   shell: {},
   Notification: { isSupported: () => false },
 }))
-import { dialog } from 'electron'
+import { BrowserWindow, dialog } from 'electron'
 import { MailService, type ProviderFactory } from '../apps/desktop/src/main/service'
 import { JsonStore } from '../apps/desktop/src/main/storage'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
@@ -354,5 +356,82 @@ describe('moving tabs to another computer', () => {
     const failed = service.exportInbox()
     await expect(failed).rejects.toThrow('The file couldn’t be saved.')
     await expect(failed).rejects.not.toThrow(directory)
+  })
+
+  it('opens both dialogs on the focused window, so they are modal', async () => {
+    const window = { id: 1 } as unknown as Electron.BrowserWindow
+    vi.mocked(BrowserWindow.getFocusedWindow).mockReturnValue(window)
+    saveTo(undefined)
+    await service.exportInbox()
+    expect(vi.mocked(dialog.showSaveDialog).mock.lastCall?.[0]).toBe(window)
+    openFrom(undefined)
+    await service.importInbox()
+    expect(vi.mocked(dialog.showOpenDialog).mock.lastCall?.[0]).toBe(window)
+    vi.mocked(BrowserWindow.getFocusedWindow).mockReturnValue(null)
+  })
+
+  it('replaces an existing file privately and in one step, leaving no temporary file', async () => {
+    const folder = join(directory, 'out')
+    await mkdir(folder)
+    const path = join(folder, 'inbox.json')
+    await writeFile(path, 'old', { mode: 0o644 })
+    await chmod(path, 0o644)
+    saveTo(path)
+    expect(await service.exportInbox()).toBe(true)
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(inboxExport(service.settings))
+    expect(await readdir(folder)).toEqual(['inbox.json'])
+    if (process.platform === 'win32' || process.getuid?.() === 0) return
+    // A folder it can't write to: the old file stays as it was.
+    await writeFile(path, 'old')
+    await chmod(folder, 0o500)
+    try {
+      saveTo(path)
+      await expect(service.exportInbox()).rejects.toThrow('The file couldn’t be saved.')
+      expect(await readFile(path, 'utf8')).toBe('old')
+      expect(await readdir(folder)).toEqual(['inbox.json'])
+    } finally {
+      await chmod(folder, 0o700)
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses a pipe without waiting on it', async () => {
+    const fifo = join(directory, 'pipe.json')
+    execFileSync('mkfifo', [fifo])
+    openFrom(fifo)
+    await expect(service.importInbox()).rejects.toThrow('The file couldn’t be read.')
+  })
+})
+
+describe('settings read from disk', () => {
+  it('drops tabs and Important entries that aren’t valid, keeping the rest', async () => {
+    const folder = join(directory, 'loaded')
+    const store = new JsonStore(folder)
+    await store.init()
+    const good = { id: 'g', name: 'Good', rules: ['@good.example'] }
+    await store.write('settings', {
+      ...service.settings,
+      theme: 'light',
+      splitTabs: [good, { id: 5, name: 'Bad', rules: [] }, { id: 'r', name: 'R', rules: 'no' }],
+      important: {
+        always: [{ address: 'a@x.example', words: ['w'] }, { address: 7 }],
+        never: ['n@x.example', null, 'x'.repeat(400)],
+      },
+    })
+    const loaded = new MailService(store, () => {}, { providers: factory })
+    await loaded.init()
+    expect(loaded.settings.theme).toBe('light')
+    expect(loaded.settings.splitTabs).toEqual([good])
+    expect(loaded.settings.important).toEqual({
+      always: [{ address: 'a@x.example', words: ['w'] }],
+      never: ['n@x.example'],
+    })
+    await store.write('settings', { ...service.settings, splitTabs: 'x', important: 3 })
+    const again = new MailService(store, () => {}, { providers: factory })
+    await again.init()
+    expect(again.settings.splitTabs).toBeUndefined()
+    expect(again.settings.important).toBeUndefined()
+    loaded.dispose()
+    again.dispose()
   })
 })

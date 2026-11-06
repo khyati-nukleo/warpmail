@@ -54,6 +54,7 @@ import { SenderAvatarResolver, rasterType } from './sender-avatar'
 import { planMutation, safeUndoUpdates, undoForUpdated, type UndoEntry } from './mail-mutations'
 import {
   countScopes,
+  checkedSplitSettings,
   exportInboxFile,
   importInboxFile,
   isImap,
@@ -276,7 +277,10 @@ export class MailService {
   async init() {
     await this.store.init()
     await this.encryption.init()
-    this.settings = { ...defaultSettings, ...(await this.store.read('settings', defaultSettings)) }
+    this.settings = checkedSplitSettings({
+      ...defaultSettings,
+      ...(await this.store.read('settings', defaultSettings)),
+    })
     this.connections = await this.store.read<Connection[]>('connections', [], {
       version: CONNECTIONS_VERSION,
       migrate: migrateConnections,

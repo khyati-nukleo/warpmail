@@ -202,6 +202,15 @@ export const splitTabsSchema = <T extends z.ZodType>(tab: T) => z.array(tab).max
 export const subjectWordsSchema = z.array(z.string().max(100)).max(20)
 export const importantListSchema = <T extends z.ZodType>(entry: T) => z.array(entry).max(500)
 export const senderSchema = z.string().max(320)
+export const splitTabSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: splitTabNameSchema,
+  rules: splitRulesSchema,
+})
+export const alwaysSenderSchema = z.object({
+  address: senderSchema,
+  words: subjectWordsSchema.optional(),
+})
 export const settingsSchema = z.object({
   theme: z.enum(['dark', 'light', 'system']),
   remoteImages: z.boolean(),
@@ -216,14 +225,10 @@ export const settingsSchema = z.object({
   shortcuts: z
     .record(z.string().max(64), z.array(z.array(z.string().min(1).max(64)).min(1).max(4)).max(16))
     .optional(),
-  splitTabs: splitTabsSchema(
-    z.object({ id: z.string().min(1).max(64), name: splitTabNameSchema, rules: splitRulesSchema }),
-  ).optional(),
+  splitTabs: splitTabsSchema(splitTabSchema).optional(),
   important: z
     .object({
-      always: importantListSchema(
-        z.object({ address: senderSchema, words: subjectWordsSchema.optional() }),
-      ),
+      always: importantListSchema(alwaysSenderSchema),
       never: importantListSchema(senderSchema),
     })
     .optional(),

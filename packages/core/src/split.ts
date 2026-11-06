@@ -78,18 +78,20 @@ export function domainKey(domain: string): string {
 }
 
 const HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
+// A domain name has at most 253 characters, and a saved rule at most 320.
+const isHost = (host: string) => host.length <= 253 && HOST.test(host)
 
 export function parseRule(text: string): SplitRule | undefined {
   let t = text.trim().toLowerCase()
   if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1).trim()
   if (t.endsWith('.')) t = t.slice(0, -1)
-  if (!t || /\s/.test(t)) return undefined
+  if (!t || t.length > 320 || /\s/.test(t)) return undefined
   const at = t.indexOf('@')
-  if (at < 0) return t.includes('.') && HOST.test(t) ? { kind: 'domain', value: t } : undefined
+  if (at < 0) return t.includes('.') && isHost(t) ? { kind: 'domain', value: t } : undefined
   if (at !== t.lastIndexOf('@')) return undefined
   const local = t.slice(0, at)
   const host = t.slice(at + 1)
-  if (!HOST.test(host)) return undefined
+  if (!isHost(host)) return undefined
   return local ? { kind: 'address', value: t } : { kind: 'domain', value: host }
 }
 
@@ -249,15 +251,18 @@ export interface InboxExport {
   important: { always: { sender: string; subjectWords?: string[] }[]; never: string[] }
 }
 
+// Important and its lists may be left out: a file with only tabs is still an export.
 const inboxExportSchema = z.object({
   version: z.literal(1),
   tabs: splitTabsSchema(z.object({ name: splitTabNameSchema, rules: splitRulesSchema })),
-  important: z.object({
-    always: importantListSchema(
-      z.object({ sender: senderSchema, subjectWords: subjectWordsSchema.optional() }),
-    ),
-    never: importantListSchema(senderSchema),
-  }),
+  important: z
+    .object({
+      always: importantListSchema(
+        z.object({ sender: senderSchema, subjectWords: subjectWordsSchema.optional() }),
+      ).default([]),
+      never: importantListSchema(senderSchema).default([]),
+    })
+    .default({ always: [], never: [] }),
 })
 
 /** Only the tabs (names and rules, in order) and Important lists: no ids or other settings. */
@@ -331,24 +336,21 @@ export function mergeInboxImport(
   const updated = new Set<string>()
   for (const incoming of file.tabs) {
     const name = incoming.name.trim()
-    let tab = tabs.find((t) => key(t.name) === key(name))
-    if (!tab) {
-      if (!name || builtInTabNames.includes(key(name)) || tabs.length >= tabsMax) {
-        skipped++
-        continue
-      }
-      tab = { id: newId(), name, rules: [] }
-      tabs.push(tab)
-      created.add(tab.id)
+    const existing = tabs.find((t) => key(t.name) === key(name))
+    if (!existing && (!name || builtInTabNames.includes(key(name)) || tabs.length >= tabsMax)) {
+      skipped++
+      continue
     }
+    // A new tab is made only once one of its rules is taken.
+    const tab = existing ?? { id: '', name, rules: [] }
     const has = new Set(tab.rules.map(key))
     for (const text of incoming.rules) {
       const rule = parseRule(text)
-      if (!rule || refusalReason(rule, own)) {
+      const formatted = rule && formatRule(rule)
+      if (!rule || !formatted || formatted.length > 320 || refusalReason(rule, own)) {
         skipped++
         continue
       }
-      const formatted = formatRule(rule)
       if (has.has(formatted)) continue
       if (tab.rules.length >= rulesMax) {
         skipped++
@@ -356,8 +358,16 @@ export function mergeInboxImport(
       }
       tab.rules.push(formatted)
       has.add(formatted)
-      if (!created.has(tab.id)) updated.add(tab.id)
+      if (existing && !created.has(tab.id)) updated.add(tab.id)
     }
+    if (existing) continue
+    if (!tab.rules.length) {
+      skipped++
+      continue
+    }
+    tab.id = newId()
+    tabs.push(tab)
+    created.add(tab.id)
   }
 
   let senders = 0
@@ -369,7 +379,19 @@ export function mergeInboxImport(
       skipped++
       continue
     }
-    const words = [...new Set((entry.subjectWords ?? []).map(key).filter(Boolean))]
+    // Comma-separated, as typed in the editor.
+    const words = [
+      ...new Set(
+        (entry.subjectWords ?? [])
+          .flatMap((w) => w.split(','))
+          .map(key)
+          .filter(Boolean),
+      ),
+    ]
+    if (words.length > wordsMax) {
+      skipped++
+      continue
+    }
     const at = always.findIndex((a) => key(a.address) === address)
     const current = always[at]
     if (!current) {

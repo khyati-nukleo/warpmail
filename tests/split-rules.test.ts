@@ -420,4 +420,86 @@ describe('inbox export and import', () => {
     expect(result.important.always).toEqual([{ address: 'a@x.example' }])
     expect(result.senders).toBe(1)
   })
+
+  it('reads a file with only tabs', () => {
+    expect(
+      parseInboxExport(
+        JSON.stringify({ version: 1, tabs: [{ name: 'A', rules: ['@a.example'] }] }),
+      ),
+    ).toEqual({
+      version: 1,
+      tabs: [{ name: 'A', rules: ['@a.example'] }],
+      important: { always: [], never: [] },
+    })
+    expect(
+      parseInboxExport(
+        JSON.stringify({ version: 1, tabs: [], important: { never: ['a@x.example'] } }),
+      ).important,
+    ).toEqual({ always: [], never: ['a@x.example'] })
+  })
+
+  it('creates a new tab only for rules it can take', () => {
+    n = 0
+    const result = mergeInboxImport(
+      { splitTabs: [] },
+      file([
+        { name: 'Mine', rules: ['me@work.example', '@work.example'] },
+        { name: 'Empty', rules: [] },
+        { name: 'Kept', rules: ['@kept.example'] },
+      ]),
+      own,
+      newId,
+    )
+    expect(result.splitTabs).toEqual([{ id: 'new1', name: 'Kept', rules: ['@kept.example'] }])
+    expect(result.newTabs).toBe(1)
+    // The two refused rules, and the two tabs left without any.
+    expect(result.skipped).toBe(4)
+  })
+
+  it('skips rules too long to save instead of failing the import', () => {
+    n = 0
+    const label = 'a'.repeat(63)
+    const host = (length: number) => {
+      const labels = [label, label, label]
+      return (labels.join('.') + '.' + 'b'.repeat(length - 192 - 8) + '.example').slice(0, length)
+    }
+    expect(host(253)).toHaveLength(253)
+    expect(parseRule('@' + host(253))).toEqual({ kind: 'domain', value: host(253) })
+    expect(parseRule(host(254))).toBeUndefined()
+    expect(parseRule('x@' + host(254))).toBeUndefined()
+    const long = 'c'.repeat(316) + '.example'.slice(0, 4)
+    expect(long).toHaveLength(320)
+    const result = mergeInboxImport(
+      { splitTabs: [] },
+      file([{ name: 'Long', rules: [long, '@ok.example'] }]),
+      own,
+      newId,
+    )
+    expect(result.splitTabs).toEqual([{ id: 'new1', name: 'Long', rules: ['@ok.example'] }])
+    expect(result.skipped).toBe(1)
+    expect(settingsSchema.safeParse({ ...defaultSettings, ...result }).success).toBe(true)
+  })
+
+  it('splits imported subject words at commas, as the editor does', () => {
+    const result = mergeInboxImport(
+      {},
+      file([], {
+        always: [
+          { sender: 'a@x.example', subjectWords: ['Crash, Failure', ' outage ,'] },
+          {
+            sender: 'b@x.example',
+            subjectWords: [Array.from({ length: 21 }, (_, i) => 'w' + i).join(',')],
+          },
+        ],
+        never: [],
+      }),
+      own,
+      newId,
+    )
+    expect(result.important.always).toEqual([
+      { address: 'a@x.example', words: ['crash', 'failure', 'outage'] },
+    ])
+    // More than 20 words once split: left out.
+    expect(result.skipped).toBe(1)
+  })
 })
