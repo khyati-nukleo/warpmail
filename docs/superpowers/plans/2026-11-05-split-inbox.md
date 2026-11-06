@@ -16,7 +16,7 @@
 - Every action works from keyboard and mouse (AGENTS.md "keyboard and mouse parity").
 - Never log subjects, addresses or bodies; add no network calls beyond IMAP header fetches; no telemetry.
 - Stay mergeable with upstream inlark: new logic in new modules; edits to `App.tsx`, `service.ts`, `provider.ts`, `sqlite-index.ts`, `Settings.tsx`, `Reader.tsx` stay small and local.
-- Matching is case-insensitive. A domain rule `@x.example` also covers subdomains (`a.x.com`).
+- Matching is case-insensitive. A domain rule `@x.example` also covers subdomains (`a.x.example`).
 - Tabs cover the inbox only (INBOX mailbox of IMAP accounts). Tabs are views; nothing is moved on the server.
 - Index schema becomes v4 (one-way, like v3; the existing "created by a newer version" guard covers older builds).
 - Shortcuts (all rebindable): Ctrl+1 Inbox, Ctrl+2 Important, Ctrl+3–Ctrl+9 user tabs in order, Ctrl+Tab next, Ctrl+Shift+Tab previous, Shift+T "Add sender to tab…".
