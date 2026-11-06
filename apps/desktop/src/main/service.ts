@@ -51,6 +51,7 @@ import { publicFetch } from './public-fetch'
 import { remoteImageData } from './remote-image'
 import { SenderAvatarResolver, rasterType } from './sender-avatar'
 import { planMutation, safeUndoUpdates, undoForUpdated, type UndoEntry } from './mail-mutations'
+import { countScopes, isImap, rulesScope, tabPlan } from './split-inbox'
 import { JsonStore, encryptSecret, decryptSecret, secureStorageAvailable } from './storage'
 
 export type Connection = {
@@ -921,16 +922,22 @@ export class MailService {
       )
     })
   query = async (query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage> => {
+    const tab = tabPlan(this.settings, this.accounts, query)
     const accounts = this.accounts.filter(
-      (a) => (!query.accountId || query.accountId === a.id) && (!cursor || a.id in cursor),
+      (a) =>
+        (!query.accountId || query.accountId === a.id) &&
+        (!cursor || a.id in cursor) &&
+        (!tab || isImap(a)),
     )
-    if (!accounts.length) return { items: [], total: 0, failedAccounts: [] }
+    if (!accounts.length || (tab && 'empty' in tab))
+      return { items: [], total: 0, failedAccounts: [] }
+    const sent = tab && 'split' in tab ? { ...query, split: tab.split } : query
     const settled = await Promise.allSettled(
       accounts.map(async (a) => ({
         accountId: a.id,
         position: cursor?.[a.id] || 0,
         page: await this.guard(a.id, (p, account) =>
-          p.query(account, query, cursor?.[a.id] || 0, 50),
+          p.query(account, sent, cursor?.[a.id] || 0, 50),
         ),
       })),
     )
@@ -944,6 +951,46 @@ export class MailService {
       .filter((_, i) => settled[i].status === 'rejected')
       .map((a) => a.id)
     return result
+  }
+  /** Sums per-account tab counts over IMAP accounts that can answer, skipping any that fail. */
+  private async sumTabs<T>(
+    accountId: string | undefined,
+    ask: (p: MailProvider, a: Account) => Promise<T>,
+    add: (total: T | undefined, next: T) => T,
+  ): Promise<T | undefined> {
+    const accounts = this.accounts.filter(
+      (a) => isImap(a) && (!accountId || a.id === accountId) && this.providers.has(a.connectionId),
+    )
+    const settled = await Promise.allSettled(accounts.map((a) => this.guard(a.id, ask)))
+    let total: T | undefined
+    for (const s of settled) if (s.status === 'fulfilled') total = add(total, s.value)
+    return total
+  }
+  tabCounts = async (accountId?: string): Promise<Record<string, number>> => {
+    const scopes = countScopes(this.settings, this.accounts)
+    const counts: Record<string, number> = Object.fromEntries(
+      Object.keys(scopes).map((k) => [k, 0]),
+    )
+    await this.sumTabs(
+      accountId,
+      async (p, a): Promise<Record<string, { unread: number }>> =>
+        (await p.tabCounts?.(a, scopes)) ?? {},
+      (_, next) => {
+        for (const [id, c] of Object.entries(next)) counts[id] = (counts[id] ?? 0) + c.unread
+        return next
+      },
+    )
+    return counts
+  }
+  tabMatchCount = async (rules: string[]): Promise<number> => {
+    const scopes = { draft: rulesScope(rules, this.accounts) }
+    return (
+      (await this.sumTabs(
+        undefined,
+        async (p, a) => (await p.tabCounts?.(a, scopes))?.draft?.conversations ?? 0,
+        (total, n) => (total ?? 0) + n,
+      )) ?? 0
+    )
   }
   /**
    * Runs one read-plan-write cycle at a time per account. Each cycle checks the server state it

@@ -2,6 +2,10 @@ import {
   accountKey,
   conversationFromMessages,
   defaultSettings,
+  isAutomatedAddress,
+  resolveSplitScope,
+  ruleMatches,
+  type SplitScope,
   folderRoles,
   mergePages,
   nextAccountColor,
@@ -344,7 +348,38 @@ function matches(m: Message, q: MailQuery): boolean {
   if (q.hasAttachment && !m.hasAttachment) return false
   if (q.after && m.receivedAt < q.after) return false
   if (q.before && m.receivedAt > q.before) return false
-  return true
+  return inTab(m, q)
+}
+const ownDemoAddresses = () =>
+  demoAccounts.flatMap((a) => [a.email, ...(a.aliases || []).map((x) => x.email)])
+function scopeOf(tab: string) {
+  return resolveSplitScope(tab, settings, ownDemoAddresses())
+}
+function inScope(m: Message, scope: SplitScope): boolean {
+  const senders = m.from.map((a) => a.email.toLowerCase())
+  if (scope.kind === 'rules') {
+    const rules = [
+      ...scope.addresses.map((value) => ({ kind: 'address', value }) as const),
+      ...scope.domains.map(
+        (d) => ({ kind: 'domain', value: d.split('.').reverse().join('.') }) as const,
+      ),
+    ]
+    return senders.some((e) => rules.some((r) => ruleMatches(r, e)))
+  }
+  const always = scope.always.map((a) => a.address)
+  if (senders.some((e) => always.includes(e))) return true
+  return (
+    senders.length > 0 &&
+    !senders.some((e) => isAutomatedAddress(e) || scope.never.includes(e)) &&
+    !m.unsubscribe
+  )
+}
+/** Tabs only narrow the inbox view, as in the desktop service. */
+function inTab(m: Message, q: MailQuery): boolean {
+  if (!q.tab || q.view !== 'inbox' || q.mailboxId || q.text) return true
+  const scope = scopeOf(q.tab)
+  if (scope === undefined) return true
+  return scope !== null && inScope(m, scope)
 }
 const indexing = (account: Account) => !!account.indexing && !account.indexing.complete
 function changed() {
@@ -1170,6 +1205,31 @@ export const demoAPI: DesktopMailAPI = {
       ]
     })
     return mergePages(pages, 50)
+  },
+  tabCounts: async () => {
+    const scopes = ['important', ...(settings.splitTabs || []).map((t) => t.id)]
+    const counts: Record<string, number> = Object.fromEntries(scopes.map((id) => [id, 0]))
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (!m?.mailboxIds.inbox || m.keywords.$seen) continue
+        for (const id of scopes) if (inTab(m, { view: 'inbox', tab: id })) counts[id]!++
+      }
+    return counts
+  },
+  tabMatchCount: async (rules) => {
+    const scope = resolveSplitScope(
+      'draft',
+      { ...settings, splitTabs: [{ id: 'draft', name: '', rules }] },
+      ownDemoAddresses(),
+    )
+    let n = 0
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (m?.mailboxIds.inbox && scope && inScope(m, scope)) n++
+      }
+    return n
   },
   conversation: async (accountId, threadId) => {
     const accountIndex = demoAccounts.findIndex((a) => a.id === accountId)

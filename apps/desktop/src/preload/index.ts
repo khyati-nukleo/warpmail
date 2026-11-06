@@ -30,6 +30,8 @@ const methods = [
   'mailboxes',
   'identities',
   'query',
+  'tabCounts',
+  'tabMatchCount',
   'conversation',
   'mutate',
   'mutateAll',

@@ -1,4 +1,4 @@
-import type { ImportantSettings, SplitTab } from './split'
+import type { ImportantSettings, SplitScope, SplitTab } from './split'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -458,6 +458,10 @@ export interface ProviderEvent {
   /** Set for changes found by historical indexing, which must never notify. */
   historical?: boolean
 }
+/** A query as providers see it: the main process has already resolved `tab` into `split`. */
+export interface ProviderQuery extends MailQuery {
+  split?: SplitScope
+}
 export interface MailProvider {
   readonly capabilities: ProviderCapabilities
   connect(): Promise<Account[]>
@@ -474,10 +478,15 @@ export interface MailProvider {
   identities(account: Account): Promise<Identity[]>
   query(
     account: Account,
-    query: MailQuery,
+    query: ProviderQuery,
     position?: number,
     limit?: number,
   ): Promise<ProviderPage>
+  /** Conversations and unread emails per tab scope, for the inbox. Omitted by providers without tabs. */
+  tabCounts?(
+    account: Account,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>>
   /** `background` loads run behind the user's own work, such as reading ahead to nearby threads. */
   conversation(
     account: Account,
@@ -686,6 +695,10 @@ export interface DesktopMailAPI {
   mailboxes(accountId: string): Promise<Mailbox[]>
   identities(accountId: string): Promise<Identity[]>
   query(query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage>
+  /** Unread per tab (`important` and each tab id) across connected IMAP accounts. */
+  tabCounts(accountId?: string): Promise<Record<string, number>>
+  /** Inbox conversations matching these rules, across IMAP accounts. */
+  tabMatchCount(rules: string[]): Promise<number>
   /** `prefetch` marks a read-ahead load that must never delay the thread being opened. */
   conversation(
     accountId: string,

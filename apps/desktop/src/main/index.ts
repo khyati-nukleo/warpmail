@@ -292,6 +292,8 @@ else {
         mailboxes: service.mailboxes,
         identities: service.identities,
         query: service.query,
+        tabCounts: service.tabCounts,
+        tabMatchCount: service.tabMatchCount,
         conversation: service.conversation,
         mutate: service.mutate,
         mutateAll: service.mutateAll,

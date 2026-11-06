@@ -16,6 +16,8 @@ import {
   type Mailbox,
   type MailProvider,
   type MailQuery,
+  type ProviderQuery,
+  type SplitScope,
   type Message,
   type MessageChanges,
   type OutgoingMessage,
@@ -872,10 +874,31 @@ export class ImapProvider implements MailProvider {
       filter: excluded.length ? { excludeMailboxIds: excluded.map((b) => b.id) } : {},
     }
   }
-  async query(account: Account, query: MailQuery, position = 0, limit = 50): Promise<ProviderPage> {
+  async tabCounts(
+    _account: Account,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>> {
+    const inbox = (await this.index.listMailboxes(this.accountId)).find(
+      (b) => !b.noSelect && isInbox(b.path),
+    )
+    if (!inbox)
+      return Object.fromEntries(
+        Object.keys(scopes).map((id) => [id, { conversations: 0, unread: 0 }]),
+      )
+    return this.index.tabCounts(this.accountId, inbox.id, scopes)
+  }
+  async query(
+    account: Account,
+    query: ProviderQuery,
+    position = 0,
+    limit = 50,
+  ): Promise<ProviderPage> {
     const boxes = await this.index.listMailboxes(this.accountId)
     const scope = await this.scope(query, boxes)
     if (!scope) return { items: [], total: 0 }
+    const search = !!(query.text || query.from || query.to || query.subject)
+    const inboxOnly =
+      query.view === 'inbox' && !query.mailboxId && !search && scope.filter.mailboxIds?.length === 1
     const filter: ConversationFilter = {
       ...scope.filter,
       ...(query.view === 'starred' ? { flagged: true } : {}),
@@ -883,9 +906,10 @@ export class ImapProvider implements MailProvider {
       ...(query.hasAttachment ? { hasAttachment: true } : {}),
       ...(query.after ? { after: query.after } : {}),
       ...(query.before ? { before: query.before } : {}),
+      ...(query.split && inboxOnly ? { split: query.split } : {}),
     }
     let incomplete = scope.boxes.some((b) => !b.complete)
-    if (query.text || query.from || query.to || query.subject) {
+    if (search) {
       const found = await this.search(query, scope.boxes)
       filter.ids = found.ids
       incomplete = found.incomplete

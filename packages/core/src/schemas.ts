@@ -289,6 +289,8 @@ export const ipcSchemas = {
   mailboxes: z.tuple([id]),
   identities: z.tuple([id]),
   query: z.tuple([querySchema, z.record(z.string(), z.number().int().nonnegative()).optional()]),
+  tabCounts: z.tuple([id.optional()]),
+  tabMatchCount: z.tuple([z.array(z.string().max(320)).max(500)]),
   conversation: z.tuple([
     id,
     id,
