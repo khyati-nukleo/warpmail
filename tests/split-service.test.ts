@@ -20,6 +20,7 @@ import { ImapProvider } from '../packages/imap/src'
 import {
   inboxExport,
   type Account,
+  type AppEvent,
   type ConnectInput,
   type MailProvider,
 } from '../packages/core/src'
@@ -43,8 +44,11 @@ const person = (email: string) => [{ name: 'P', email }]
 let directory: string
 let servers: Record<string, FakeImapServer>
 let service: MailService
-const factory: ProviderFactory = (options) =>
-  new ImapProvider({
+let events: AppEvent[]
+let indexUpdates: Record<string, ((updating: boolean, ms?: number) => void) | undefined> = {}
+const factory: ProviderFactory = (options) => {
+  indexUpdates[options.connectionId] = options.onIndexUpdating
+  return new ImapProvider({
     connectionId: options.connectionId,
     name: options.name,
     config: options.config as ConnectInput['config'] & { protocol: 'imap' },
@@ -61,6 +65,7 @@ const factory: ProviderFactory = (options) =>
     inspect: async () => undefined,
     timing: { sentCopyGraceMs: 0, previews: 0 },
   })
+}
 const sync = async (connectionId: string) => {
   const provider = (service as any).provider(idOf(connectionId)).provider as ImapProvider
   await (provider as any).syncPass('all')
@@ -72,7 +77,11 @@ const tab = { id: 'client-a', name: 'Client A', rules: ['@client.example'] }
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'warpmail-split-'))
   servers = { a: new FakeImapServer(), b: new FakeImapServer() }
-  service = new MailService(new JsonStore(directory), () => {}, { providers: factory })
+  events = []
+  indexUpdates = {}
+  service = new MailService(new JsonStore(directory), (e) => events.push(e), {
+    providers: factory,
+  })
   await service.init()
   const a = servers.a!,
     b = servers.b!
@@ -192,6 +201,21 @@ describe('split inbox in the service', () => {
     expect(await service.tabMatchCount(['@client.example', 'friend@example.org'])).toBe(4)
     // Own domain and unparseable rules match nothing.
     expect(await service.tabMatchCount(['@work.example', 'nonsense'])).toBe(0)
+  })
+  it('marks an account whose index is updating after an upgrade', async () => {
+    const updating = () =>
+      (
+        events.findLast((e) => e.type === 'accounts') as { accounts: Account[] } | undefined
+      )?.accounts
+        .filter((a) => a.updatingIndex)
+        .map((a) => a.connectionId)
+    indexUpdates.a!(true)
+    expect(updating()).toEqual(['a'])
+    expect((await service.bootstrap()).accounts.find((a) => a.updatingIndex)?.connectionId).toBe(
+      'a',
+    )
+    indexUpdates.a!(false, 4321)
+    expect(updating()).toEqual([])
   })
   it('counts a tab whatever its id', async () => {
     await service.setSettings({

@@ -57,6 +57,8 @@ export interface Account {
   limits?: AccountLimits
   /** Present while the local index is still catching up with the server. */
   indexing?: IndexingProgress
+  /** The local index is being updated for a new version of the app, which happens once. */
+  updatingIndex?: boolean
 }
 /** An address the provider delivers to this account and lets it send from. */
 export interface Alias {

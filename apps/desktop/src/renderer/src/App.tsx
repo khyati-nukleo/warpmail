@@ -378,6 +378,13 @@ export function App() {
     [mail.data],
   )
   const total = mail.data?.pages[0]?.total || 0
+  // Once after an upgrade, an account's index may take a while to update before mail can load.
+  const updatingIndex = accounts.some(
+    (a) => a.updatingIndex && (!route.account || a.id === route.account),
+  )
+  // An account updating its index can't answer yet; the list explains why instead.
+  const mailUnavailable =
+    (mail.isError || mail.data?.pages.some((p) => p.failedAccounts.length)) && !updatingIndex
   // Accounts still indexing may be missing older mail, so their results are never the whole story.
   const incomplete = useMemo(
     () =>
@@ -2206,7 +2213,7 @@ export function App() {
                 onClear={() => setDraftSelected(new Set())}
               />
             )}
-            {(mail.isError || mail.data?.pages.some((p) => p.failedAccounts.length)) && (
+            {mailUnavailable && (
               <div
                 className={cn(
                   'connection-banner [&_button]:ml-auto [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent',
@@ -2285,6 +2292,14 @@ export function App() {
                   </EmptyState>
                 )}
               </div>
+            ) : !conversations.length && updatingIndex ? (
+              <EmptyState
+                icon={RefreshCw}
+                title="Updating the mail index…"
+                description="This happens once after an update. Your mail appears when it’s done."
+              >
+                <Spinner />
+              </EmptyState>
             ) : !conversations.length && mail.isLoading ? (
               <div
                 className={cn(

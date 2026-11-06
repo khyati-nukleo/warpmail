@@ -180,6 +180,8 @@ export type ProviderFactory = (input: {
   /** Where this connection may keep local data, removed when it is disconnected. */
   directory: string
   readAttachment: (id: string) => Promise<Uint8Array>
+  /** The connection's local index is being updated after an upgrade (see `updatingIndex`). */
+  onIndexUpdating?: (updating: boolean, ms?: number) => void
 }) => MailProvider
 export interface ServiceOptions {
   providers?: ProviderFactory
@@ -555,6 +557,10 @@ export class MailService {
       temporary,
       directory: join(this.store.directory, 'index', id),
       readAttachment: this.readStagedAttachment,
+      onIndexUpdating: (updating, ms) => {
+        if (!updating && ms !== undefined) this.log('index-updated', Math.round(ms) + ' ms')
+        this.patchAccounts(id, { updatingIndex: updating || undefined })
+      },
     })
   }
   discover = async (email: string): Promise<DiscoveryResult> => {

@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { Worker } from 'node:worker_threads'
 import { DatabaseSync } from 'node:sqlite'
 import { domainKey, type SplitScope } from '@inlark/core'
 import {
@@ -10,6 +12,7 @@ import {
   SqliteMetadataIndex,
   UNCHECKED_HEADERS_SQL,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
+import { WorkerMetadataIndex, type IndexPort } from '../apps/desktop/src/main/imap-index/client'
 import { registerSplitFunctions } from '../apps/desktop/src/main/imap-index/split-schema'
 import { splitFilter, tabCountQuery } from '../apps/desktop/src/main/imap-index/split-sql'
 import type { ConversationFilter, FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
@@ -826,4 +829,73 @@ describe('tab filter', () => {
     }
     sync.close()
   }, 60_000)
+})
+
+describe('updating the index after an upgrade', () => {
+  function port() {
+    const listeners: Record<string, ((value: any) => void)[]> = {}
+    const value: IndexPort & { emit: (event: string, value: unknown) => void } = {
+      on(event: string, listener: (value: any) => void) {
+        ;(listeners[event] ??= []).push(listener)
+        return value
+      },
+      emit: (event, v) => listeners[event]?.forEach((l) => l(v)),
+      postMessage() {},
+      async terminate() {
+        return 0
+      },
+    }
+    return value
+  }
+
+  it('says so only when the update takes a while, and when it ends', async () => {
+    const calls: boolean[] = []
+    const slow = port()
+    new WorkerMetadataIndex(slow, { onUpdating: (on) => calls.push(on), noticeAfterMs: 10 })
+    slow.emit('message', { updating: true })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toEqual([true])
+    slow.emit('message', { updating: false, ms: 1234 })
+    expect(calls).toEqual([true, false])
+
+    const quick = port()
+    new WorkerMetadataIndex(quick, { onUpdating: (on) => calls.push(on), noticeAfterMs: 10 })
+    quick.emit('message', { updating: true })
+    quick.emit('message', { updating: false, ms: 3 })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toEqual([true, false])
+
+    // A worker that dies mid-update ends the notice too.
+    const failing = port()
+    new WorkerMetadataIndex(failing, { onUpdating: (on) => calls.push(on), noticeAfterMs: 0 })
+    failing.emit('message', { updating: true })
+    await new Promise((r) => setTimeout(r, 5))
+    failing.emit('exit', 1)
+    expect(calls).toEqual([true, false, true, false])
+  })
+
+  it('reports a schema update from the real worker', async () => {
+    await inbox()
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec('PRAGMA user_version = 3')
+    db.close()
+    const entry = fileURLToPath(
+      new URL('../apps/desktop/src/main/imap-index/worker.ts', import.meta.url),
+    )
+    const shim = `
+      const { registerHooks } = require('node:module')
+      registerHooks({ resolve(specifier, context, next) {
+        if (/^\\.\\.?\\//.test(specifier) && !/\\.[cm]?[jt]s$/.test(specifier)) specifier += '.ts'
+        return next(specifier, context)
+      } })
+      import(${JSON.stringify(pathToFileURL(entry).href)})`
+    const calls: boolean[] = []
+    index = new WorkerMetadataIndex(new Worker(shim, { eval: true, workerData: { path } }), {
+      onUpdating: (on) => calls.push(on),
+      noticeAfterMs: 0,
+    })
+    expect(await index.listMailboxes('a')).toHaveLength(1)
+    await vi.waitFor(() => expect(calls).toEqual([true, false]))
+  })
 })
