@@ -15,7 +15,12 @@ const actionsClass = cn(
 /** Which tab dialog shows; kept after closing so its words stay while it fades out. */
 export type TabDialogState = (
   { kind: 'edit'; tab?: SplitTab; focus: 'name' | 'rules' } | { kind: 'delete'; tab: SplitTab }
-) & { open: boolean; seq: number }
+) & {
+  open: boolean
+  seq: number
+  /** Chosen in Ctrl+K, so focus goes to the active tab on closing. */
+  fromCommand?: boolean
+}
 
 /** The tab editor and the delete confirmation, for `useSplitInbox`'s `dialogs`. */
 export function TabDialogs({
@@ -154,7 +159,7 @@ export function TabEditor({
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            aria-invalid={state.problems.length > 0}
+            aria-invalid={state.problems.length > 0 || !!state.limitError}
             aria-describedby={ids + '-rules'}
             onChange={(event) => setRulesText(event.target.value)}
             onKeyDown={(event) => {
@@ -167,6 +172,11 @@ export function TabEditor({
           />
         </label>
         <div id={ids + '-rules'}>
+          {state.limitError && (
+            <p className="tab-limit-error text-[12px] text-danger mt-2 mb-0 leading-[1.6]">
+              {state.limitError}
+            </p>
+          )}
           {state.problems.length > 0 && (
             <ul className="tab-rule-problems list-none p-0 mt-2 mb-0 text-[12px] text-danger leading-[1.6]">
               {state.problems.map((problem) => (

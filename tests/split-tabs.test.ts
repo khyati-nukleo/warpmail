@@ -193,6 +193,7 @@ describe('split tab model', () => {
         rules: ['someone@gmail.com', '@partner.example', 'x@other.example'],
         problems: [],
         nameError: undefined,
+        limitError: undefined,
         canSave: true,
       })
     })
@@ -249,6 +250,38 @@ describe('split tab model', () => {
       ])
       expect(state.nameError).toBeUndefined()
       expect(state.canSave).toBe(false)
+    })
+
+    it('keeps a tab to 500 addresses and domains', () => {
+      const lines = (n: number) =>
+        Array.from({ length: n }, (_, i) => 'person' + i + '@client.example').join('\n')
+      expect(editorState('Big', lines(500), own, tabs)).toMatchObject({
+        limitError: undefined,
+        canSave: true,
+      })
+      const state = editorState('Big', lines(501) + '\nperson0@client.example', own, tabs)
+      expect(state.rules).toHaveLength(501)
+      expect(state.limitError).toBe(
+        'A tab holds up to 500 addresses and domains. This one has 501.',
+      )
+      expect(state.canSave).toBe(false)
+    })
+
+    it('makes no new tab past 50, but still edits one', () => {
+      const fifty = Array.from({ length: 50 }, (_, i) => ({
+        id: 't' + i,
+        name: 'Tab ' + i,
+        rules: [],
+      }))
+      expect(editorState('One more', '', own, fifty)).toMatchObject({
+        limitError: 'You have 50 tabs, the most there can be. Delete one to make room.',
+        canSave: false,
+      })
+      expect(editorState('Renamed', '', own, fifty, 't3')).toMatchObject({
+        limitError: undefined,
+        canSave: true,
+      })
+      expect(editorState('One more', '', own, fifty.slice(1)).canSave).toBe(true)
     })
 
     it('adds a new tab at the end and replaces an edited one in place', () => {

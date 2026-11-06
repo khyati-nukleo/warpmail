@@ -132,22 +132,32 @@ export function useSplitInbox({
   const openMenu = (id: string, anchor: HTMLElement) => {
     if (userTabs.some((tab) => tab.id === id)) setMenu({ id, anchor, open: true })
   }
-  const closeMenu = () => setMenu((shown) => shown && { ...shown, open: false })
+  const closeMenu = () => {
+    setMenu((shown) => shown && { ...shown, open: false })
+    // Forget it once it has faded out, so a deleted tab's button isn't held on to.
+    setTimeout(() => setMenu((shown) => (shown?.open ? shown : undefined)), 300)
+  }
+  const shownMenu = menu && userTabs.some((tab) => tab.id === menu.id) ? menu : undefined
 
   const [dialog, setDialog] = useState<TabDialogState>()
   const dialogs = useRef(0)
-  const editTab = (tab: SplitTab | undefined, focus: 'name' | 'rules') =>
-    setDialog({ kind: 'edit', tab, focus, open: true, seq: ++dialogs.current })
-  const closeDialog = () => setDialog((shown) => shown && { ...shown, open: false })
+  const editTab = (tab: SplitTab | undefined, focus: 'name' | 'rules', fromCommand = false) =>
+    setDialog({ kind: 'edit', tab, focus, fromCommand, open: true, seq: ++dialogs.current })
+  /** Closes the tab dialog; focus goes to the active tab when it came from Ctrl+K or was lost. */
+  const closeDialog = (toTab = false) => {
+    focusActiveTabAfterDialog(toTab || !!dialog?.fromCommand)
+    setDialog((shown) => shown && { ...shown, open: false })
+  }
   const add = () => editTab(undefined, 'name')
 
-  const act = (id: string, action: TabAction) => {
+  /** Runs a tab menu item; `fromCommand` when chosen in Ctrl+K. */
+  const act = (id: string, action: TabAction, fromCommand = false) => {
     const tab = latestTabs().find((t) => t.id === id)
     if (!tab) return
     if (action === 'rules' || action === 'rename')
-      editTab(tab, action === 'rules' ? 'rules' : 'name')
+      editTab(tab, action === 'rules' ? 'rules' : 'name', fromCommand)
     else if (action === 'delete')
-      setDialog({ kind: 'delete', tab, open: true, seq: ++dialogs.current })
+      setDialog({ kind: 'delete', tab, fromCommand, open: true, seq: ++dialogs.current })
     else {
       const to = tabMoves(latestTabs(), id)[action]
       if (to !== undefined) reorder(id, to)
@@ -163,7 +173,8 @@ export function useSplitInbox({
   }
   const deleteTab = async (tab: SplitTab) => {
     if (!(await saveTabs(latestTabs().filter((t) => t.id !== tab.id)))) return
-    closeDialog()
+    // The tab's button is gone, so focus the active tab: Inbox when it was this one.
+    closeDialog(true)
     if (tab.id === active) select('inbox')
   }
 
@@ -210,7 +221,7 @@ export function useSplitInbox({
       label,
       icon,
       keywords: 'split inbox ' + activeTab.name,
-      run: () => act(activeTab.id, action),
+      run: () => act(activeTab.id, action, true),
     })
     commands.push(
       command('rules', 'Edit tab rules', PencilEdit),
@@ -243,7 +254,7 @@ export function useSplitInbox({
       dialog,
       tabs: userTabs,
       own,
-      onClose: closeDialog,
+      onClose: () => closeDialog(),
       onSave: saveTab,
       onDelete: deleteTab,
     },
@@ -264,9 +275,31 @@ export function useSplitInbox({
       onReorder: reorder,
       onMenu: openMenu,
       onAdd: add,
-      menu,
+      menu: shownMenu,
       onMenuClose: closeMenu,
       onMenuAction: act,
     },
   }
+}
+
+/**
+ * Once the tab dialog has gone, focuses the active tab: always with `always`, otherwise only when
+ * focus was left on the page itself or on the menu's unseen trigger.
+ */
+function focusActiveTabAfterDialog(always: boolean) {
+  let frames = 0
+  const check = () => {
+    if (document.querySelector('[role="dialog"]') && ++frames < 60)
+      return void requestAnimationFrame(check)
+    const focused = document.activeElement
+    const lost =
+      !focused || focused === document.body || focused.classList.contains('tab-menu-anchor')
+    if (always || lost)
+      document
+        .querySelector<HTMLElement>(
+          '[role="tab"][aria-selected="true"][aria-controls="' + tabPanelId + '"]',
+        )
+        ?.focus()
+  }
+  requestAnimationFrame(check)
 }

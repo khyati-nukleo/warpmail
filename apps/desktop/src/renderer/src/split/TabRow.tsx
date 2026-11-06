@@ -11,7 +11,6 @@ import {
 } from '@inlark/ui/icons'
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -77,21 +76,22 @@ export function TabRow({
   const userIndex = (id: string) =>
     entries.filter((entry) => entry.user).findIndex((e) => e.id === id)
 
-  // The menu opens from an unseen trigger laid over the tab it belongs to.
-  // Measured while rendering, so the menu is placed right the moment it opens.
+  // The menu opens from an unseen trigger laid over the tab it belongs to, measured each time it
+  // opens: the tab may have moved, been renamed or scrolled since.
   const row = useRef<HTMLDivElement>(null)
-  const anchor = menu?.anchor
-  const menuBox = useMemo((): CSSProperties | undefined => {
+  const [menuBox, setMenuBox] = useState<CSSProperties>()
+  const openMenu = (id: string, tab: HTMLElement) => {
     const box = row.current?.getBoundingClientRect()
-    const tab = anchor?.getBoundingClientRect()
-    if (!box || !tab) return
-    return {
-      left: tab.left - box.left,
-      top: tab.top - box.top,
-      width: tab.width,
-      height: tab.height,
-    }
-  }, [anchor])
+    const rect = tab.getBoundingClientRect()
+    if (box)
+      setMenuBox({
+        left: rect.left - box.left,
+        top: rect.top - box.top,
+        width: rect.width,
+        height: rect.height,
+      })
+    onMenu(id, tab)
+  }
   const moves = menu
     ? tabMoves(
         entries.filter((entry) => entry.user),
@@ -107,7 +107,7 @@ export function TabRow({
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number, id: string) => {
     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
       keyMenuAt.current = Date.now()
-      onMenu(id, event.currentTarget)
+      openMenu(id, event.currentTarget)
     } else if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     else if (event.key === 'Enter' || event.key === ' ') onSelect(id)
     else {
@@ -186,7 +186,7 @@ export function TabRow({
               onKeyDown={(event) => onKeyDown(event, index, entry.id)}
               onContextMenu={(event) => {
                 event.preventDefault()
-                if (Date.now() - keyMenuAt.current > 1000) onMenu(entry.id, event.currentTarget)
+                if (Date.now() - keyMenuAt.current > 1000) openMenu(entry.id, event.currentTarget)
               }}
               draggable={entry.user}
               onDragStart={

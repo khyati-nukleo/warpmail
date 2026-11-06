@@ -60,6 +60,9 @@ export function putTab(tabs: SplitTab[], tab: SplitTab): SplitTab[] {
 }
 
 export const tabNameMax = 60
+/** The settings schema's limits, explained in the editor rather than failing the save. */
+export const tabsMax = 50
+export const tabRulesMax = 500
 
 export type RuleProblem = ReturnType<typeof parseRuleLines>['problems'][number]
 
@@ -68,6 +71,8 @@ export interface EditorState {
   rules: string[]
   problems: RuleProblem[]
   nameError?: string
+  /** Too many tabs, or too many rules in this one. */
+  limitError?: string
   canSave: boolean
 }
 
@@ -81,7 +86,23 @@ export function editorState(
 ): EditorState {
   const { rules, problems } = parseRuleLines(rulesText, own)
   const nameError = tabNameError(name, existing, editingId)
-  return { rules, problems, nameError, canSave: !nameError && !problems.length }
+  const limitError =
+    !editingId && existing.length >= tabsMax
+      ? 'You have ' + tabsMax + ' tabs, the most there can be. Delete one to make room.'
+      : rules.length > tabRulesMax
+        ? 'A tab holds up to ' +
+          tabRulesMax +
+          ' addresses and domains. This one has ' +
+          rules.length.toLocaleString() +
+          '.'
+        : undefined
+  return {
+    rules,
+    problems,
+    nameError,
+    limitError,
+    canSave: !nameError && !limitError && !problems.length,
+  }
 }
 
 function tabNameError(name: string, existing: SplitTab[], editingId?: string) {
