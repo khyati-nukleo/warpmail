@@ -105,6 +105,12 @@ export class WorkerMetadataIndex implements MetadataIndex {
   setPreview(...args: Args<'setPreview'>) {
     return this.call('setPreview', args)
   }
+  uncheckedHeaders(...args: Args<'uncheckedHeaders'>) {
+    return this.call('uncheckedHeaders', args)
+  }
+  setAutomationHeaders(...args: Args<'setAutomationHeaders'>) {
+    return this.call('setAutomationHeaders', args)
+  }
   messages(...args: Args<'messages'>) {
     return this.call('messages', args)
   }

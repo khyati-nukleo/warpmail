@@ -50,6 +50,23 @@ export interface MetadataIndex {
   /** Moves an existing ID to a new location after the server confirmed the move. */
   relocate(accountId: string, id: string, location: MessageLocation): Promise<void>
   setPreview(accountId: string, id: string, preview: string): Promise<void>
+  /** Messages of a mailbox whose List-Id, Precedence and Auto-Submitted were never read, newest first. */
+  uncheckedHeaders(
+    accountId: string,
+    mailboxId: string,
+    limit: number,
+  ): Promise<{ uid: number; uidValidity: string }[]>
+  /** Stores the fetched automation headers, marks them checked and recomputes `automated`. */
+  setAutomationHeaders(
+    accountId: string,
+    mailboxId: string,
+    rows: {
+      uid: number
+      listId: string | null
+      precedence: string | null
+      autoSubmitted: string | null
+    }[],
+  ): Promise<void>
 
   /** Messages by ID, in no particular order. Unknown IDs are skipped. */
   messages(accountId: string, ids: string[]): Promise<IndexedMessage[]>

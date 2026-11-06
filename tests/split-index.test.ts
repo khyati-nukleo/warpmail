@@ -235,6 +235,34 @@ describe('schema v4', () => {
     expect(read('SELECT count(*) AS n FROM participants')).toEqual([{ n: 2 }])
   })
 
+  it('lists unchecked headers newest first and stores fetched ones', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [
+      message(box, 1),
+      message(box, 2),
+      message(box, 3),
+      message(box, 4, { automation: { listId: null, precedence: null, autoSubmitted: null } }),
+    ])
+    expect(await index.uncheckedHeaders('a', box, 2)).toEqual([
+      { uid: 3, uidValidity: '1' },
+      { uid: 2, uidValidity: '1' },
+    ])
+    await index.setAutomationHeaders('a', box, [
+      { uid: 3, listId: '<news.example>', precedence: null, autoSubmitted: null },
+      { uid: 2, listId: null, precedence: null, autoSubmitted: null },
+    ])
+    expect(await index.uncheckedHeaders('a', box, 10)).toEqual([{ uid: 1, uidValidity: '1' }])
+    await index.close()
+    expect(
+      read('SELECT uid, headers_checked, automated, list_id FROM messages ORDER BY uid'),
+    ).toEqual([
+      { uid: 1, headers_checked: 0, automated: 0, list_id: null },
+      { uid: 2, headers_checked: 1, automated: 0, list_id: null },
+      { uid: 3, headers_checked: 1, automated: 1, list_id: '<news.example>' },
+      { uid: 4, headers_checked: 1, automated: 0, list_id: null },
+    ])
+  })
+
   it('drops participants with their message', async () => {
     const box = await inbox()
     await index.upsertMessages('a', [message(box, 1), message(box, 2), message(box, 3)])

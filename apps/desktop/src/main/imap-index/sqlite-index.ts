@@ -42,6 +42,8 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   knownUids: true,
   relocate: true,
   setPreview: true,
+  uncheckedHeaders: true,
+  setAutomationHeaders: true,
   messages: true,
   messagesAt: true,
   threadMessages: true,
@@ -673,21 +675,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           )
           const automation = message.automation
           if (automation && existing.headers_checked === 0)
-            this.run(
-              `UPDATE messages SET list_id = ?, precedence = ?, auto_submitted = ?,
-                headers_checked = 1, automated = ? WHERE id = ?`,
-              automation.listId,
-              automation.precedence,
-              automation.autoSubmitted,
-              isAutomatedMessage({
-                fromEmail: existing.from_email ?? undefined,
-                unsubscribe: existing.unsubscribe,
-                ...automation,
-              })
-                ? 1
-                : 0,
-              existing.id,
-            )
+            this.storeAutomation(existing.id, existing.from_email, existing.unsubscribe, automation)
           // Backfilling the server identity can join locations whose headers lacked Message-ID.
           if (message.emailId)
             this.assignThread(
@@ -872,6 +860,63 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         accountId,
         id,
       )
+    })
+  }
+
+  private storeAutomation(
+    id: string,
+    fromEmail: string | null,
+    unsubscribe: unknown,
+    automation: { listId: string | null; precedence: string | null; autoSubmitted: string | null },
+  ) {
+    this.run(
+      `UPDATE messages SET list_id = ?, precedence = ?, auto_submitted = ?,
+        headers_checked = 1, automated = ? WHERE id = ?`,
+      automation.listId,
+      automation.precedence,
+      automation.autoSubmitted,
+      isAutomatedMessage({ fromEmail: fromEmail ?? undefined, unsubscribe, ...automation }) ? 1 : 0,
+      id,
+    )
+  }
+
+  uncheckedHeaders(accountId: string, mailboxId: string, limit: number) {
+    return this.all<{ uid: number; uidValidity: string }>(
+      `SELECT uid, uid_validity AS uidValidity FROM messages
+        WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
+        ORDER BY uid DESC LIMIT ?`,
+      accountId,
+      mailboxId,
+      limit,
+    )
+  }
+
+  setAutomationHeaders(
+    accountId: string,
+    mailboxId: string,
+    rows: {
+      uid: number
+      listId: string | null
+      precedence: string | null
+      autoSubmitted: string | null
+    }[],
+  ) {
+    this.tx(() => {
+      for (const row of rows) {
+        const existing = this.get<{
+          id: string
+          from_email: string | null
+          unsubscribe: string | null
+        }>(
+          `SELECT id, from_email, unsubscribe FROM messages
+            WHERE account_id = ? AND mailbox_id = ? AND uid = ? AND headers_checked = 0`,
+          accountId,
+          mailboxId,
+          row.uid,
+        )
+        if (existing)
+          this.storeAutomation(existing.id, existing.from_email, existing.unsubscribe, row)
+      }
     })
   }
 

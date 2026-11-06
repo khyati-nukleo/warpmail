@@ -33,6 +33,7 @@ import {
   messageIds,
   metadataQuery,
   parseBlobId,
+  parseHeaderLines,
   partSection,
   previewText,
   textParts,
@@ -89,6 +90,8 @@ interface Timing {
   fullReconcileMs: number
   initialBatch: number
   historicalBatch: number
+  /** Inbox messages whose automation headers are read per background task. */
+  headerBatch: number
   previews: number
   /** Grace period for a server that files its own Sent copy after submission. */
   sentCopyGraceMs: number
@@ -114,6 +117,7 @@ const defaultTiming: Timing = {
   fullReconcileMs: 15 * 60_000,
   initialBatch: 200,
   historicalBatch: 500,
+  headerBatch: 500,
   previews: 30,
   sentCopyGraceMs: 1500,
   prefetchDays: 30,
@@ -510,6 +514,7 @@ export class ImapProvider implements MailProvider {
         await this.syncPass(scope)
         failures = 0
         this.setState('connected')
+        await this.checkHeaders()
         // Recent mail first, so opening it needs no round trip; then older metadata.
         await this.prefetchBodies()
         let more = true
@@ -711,6 +716,53 @@ export class ImapProvider implements MailProvider {
       )
     }
     return ids
+  }
+  /**
+   * Reads List-Id, Precedence and Auto-Submitted for Inbox mail indexed before they were
+   * fetched with the rest, so Important can leave out lists and automated mail there too.
+   * Batches run as short background tasks and stop as soon as a sync is requested.
+   */
+  private async checkHeaders() {
+    const inbox = (await this.index.listMailboxes(this.accountId)).find(
+      (b) => !b.noSelect && b.uidValidity && isInbox(b.path),
+    )
+    if (!inbox) return
+    let written = false
+    while (!this.disposed && this.pending === 'none') {
+      const rows = await this.index.uncheckedHeaders(
+        this.accountId,
+        inbox.id,
+        this.timing.headerBatch,
+      )
+      if (!rows.length) break
+      const done = await this.run(async (port) => {
+        const selected = await port.select(inbox.path)
+        const valid = rows.filter((row) => row.uidValidity === selected.uidValidity)
+        if (!valid.length) return false
+        const fetched = await port.fetch(uidSet(valid.map((row) => row.uid)), {
+          headers: ['list-id', 'precedence', 'auto-submitted'],
+        })
+        const byUid = new Map(fetched.map((m) => [m.uid, parseHeaderLines(m.headers)]))
+        await this.index.setAutomationHeaders(
+          this.accountId,
+          inbox.id,
+          valid.map((row) => {
+            const headers = byUid.get(row.uid) || {}
+            return {
+              uid: row.uid,
+              listId: headers['list-id'] || null,
+              precedence: headers['precedence'] || null,
+              autoSubmitted: headers['auto-submitted'] || null,
+            }
+          }),
+        )
+        return true
+      }, true)
+      // A batch that wrote nothing (stale UIDVALIDITY) would repeat forever; the next sync resets it.
+      if (!done) break
+      written = true
+    }
+    if (written) this.emit({ type: 'changed', accountId: this.accountId, historical: true })
   }
   /** Indexes one batch of older mail. Returns whether any folder still has older mail. */
   private async historicalBatch(): Promise<boolean> {

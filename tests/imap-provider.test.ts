@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { ProviderError, type Account, type ImapConnectionConfig } from '../packages/core/src'
 import { ImapProvider, limitsFor, imapFlowOptions, ImapFlowPort } from '../packages/imap/src'
@@ -374,9 +375,9 @@ describe('IMAP indexing and reading', () => {
     expect(message.html).toBe(html)
     expect(message.preview).toBe('')
 
-    const [reopened] = await p.messages(account, [message.id], true)
-    expect(reopened.html).toBe(message.html)
-    expect(reopened.preview).toBe('')
+    const [index] = await p.messages(account, [message.id], true)
+    expect(index.html).toBe(message.html)
+    expect(index.preview).toBe('')
   })
   it('indexes recent Inbox mail first and reports incomplete results until history is indexed', async () => {
     for (let i = 0; i < 12; i++)
@@ -565,6 +566,61 @@ describe('IMAP indexing and reading', () => {
       ).length,
     ).toBe(1)
     expect(server.commandPorts).toHaveLength(2)
+  })
+})
+
+describe('IMAP header backfill for inbox mail', () => {
+  const check = (p: ImapProvider) => (p as any).checkHeaders() as Promise<void>
+  const important = { kind: 'important', always: [], never: [] } as const
+  async function uncheckedInbox() {
+    const news = server.deliver('INBOX', {
+      messageId: 'news@x',
+      date: at(1),
+      from: [{ name: 'News', email: 'news@shop.example' }],
+      headers: { 'List-Id': '<news.shop.example>', 'X-Other': 'ignored' },
+    })
+    for (const n of [2, 3])
+      server.deliver('INBOX', { messageId: 'p' + n + '@x', date: at(n), from: [alex] })
+    const file = join(directory, 'backfill.sqlite')
+    const index = openInProcessIndex(file)
+    const p = await connected({ index })
+    await sync(p)
+    // Mail indexed before schema v4 has no checked headers.
+    const db = new DatabaseSync(file)
+    db.exec('UPDATE messages SET headers_checked = 0, list_id = NULL, automated = 0')
+    db.close()
+    const [inbox] = (await index.listMailboxes((p as any).accountId)).filter(
+      (b) => b.path === 'INBOX',
+    )
+    const important_ = async () =>
+      (
+        await index.conversations(
+          (p as any).accountId,
+          { mailboxIds: [inbox!.id], split: important },
+          { limit: 50 },
+        )
+      ).items.length
+    return { p, news, important: important_, index }
+  }
+  it('fetches only the three headers once and drops lists from Important', async () => {
+    const { p, important } = await uncheckedInbox()
+    expect(await important()).toBe(3)
+    const changed = vi.fn()
+    p.subscribe((e) => e.type === 'changed' && changed(e))
+    await check(p)
+    expect(await important()).toBe(2)
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ historical: true }))
+    const before = server.commands.length
+    await check(p)
+    expect(server.commands.slice(before)).toEqual([])
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+  it('stops when a sync is requested', async () => {
+    const { p, important } = await uncheckedInbox()
+    p.requestSync('inbox')
+    await check(p)
+    expect(await important()).toBe(3)
   })
 })
 

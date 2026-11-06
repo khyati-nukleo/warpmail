@@ -15,6 +15,8 @@ export interface FakeMessageInput {
   messageId?: string
   inReplyTo?: string
   references?: string[]
+  /** Extra header lines, served when a FETCH asks for them by name. */
+  headers?: Record<string, string>
   subject?: string
   from?: Address[]
   to?: Address[]
@@ -386,9 +388,16 @@ export class FakePort implements ImapPort {
           ...(query.size ? { size: raw.length } : {}),
           ...(query.headers
             ? {
-                headers: i.references
-                  ? 'References: ' + i.references.map((r) => '<' + r + '>').join(' ') + '\r\n'
-                  : '',
+                headers:
+                  (i.references
+                    ? 'References: ' + i.references.map((r) => '<' + r + '>').join(' ') + '\r\n'
+                    : '') +
+                  Object.entries(i.headers || {})
+                    .filter(([name]) =>
+                      query.headers!.some((h) => h.toLowerCase() === name.toLowerCase()),
+                    )
+                    .map(([name, value]) => name + ': ' + value + '\r\n')
+                    .join(''),
               }
             : {}),
         }
