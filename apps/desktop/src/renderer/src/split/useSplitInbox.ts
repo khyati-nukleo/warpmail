@@ -13,6 +13,7 @@ import {
   ownAddresses,
   type Account,
   type Bootstrap,
+  type Message,
   type Settings,
   type SplitTab,
 } from '@inlark/core'
@@ -26,11 +27,14 @@ import {
   type ShortcutHandler,
   type ShortcutId,
 } from '../shortcuts'
+import type { AddToTabState } from './AddToTab'
 import {
   activeTabId,
+  addRule,
   adjacentTab,
   moveTab,
   putTab,
+  senderOf,
   serialQueue,
   tabElementId,
   tabEntries,
@@ -51,7 +55,9 @@ export function useSplitInbox({
   route,
   go,
   inboxUnread,
+  notify,
   saveSettings,
+  addToTab,
 }: {
   settings: Settings
   accounts: Account[]
@@ -59,10 +65,22 @@ export function useSplitInbox({
   go: (next: RouteSearch) => void
   /** The sidebar's inbox unread count for the accounts in scope. */
   inboxUnread: number
-  /** For the tab editor and pickers that come next. */
   notify: (text: string, tone?: 'error' | 'info') => void
   /** Saves and shows any error itself; resolves to whether the save worked. */
   saveSettings: (patch: Partial<Settings>) => Promise<boolean>
+  /** The conversation "Add sender to tab…" works on: the open one, or the focused one. */
+  addToTab: {
+    available: boolean
+    /** Read when the picker opens. List summaries hold only the latest message. */
+    conversation: () =>
+      | {
+          accountId: string
+          id: string
+          count?: number
+          messages?: Pick<Message, 'from' | 'receivedAt'>[]
+        }
+      | undefined
+  }
 }) {
   const keys = useShortcutText()
   const entries = tabEntries(settings)
@@ -163,13 +181,19 @@ export function useSplitInbox({
       if (to !== undefined) reorder(id, to)
     }
   }
-  /** Saves a new or edited tab; a new one opens once saved. A failed save keeps the box open. */
+  /**
+   * Saves a new or edited tab; a new one opens once saved, unless it was made for an email's
+   * sender. A failed save keeps the box open.
+   */
   const saveTab = async (tab: SplitTab) => {
     const tabs = latestTabs()
     const added = !tabs.some((t) => t.id === tab.id)
+    const sender = dialog?.kind === 'edit' ? dialog.added : undefined
     if (!(await saveTabs(putTab(tabs, tab)))) return
     closeDialog()
-    if (added) select(tab.id)
+    if (sender) {
+      if (tab.rules.includes(sender)) notify('Added ' + sender + ' to ' + tab.name)
+    } else if (added) select(tab.id)
   }
   const deleteTab = async (tab: SplitTab) => {
     if (!(await saveTabs(latestTabs().filter((t) => t.id !== tab.id)))) return
@@ -178,7 +202,54 @@ export function useSplitInbox({
     if (tab.id === active) select('inbox')
   }
 
+  const [picker, setPicker] = useState<AddToTabState>()
+  /** Opens the add-to-tab picker for the newest sender who isn't the user. */
+  const openPicker = async (fromCommand = false) => {
+    const conversation = addToTab.conversation()
+    if (!conversation) return
+    const { accountId, id, count = 0, messages } = conversation
+    let sender = senderOf(messages ?? [], own)
+    // The list holds only the latest message, which may be the user's own reply.
+    if (!sender && (!messages || count > messages.length))
+      sender = senderOf(
+        await api.conversation(accountId, id, { prefetch: true }).catch(() => []),
+        own,
+      )
+    if (!sender) return notify('Every message in this conversation is from you.', 'info')
+    setPicker({ sender, fromCommand, open: true, seq: ++dialogs.current })
+  }
+  const closePicker = (refocus = true) => {
+    if (refocus) focusActiveTabAfterDialog(!!picker?.fromCommand)
+    setPicker((shown) => shown && { ...shown, open: false })
+  }
+  /** Adds the rule to a tab, or a new tab named as typed; a failed save keeps the picker open. */
+  const pickTab = async (target: { id?: string; name?: string }, rule: string) => {
+    const result = addRule(latestTabs(), target, rule)
+    const tab = result.tabs.find((t) => t.id === result.tabId)
+    if (!tab) return closePicker()
+    if (!result.already && !(await saveTabs(result.tabs))) return
+    closePicker()
+    notify(result.already ? 'Already in ' + tab.name : 'Added ' + rule + ' to ' + tab.name)
+  }
+  /** "New tab…": the tab editor, with the sender's rule in it. */
+  const newTabFor = (rule: string) => {
+    closePicker(false)
+    setDialog({
+      kind: 'edit',
+      focus: 'name',
+      rules: [rule],
+      added: rule,
+      fromCommand: picker?.fromCommand,
+      open: true,
+      seq: ++dialogs.current,
+    })
+  }
+
   const shortcutHandlers: Partial<Record<ShortcutId, ShortcutHandler>> = {
+    addToTab: {
+      run: () => void openPicker(),
+      enabled: addToTab.available ? undefined : false,
+    },
     // Undefined keeps the caller's `enabled`, so dialogs and the composer still block these.
     nextTab: {
       run: () => select(adjacentTab(active, entries, 1)),
@@ -210,6 +281,16 @@ export function useSplitInbox({
     checked: visible && entry.id === active,
     run: () => select(entry.id),
   }))
+  if (addToTab.available)
+    commands.unshift({
+      id: 'tab-add-sender',
+      group: 'Tabs',
+      label: 'Add sender to tab…',
+      icon: UserRound,
+      key: keys('addToTab'),
+      keywords: 'split inbox sender domain rule',
+      run: () => void openPicker(true),
+    })
 
   // The active user tab's menu, in Ctrl+K.
   const activeTab = visible ? userTabs.find((tab) => tab.id === active) : undefined
@@ -247,8 +328,10 @@ export function useSplitInbox({
     visible,
     select,
     saveTabs,
-    /** A tab dialog is open, so the app's shortcuts wait. */
-    dialogOpen: !!dialog?.open,
+    /** A tab dialog or the add-to-tab picker is open, so the app's shortcuts wait. */
+    dialogOpen: !!dialog?.open || !!picker?.open,
+    /** "Add sender to tab…" for the open conversation, from the reader's menu. */
+    addSender: addToTab.available ? () => void openPicker() : undefined,
     /** Props for `TabDialogs`. */
     dialogs: {
       dialog,
@@ -257,6 +340,7 @@ export function useSplitInbox({
       onClose: () => closeDialog(),
       onSave: saveTab,
       onDelete: deleteTab,
+      picker: { state: picker, onClose: () => closePicker(), onPick: pickTab, onNewTab: newTabFor },
     },
     shortcutHandlers,
     commands,

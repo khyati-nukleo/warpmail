@@ -1,7 +1,8 @@
 import { Button, cn, Modal } from '@inlark/ui'
 import type { SplitTab } from '@inlark/core'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ComponentProps } from 'react'
 import { api } from '../api'
+import { AddToTab } from './AddToTab'
 import { editorState, matchCountText } from './tab-model'
 
 // The design's own examples: no real addresses in the app.
@@ -14,7 +15,16 @@ const actionsClass = cn(
 
 /** Which tab dialog shows; kept after closing so its words stay while it fades out. */
 export type TabDialogState = (
-  { kind: 'edit'; tab?: SplitTab; focus: 'name' | 'rules' } | { kind: 'delete'; tab: SplitTab }
+  | {
+      kind: 'edit'
+      tab?: SplitTab
+      focus: 'name' | 'rules'
+      /** A new tab's rules to start with. */
+      rules?: string[]
+      /** The sender's rule, when "New tab…" was chosen in the add-to-tab picker. */
+      added?: string
+    }
+  | { kind: 'delete'; tab: SplitTab }
 ) & {
   open: boolean
   seq: number
@@ -22,7 +32,7 @@ export type TabDialogState = (
   fromCommand?: boolean
 }
 
-/** The tab editor and the delete confirmation, for `useSplitInbox`'s `dialogs`. */
+/** The tab editor, the delete confirmation and the add-to-tab picker, for `useSplitInbox`'s `dialogs`. */
 export function TabDialogs({
   dialog,
   tabs,
@@ -30,6 +40,7 @@ export function TabDialogs({
   onClose,
   onSave,
   onDelete,
+  picker,
 }: {
   dialog?: TabDialogState
   tabs: SplitTab[]
@@ -37,14 +48,22 @@ export function TabDialogs({
   onClose: () => void
   onSave: (tab: SplitTab) => Promise<void>
   onDelete: (tab: SplitTab) => Promise<void>
+  picker: Omit<ComponentProps<typeof AddToTab>, 'tabs' | 'own'>
 }) {
   const edit = dialog?.kind === 'edit' ? dialog : undefined
   return (
     <>
+      <AddToTab
+        key={picker.state ? 'add-to-tab-' + picker.state.seq : 'add-to-tab'}
+        {...picker}
+        tabs={tabs}
+        own={own}
+      />
       <TabEditor
         key={edit ? 'tab-editor-' + edit.seq : 'tab-editor'}
         open={!!edit?.open}
         tab={edit?.tab}
+        rules={edit?.rules}
         tabs={tabs}
         own={own}
         focus={edit?.focus}
@@ -67,6 +86,7 @@ export function TabEditor({
   tab,
   tabs,
   own,
+  rules,
   onSave,
   onClose,
   focus = 'name',
@@ -74,6 +94,8 @@ export function TabEditor({
   open: boolean
   /** The tab being edited; a new tab when left out. */
   tab?: SplitTab
+  /** A new tab's rules to start with. */
+  rules?: string[]
   /** Every user tab, so names stay unique. */
   tabs: SplitTab[]
   /** The user's own addresses, which rules may not match. */
@@ -84,7 +106,7 @@ export function TabEditor({
   focus?: 'name' | 'rules'
 }) {
   const [name, setName] = useState(tab?.name ?? '')
-  const [rulesText, setRulesText] = useState(tab?.rules.join('\n') ?? '')
+  const [rulesText, setRulesText] = useState((tab?.rules ?? rules)?.join('\n') ?? '')
   const [saving, setSaving] = useState(false)
   const state = editorState(name, rulesText, own, tabs, tab?.id)
   const match = useMatchCount(state.rules, open)

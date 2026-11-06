@@ -327,6 +327,13 @@ export function App() {
     inboxUnread: account ? mailboxCounts.byAccount[account.id] || 0 : mailboxCounts.unread,
     notify,
     saveSettings: (patch) => savePreferences(patch),
+    addToTab: {
+      available: view !== 'drafts' && (!!route.thread || !!focused),
+      conversation: () =>
+        route.thread
+          ? { accountId: route.threadAccount!, id: route.thread, messages: thread.data }
+          : conversations.find((c) => c.key === focused),
+    },
   })
   const currentFolder = boxes.data?.find((b) => b.id === route.folder)
   const query: MailQuery = useMemo(
@@ -1725,6 +1732,7 @@ export function App() {
               onMailto={onMailto}
               unsubscribe={unsubscribeState}
               onUnsubscribe={() => void unsubscribe()}
+              onAddToTab={split.addSender}
               onUnlock={() => void unlock()}
               onOpenEncryption={() => openSettings('encryption')}
             />

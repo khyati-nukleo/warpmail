@@ -1,5 +1,16 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query'
-import { parseRuleLines, type Account, type Settings, type SplitTab } from '@inlark/core'
+import {
+  formatRule,
+  isFreeMailDomain,
+  parseRule,
+  parseRuleLines,
+  refusalReason,
+  type Account,
+  type Address,
+  type Message,
+  type Settings,
+  type SplitTab,
+} from '@inlark/core'
 
 export interface TabEntry {
   id: string
@@ -114,6 +125,122 @@ function tabNameError(name: string, existing: SplitTab[], editingId?: string) {
   if (builtIn) return builtIn + ' is a built-in tab. Choose another name.'
   const twin = existing.find((t) => t.id !== editingId && t.name.trim().toLowerCase() === key)
   if (twin) return 'You already have a tab called “' + twin.name + '”.'
+}
+
+/** The From of the newest message not sent from one of the user's own addresses. */
+export function senderOf(
+  messages: Pick<Message, 'from' | 'receivedAt'>[],
+  own: string[],
+): Address | undefined {
+  const mine = new Set(own.map((e) => e.trim().toLowerCase()))
+  return [...messages]
+    .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+    .map((m) => m.from[0])
+    .find((from) => from && !mine.has(from.email.trim().toLowerCase()))
+}
+
+export interface SenderRules {
+  /** The sender's address as a rule, unless it is refused. */
+  address?: string
+  /** The sender's whole domain, offered only when it isn't free mail and isn't refused. */
+  domain?: string
+  /** Why the sender can't go in a tab. */
+  refusal?: string
+}
+
+export function senderRules(email: string, own: string[]): SenderRules {
+  const rule = parseRule(email)
+  if (rule?.kind !== 'address') return { refusal: email + ' isn’t an address a tab can use.' }
+  const refusal = refusalReason(rule, own)
+  if (refusal) return { refusal }
+  const host = rule.value.slice(rule.value.lastIndexOf('@') + 1)
+  const domain = { kind: 'domain', value: host } as const
+  return {
+    address: formatRule(rule),
+    ...(!isFreeMailDomain(host) && !refusalReason(domain, own)
+      ? { domain: formatRule(domain) }
+      : {}),
+  }
+}
+
+/**
+ * Adds `rule` to the tab with `target.id` (or named `target.name`), or else creates a tab named
+ * `target.name` with it. `already` when the tab had the rule; an unknown id changes nothing.
+ */
+export function addRule(
+  tabs: SplitTab[],
+  target: { id?: string; name?: string },
+  rule: string,
+): { tabs: SplitTab[]; tabId: string; already: boolean } {
+  const name = target.name?.trim() ?? ''
+  const existing = target.id
+    ? tabs.find((t) => t.id === target.id)
+    : tabs.find((t) => t.name.trim().toLowerCase() === name.toLowerCase())
+  if (existing) {
+    const already = existing.rules.some((r) => r.toLowerCase() === rule.toLowerCase())
+    return {
+      tabs: already ? tabs : putTab(tabs, { ...existing, rules: [...existing.rules, rule] }),
+      tabId: existing.id,
+      already,
+    }
+  }
+  if (target.id || !name) return { tabs, tabId: '', already: false }
+  const tab = { id: crypto.randomUUID(), name, rules: [rule] }
+  return { tabs: [...tabs, tab], tabId: tab.id, already: false }
+}
+
+/** A row in the add-to-tab picker: the tab editor, a tab named as typed, or an existing tab. */
+export type PickerOption =
+  { kind: 'new' } | { kind: 'create'; name: string } | { kind: 'tab'; tab: SplitTab }
+
+/**
+ * "New tab…" (or a tab named as typed, unless a tab has that name), then the tabs whose name
+ * contains the text, those starting with it first. The best matching tab is highlighted.
+ */
+export function pickerOptions(
+  tabs: SplitTab[],
+  text: string,
+): { options: PickerOption[]; highlight: number } {
+  const typed = text.trim()
+  const query = typed.toLowerCase()
+  if (!query) return { options: [{ kind: 'new' }, ...tabs.map(asOption)], highlight: 0 }
+  const starts = (name: string) => name.split(/[\s/._-]+/).some((word) => word.startsWith(query))
+  const found = tabs.filter((t) => t.name.toLowerCase().includes(query))
+  const ranked = [
+    ...found.filter((t) => starts(t.name.toLowerCase())),
+    ...found.filter((t) => !starts(t.name.toLowerCase())),
+  ].map(asOption)
+  if (tabs.some((t) => t.name.trim().toLowerCase() === query))
+    return { options: ranked, highlight: 0 }
+  return {
+    options: [{ kind: 'create', name: typed }, ...ranked],
+    highlight: ranked.length ? 1 : 0,
+  }
+}
+
+const asOption = (tab: SplitTab): PickerOption => ({ kind: 'tab', tab })
+
+/** Why a picker option can't take `rule`: too many tabs, a bad name or a full tab. */
+export function pickProblem(
+  option: PickerOption,
+  tabs: SplitTab[],
+  rule: string,
+  own: string[],
+): string | undefined {
+  if (option.kind === 'tab') {
+    const { rules, name } = option.tab
+    const has = rules.some((r) => r.toLowerCase() === rule.toLowerCase())
+    return !has && rules.length >= tabRulesMax
+      ? '“' +
+          name +
+          '” already holds ' +
+          tabRulesMax +
+          ' addresses and domains, the most a tab can.'
+      : undefined
+  }
+  // The editor names a tab opened from "New tab…", so only the tab limit applies to it.
+  const state = editorState(option.kind === 'create' ? option.name : '', rule, own, tabs)
+  return option.kind === 'create' ? (state.limitError ?? state.nameError) : state.limitError
 }
 
 export function matchCountText(n: number) {

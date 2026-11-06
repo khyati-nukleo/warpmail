@@ -3,13 +3,18 @@ import { QueryClient } from '../apps/desktop/node_modules/@tanstack/react-query'
 import type { Account, Settings, SplitTab } from '../packages/core/src'
 import {
   activeTabId,
+  addRule,
   adjacentTab,
   dropIndex,
   editorState,
   matchCountText,
   moveTab,
+  pickerOptions,
+  pickProblem,
   putTab,
   rovingTarget,
+  senderOf,
+  senderRules,
   serialQueue,
   tabEmptyCopy,
   tabEntries,
@@ -306,6 +311,159 @@ describe('split tab model', () => {
       expect(matchCountText(1234)).toBe(
         'Matches ' + (1234).toLocaleString() + ' conversations in your inbox',
       )
+    })
+  })
+})
+
+describe('adding a sender to a tab', () => {
+  const own = ['me@work.example', 'me.personal@gmail.com']
+  const from = (email: string, receivedAt: string) => ({
+    from: [{ name: email.split('@')[0], email }],
+    receivedAt,
+  })
+
+  it('finds the newest sender who is not the user', () => {
+    const messages = [
+      from('ana@client.example', '2026-11-01T10:00:00Z'),
+      from('ben@partner.example', '2026-11-03T10:00:00Z'),
+      from('Me@Work.example', '2026-11-04T10:00:00Z'),
+      from('cleo@client.example', '2026-11-02T10:00:00Z'),
+    ]
+    expect(senderOf(messages, own)).toEqual({ name: 'ben', email: 'ben@partner.example' })
+    expect(senderOf([from('me.personal@gmail.com', '2026-11-04T10:00:00Z')], own)).toBeUndefined()
+    expect(senderOf([{ from: [], receivedAt: '2026-11-04T10:00:00Z' }], own)).toBeUndefined()
+    expect(senderOf([], own)).toBeUndefined()
+  })
+
+  it('offers the sender and their domain, but not free mail or refused domains', () => {
+    expect(senderRules('Ana@Client.example', own)).toEqual({
+      address: 'ana@client.example',
+      domain: '@client.example',
+    })
+    expect(senderRules('someone@gmail.com', own)).toEqual({ address: 'someone@gmail.com' })
+    // A domain holding one of the user's own addresses would match every conversation.
+    expect(senderRules('it@sub.work.example', own).refusal).toMatch(/your own domain/)
+    expect(senderRules('it@sub.work.example', own).address).toBeUndefined()
+    expect(senderRules('not an address', own).refusal).toBe(
+      'not an address isn’t an address a tab can use.',
+    )
+  })
+
+  it('appends to an existing tab, by id or by name', () => {
+    const tabs: SplitTab[] = [
+      { id: 'a', name: 'Client', rules: ['@client.example'] },
+      { id: 'b', name: 'GitHub', rules: ['notifications@github.com'] },
+    ]
+    const byId = addRule(tabs, { id: 'b' }, 'ben@partner.example')
+    expect(byId).toEqual({
+      tabs: [
+        tabs[0],
+        { id: 'b', name: 'GitHub', rules: ['notifications@github.com', 'ben@partner.example'] },
+      ],
+      tabId: 'b',
+      already: false,
+    })
+    expect(tabs[1].rules).toEqual(['notifications@github.com'])
+    expect(addRule(tabs, { name: ' github ' }, 'ben@partner.example').tabId).toBe('b')
+  })
+
+  it('creates a tab named after the typed text', () => {
+    const tabs: SplitTab[] = [{ id: 'a', name: 'Client', rules: [] }]
+    const result = addRule(tabs, { name: '  Partner ' }, '@partner.example')
+    expect(result.already).toBe(false)
+    expect(result.tabs).toHaveLength(2)
+    expect(result.tabs[1]).toEqual({
+      id: result.tabId,
+      name: 'Partner',
+      rules: ['@partner.example'],
+    })
+    expect(result.tabId).not.toBe('a')
+  })
+
+  it('says when the tab already has the rule, and leaves the tabs alone', () => {
+    const tabs: SplitTab[] = [{ id: 'a', name: 'Client', rules: ['@client.example'] }]
+    const result = addRule(tabs, { id: 'a' }, '@Client.example')
+    expect(result).toEqual({ tabs, tabId: 'a', already: true })
+    expect(result.tabs).toBe(tabs)
+  })
+
+  it('changes nothing for a tab that is gone', () => {
+    const tabs: SplitTab[] = [{ id: 'a', name: 'Client', rules: [] }]
+    expect(addRule(tabs, { id: 'gone' }, 'x@y.example')).toEqual({
+      tabs,
+      tabId: '',
+      already: false,
+    })
+  })
+
+  describe('picker options', () => {
+    const tabs: SplitTab[] = [
+      { id: 'a', name: 'Client', rules: [] },
+      { id: 'b', name: 'GitHub', rules: [] },
+      { id: 'c', name: 'Old GitHub', rules: [] },
+    ]
+    const kinds = (text: string) =>
+      pickerOptions(tabs, text).options.map((o) =>
+        o.kind === 'tab' ? o.tab.name : o.kind === 'create' ? 'create ' + o.name : 'new',
+      )
+
+    it('starts with New tab… and every tab', () => {
+      expect(kinds('')).toEqual(['new', 'Client', 'GitHub', 'Old GitHub'])
+      expect(pickerOptions(tabs, '  ').highlight).toBe(0)
+    })
+
+    it('filters by name, starting matches first, and offers a tab named as typed', () => {
+      expect(kinds('git')).toEqual(['create git', 'GitHub', 'Old GitHub'])
+      expect(kinds('hub')).toEqual(['create hub', 'GitHub', 'Old GitHub'])
+      expect(kinds('Partner')).toEqual(['create Partner'])
+    })
+
+    it('highlights the best matching tab, or the new tab when none match', () => {
+      expect(pickerOptions(tabs, 'git').highlight).toBe(1)
+      expect(pickerOptions(tabs, 'Partner').highlight).toBe(0)
+    })
+
+    it('offers no new tab when the text is a tab’s name', () => {
+      expect(kinds(' github ')).toEqual(['GitHub', 'Old GitHub'])
+      expect(pickerOptions(tabs, 'github').highlight).toBe(0)
+    })
+  })
+
+  describe('pick problems', () => {
+    const tabs: SplitTab[] = [{ id: 'a', name: 'Client', rules: [] }]
+    const fifty = Array.from({ length: 50 }, (_, i) => ({ id: 't' + i, name: 'T' + i, rules: [] }))
+
+    it('explains the tab limit instead of creating a 51st tab', () => {
+      const limit = 'You have 50 tabs, the most there can be. Delete one to make room.'
+      expect(pickProblem({ kind: 'new' }, fifty, 'x@y.example', own)).toBe(limit)
+      expect(pickProblem({ kind: 'create', name: 'More' }, fifty, 'x@y.example', own)).toBe(limit)
+      expect(pickProblem({ kind: 'new' }, tabs, 'x@y.example', own)).toBeUndefined()
+      const named = [{ id: 'n', name: 'New', rules: [] }]
+      expect(pickProblem({ kind: 'new' }, named, 'x@y.example', own)).toBeUndefined()
+      expect(pickProblem({ kind: 'tab', tab: fifty[0] }, fifty, 'x@y.example', own)).toBeUndefined()
+    })
+
+    it('explains names a new tab can’t have', () => {
+      expect(pickProblem({ kind: 'create', name: 'inbox' }, tabs, 'x@y.example', own)).toBe(
+        'Inbox is a built-in tab. Choose another name.',
+      )
+      expect(pickProblem({ kind: 'create', name: 'x'.repeat(61) }, tabs, 'x@y.example', own)).toBe(
+        'Keep the name to 60 characters or fewer.',
+      )
+      expect(
+        pickProblem({ kind: 'create', name: 'Partner' }, tabs, 'x@y.example', own),
+      ).toBeUndefined()
+    })
+
+    it('explains a full tab, unless it already has the rule', () => {
+      const rules = Array.from({ length: 500 }, (_, i) => 'p' + i + '@client.example')
+      const full = { id: 'f', name: 'Full', rules }
+      expect(pickProblem({ kind: 'tab', tab: full }, [full], 'x@y.example', own)).toBe(
+        '“Full” already holds 500 addresses and domains, the most a tab can.',
+      )
+      expect(
+        pickProblem({ kind: 'tab', tab: full }, [full], 'p1@client.example', own),
+      ).toBeUndefined()
     })
   })
 })
