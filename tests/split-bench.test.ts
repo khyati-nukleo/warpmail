@@ -146,7 +146,7 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
     const v3 = join(directory, 'v3.sqlite')
     copyFileSync(join(directory, 'bench.sqlite'), v3)
     const db = new DatabaseSync(v3)
-    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_sender;
+    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
       ALTER TABLE messages DROP COLUMN from_email;
       ALTER TABLE messages DROP COLUMN list_id;
       ALTER TABLE messages DROP COLUMN precedence;

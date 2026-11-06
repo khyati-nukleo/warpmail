@@ -107,8 +107,11 @@ export function migrateToV4(db: DatabaseSync) {
     }
   }
   // Built after the backfill so the bulk inserts don't maintain them row by row.
+  // `messages_mailbox_person` lets Important and the tab counts read only the index: it holds
+  // the thread, date and person test of every inbox row, and `seen` for unread counts.
   db.exec(`CREATE INDEX IF NOT EXISTS participants_address ON participants (account_id, address);
     CREATE INDEX IF NOT EXISTS participants_domain ON participants (account_id, domain);
-    CREATE INDEX IF NOT EXISTS messages_mailbox_sender
-      ON messages (account_id, mailbox_id, from_email);`)
+    DROP INDEX IF EXISTS messages_mailbox_sender;
+    CREATE INDEX IF NOT EXISTS messages_mailbox_person
+      ON messages (account_id, mailbox_id, thread_id, received_ms, automated, from_email, seen);`)
 }

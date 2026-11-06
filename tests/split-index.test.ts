@@ -9,6 +9,7 @@ import {
   SCHEMA_VERSION,
   SqliteMetadataIndex,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
+import { tabCountsQuery } from '../apps/desktop/src/main/imap-index/split-sql'
 import type { FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
 
 let directory: string
@@ -92,7 +93,7 @@ describe('schema v4', () => {
     ])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_sender;
+    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
       ALTER TABLE messages DROP COLUMN from_email;
       ALTER TABLE messages DROP COLUMN list_id;
       ALTER TABLE messages DROP COLUMN precedence;
@@ -106,6 +107,11 @@ describe('schema v4', () => {
 
     expect(read('PRAGMA user_version')).toEqual([{ user_version: 4 }])
     expect(SCHEMA_VERSION).toBe(4)
+    expect(
+      read<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'messages_mailbox_%' ORDER BY name",
+      ).map((r) => r.name),
+    ).toEqual(['messages_mailbox_person', 'messages_mailbox_received', 'messages_mailbox_thread'])
     const rows = read<{ uid: number; seq: number; automated: number; headers_checked: number }>(
       'SELECT uid, seq, automated, headers_checked FROM messages ORDER BY uid',
     )
@@ -141,7 +147,7 @@ describe('schema v4', () => {
     await index.upsertMessages('a', [message(box, 1)])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_sender;
+    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
       ALTER TABLE messages DROP COLUMN from_email;
       ALTER TABLE messages DROP COLUMN list_id;
       ALTER TABLE messages DROP COLUMN precedence;
@@ -371,6 +377,47 @@ describe('tab filter', () => {
     expect(new Set(seen).size).toBe(120)
   })
 
+  it('pages Important with keyset and offset', async () => {
+    const { INBOX } = await boxes('INBOX', 'Archive', 'Sent')
+    const batch: NewMessage[] = []
+    for (let uid = 1; uid <= 150; uid++)
+      batch.push(message(INBOX!, uid, uid % 5 === 0 ? from('no-reply@robot.example') : {}))
+    await index.upsertMessages('a', batch)
+    const filter = { mailboxIds: [INBOX!], split: important() }
+    const first = await index.conversations('a', filter, { limit: 50 })
+    const last = first.items.at(-1)!
+    const second = await index.conversations('a', filter, {
+      limit: 50,
+      after: { receivedAt: last.latest.receivedAt, threadId: last.threadId },
+    })
+    const third = await index.conversations('a', filter, { limit: 50, offset: 100 })
+    expect([first.total, second.total, third.total]).toEqual([120, 120, 120])
+    expect([first.items.length, second.items.length, third.items.length]).toEqual([50, 50, 20])
+    const rows = [...first.items, ...second.items, ...third.items]
+    expect(new Set(rows.map((r) => r.threadId)).size).toBe(120)
+    expect(rows.some((r) => r.latest.uid % 5 === 0)).toBe(false)
+    expect(rows.map((r) => r.latest.uid)).toEqual(
+      [...rows.map((r) => r.latest.uid)].sort((a, b) => b - a),
+    )
+  })
+
+  it('important with another filter still judges the whole inbox thread', async () => {
+    const { INBOX } = await boxes('INBOX')
+    await index.upsertMessages('a', [
+      message(INBOX!, 1, { ...from('friend@example.org'), flags: ['\\Seen'] }),
+      message(INBOX!, 2, { ...from('no-reply@robot.example'), references: ['m1@example.com'] }),
+      message(INBOX!, 3, from('no-reply@robot.example')),
+    ])
+    const page = await index.conversations(
+      'a',
+      { mailboxIds: [INBOX!], split: important(), unseen: true },
+      { limit: 10 },
+    )
+    // The thread is Important through its seen message; its unseen one represents it.
+    expect(uids(page.items)).toEqual([2])
+    expect(page.total).toBe(1)
+  })
+
   it('an empty rules scope matches nothing', async () => {
     const { INBOX } = await boxes('INBOX')
     await index.upsertMessages('a', [message(INBOX!, 1)])
@@ -446,18 +493,92 @@ describe('tab filter', () => {
       domains: [domainKey('d10.example'), domainKey('d11.example')],
     }
     const imp = important([{ address: sender(4), words: ['subject'] }], [sender(5)])
+    const counted = tabCountsQuery('a', inbox, { rules, important: imp })!
+    const db = new DatabaseSync(join(directory, 'large.sqlite'))
     const plans = {
       rules: sync.explainConversations('a', { mailboxIds: [inbox], split: rules }),
       important: sync.explainConversations('a', { mailboxIds: [inbox], split: imp }),
+      importantUnseen: sync.explainConversations('a', {
+        mailboxIds: [inbox],
+        split: imp,
+        unseen: true,
+      }),
+      tabCounts: (
+        db.prepare('EXPLAIN QUERY PLAN ' + counted.sql).all(...counted.params) as {
+          detail: string
+        }[]
+      ).map((r) => r.detail),
     }
     for (const details of Object.values(plans))
       for (const detail of details) expect(detail).not.toMatch(/^SCAN [pmt]\b/)
+    // Important is one pass over the inbox index, without reading table rows.
+    expect(plans.important.join('\n')).toMatch(
+      /SEARCH m USING COVERING INDEX messages_mailbox_person \(account_id=\? AND mailbox_id=\?\)/,
+    )
+    expect(plans.tabCounts.join('\n')).toMatch(
+      /SEARCH m USING COVERING INDEX messages_mailbox_person \(account_id=\? AND mailbox_id=\?\)/,
+    )
+    // No walk of the whole inbox that reads table rows.
+    for (const detail of [...plans.important, ...plans.tabCounts])
+      expect(detail).not.toMatch(/USING INDEX \w+ \(account_id=\? AND mailbox_id=\?\)$/)
     // Each rule is a lookup on its own key, never a walk of the account's participants.
     const lookups = plans.rules.filter((d) => /participants_(address|domain)/.test(d))
     expect(lookups.some((d) => d.includes('address=?'))).toBe(true)
     expect(lookups.some((d) => /domain[=>]/.test(d))).toBe(true)
     for (const detail of lookups) expect(detail).toMatch(/account_id=\? AND (address|domain)/)
+    // A plain-JS reading of both scopes over the stored rows, to check counts and totals.
+    type Row = {
+      seq: number
+      thread_id: string
+      mailbox_id: string
+      seen: number
+      e: string
+      automated: number
+      from_email: string | null
+      subject: string
+    }
+    const rows = db
+      .prepare(
+        `SELECT seq, thread_id, mailbox_id, seen, coalesce(email_id, id) AS e, automated,
+          from_email, subject FROM messages`,
+      )
+      .all() as unknown as Row[]
+    const people = db.prepare('SELECT message_seq, address, domain FROM participants').all() as {
+      message_seq: number
+      address: string
+      domain: string
+    }[]
+    db.close()
+    const threadOf = new Map(rows.map((r) => [r.seq, r.thread_id]))
+    const inRules = new Set(
+      people
+        .filter(
+          (p) =>
+            rules.addresses.includes(p.address) ||
+            rules.domains.some((d) => p.domain === d || p.domain.startsWith(d + '.')),
+        )
+        .map((p) => threadOf.get(p.message_seq)!),
+    )
+    const inboxRows = rows.filter((r) => r.mailbox_id === inbox)
+    const inImportant = new Set(
+      inboxRows
+        .filter(
+          (r) =>
+            (r.automated === 0 ||
+              (r.from_email === sender(4) && r.subject.toLowerCase().includes('subject'))) &&
+            r.from_email !== sender(5),
+        )
+        .map((r) => r.thread_id),
+    )
+    const expected = (threads: Set<string>) => {
+      const mine = inboxRows.filter((r) => threads.has(r.thread_id))
+      return {
+        conversations: new Set(mine.map((r) => r.thread_id)).size,
+        unread: new Set(mine.filter((r) => !r.seen).map((r) => r.e)).size,
+      }
+    }
     const counts = sync.tabCounts('a', inbox, { rules, important: imp })
+    expect(counts).toEqual({ rules: expected(inRules), important: expected(inImportant) })
     for (const [key, split] of [
       ['rules', rules],
       ['important', imp],

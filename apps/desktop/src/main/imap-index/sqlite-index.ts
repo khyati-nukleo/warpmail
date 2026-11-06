@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { isAutomatedMessage, type SplitScope } from '@inlark/core'
 import { firstEmail, migrateToV4, participantsOf } from './split-schema'
-import { splitCondition, tabCountsQuery } from './split-sql'
+import { splitFilter, tabCountsQuery } from './split-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -996,17 +996,19 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       where.push('m.received_ms < ?')
       params.push(time(filter.before))
     }
-    // In WHERE, before grouping, so totals and both kinds of paging work as for any filter.
-    if (filter.split) {
-      const condition = splitCondition(filter.split, 'm.thread_id', accountId, mailboxIds![0]!)
-      if (!condition) return null
-      where.push(condition.sql)
-      params.push(...condition.params)
+    // Applied to the grouped set, so totals and both kinds of paging work as for any filter.
+    const split = filter.split && splitFilter(filter.split, accountId, mailboxIds![0]!, filter)
+    if (split === null) return null
+    if (split?.where) {
+      where.push(split.where.sql)
+      params.push(...split.where.params)
     }
+    if (split?.having) params.push(...split.having.params)
     // With a single max() aggregate, SQLite takes the bare `seq` from the row holding the max.
     return {
       sql: `SELECT m.thread_id AS t, max(m.received_ms) AS r, m.seq AS s FROM ${from}
-        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} GROUP BY m.thread_id`,
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} GROUP BY m.thread_id
+        ${split?.having ? 'HAVING ' + split.having.sql : ''}`,
       params,
     }
   }
