@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest'
+import type { Account } from '@inlark/core'
 import {
   defaultSettings,
   domainKey,
   isAutomatedAddress,
   isAutomatedMessage,
+  ownAddresses,
   parseRule,
   parseRuleLines,
   querySchema,
@@ -17,6 +19,19 @@ import {
 const own = ['me@work.example', 'me@gmail.com']
 
 describe('split rules', () => {
+  it('lists every address the user receives mail as, once', () => {
+    const accounts = [
+      { email: ' Me@Work.example ', aliases: [{ email: 'Team@work.example' }] },
+      { email: 'me.personal@gmail.com' },
+      { email: 'me@work.example', aliases: [{ email: 'team@WORK.example' }] },
+    ] as Account[]
+    expect(ownAddresses(accounts)).toEqual([
+      'me@work.example',
+      'team@work.example',
+      'me.personal@gmail.com',
+    ])
+  })
+
   it('parses addresses and domains', () => {
     expect(parseRule('  someone@Gmail.COM ')).toEqual({ kind: 'address', value: 'someone@gmail.com' })
     expect(parseRule('<k@clientc.example>')).toEqual({ kind: 'address', value: 'k@clientc.example' })

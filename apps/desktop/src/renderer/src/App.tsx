@@ -107,6 +107,7 @@ import {
   useShortcuts,
 } from './shortcuts'
 import { emptyListState } from './empty-states'
+import { TabDialogs } from './split/TabEditor'
 import { TabEmptyState, TabRow } from './split/TabRow'
 import { useSplitInbox } from './split/useSplitInbox'
 import { AccountMark } from './AccountMark'
@@ -454,7 +455,8 @@ export function App() {
     filterOpen ||
     !!folderDialog ||
     !!moveTargets ||
-    !!confirmAction
+    !!confirmAction ||
+    split.dialogOpen
   const go = (next: Partial<typeof route>, reset = true) => {
     if (reset) {
       setSelected(new Set())
@@ -2622,6 +2624,7 @@ export function App() {
           setMoveTargets(undefined)
         }}
       />
+      <TabDialogs {...split.dialogs} />
       <ConfirmActionDialog
         action={confirmAction}
         count={allMatching ? total : targets().length}

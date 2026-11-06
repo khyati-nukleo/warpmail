@@ -1,14 +1,40 @@
-import { cn, EmptyState, IconButton } from '@inlark/ui'
-import { Inbox, Plus, UserRound } from '@inlark/ui/icons'
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
+import { cn, Dropdown, EmptyState, IconButton, MenuItem } from '@inlark/ui'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Inbox,
+  PencilEdit,
+  PenLine,
+  Plus,
+  Trash2,
+  UserRound,
+} from '@inlark/ui/icons'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+  type KeyboardEvent,
+} from 'react'
 import {
   dropIndex,
   rovingTarget,
   tabElementId,
   tabEmptyCopy,
+  tabMoves,
   tabPanelId,
+  type TabAction,
   type TabEntry,
 } from './tab-model'
+
+/** A user tab's open menu, shown next to `anchor`; kept while it fades out after closing. */
+export interface TabMenuState {
+  id: string
+  anchor: HTMLElement
+  open: boolean
+}
 
 const dragType = 'application/x-warpmail-tab'
 
@@ -24,6 +50,9 @@ export function TabRow({
   onReorder,
   onMenu,
   onAdd,
+  menu,
+  onMenuClose,
+  onMenuAction,
 }: {
   entries: TabEntry[]
   active: string
@@ -34,6 +63,9 @@ export function TabRow({
   onReorder: (id: string, toIndex: number) => void
   onMenu: (id: string, anchor: HTMLElement) => void
   onAdd: () => void
+  menu?: TabMenuState
+  onMenuClose: () => void
+  onMenuAction: (id: string, action: TabAction) => void
 }) {
   const [focusId, setFocusId] = useState<string>()
   const [dragging, setDragging] = useState<{ id: string; from: number }>()
@@ -44,6 +76,29 @@ export function TabRow({
   const tabStop = entries.some((entry) => entry.id === focusId) ? focusId : active
   const userIndex = (id: string) =>
     entries.filter((entry) => entry.user).findIndex((e) => e.id === id)
+
+  // The menu opens from an unseen trigger laid over the tab it belongs to.
+  // Measured while rendering, so the menu is placed right the moment it opens.
+  const row = useRef<HTMLDivElement>(null)
+  const anchor = menu?.anchor
+  const menuBox = useMemo((): CSSProperties | undefined => {
+    const box = row.current?.getBoundingClientRect()
+    const tab = anchor?.getBoundingClientRect()
+    if (!box || !tab) return
+    return {
+      left: tab.left - box.left,
+      top: tab.top - box.top,
+      width: tab.width,
+      height: tab.height,
+    }
+  }, [anchor])
+  const moves = menu
+    ? tabMoves(
+        entries.filter((entry) => entry.user),
+        menu.id,
+      )
+    : {}
+  const act = (action: TabAction) => menu && onMenuAction(menu.id, action)
 
   useEffect(() => {
     buttons.current.get(active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
@@ -84,7 +139,10 @@ export function TabRow({
   }
 
   return (
-    <div className="tab-row flex items-center gap-1.5 pb-3 px-7 shrink-0 @max-[900px]/mail:px-5.5 @max-[680px]/mail:px-5">
+    <div
+      ref={row}
+      className="tab-row relative flex items-center gap-1.5 pb-3 px-7 shrink-0 @max-[900px]/mail:px-5.5 @max-[680px]/mail:px-5"
+    >
       <div
         role="tablist"
         aria-label="Inbox tabs"
@@ -185,9 +243,56 @@ export function TabRow({
           )
         })}
       </div>
-      <IconButton label="New tab" onClick={onAdd}>
+      <IconButton
+        label="New tab"
+        onClick={onAdd}
+        onKeyDown={(event) => {
+          // Enter and Space press the button rather than open the selected conversation.
+          if (event.key === 'Enter' || event.key === ' ') event.stopPropagation()
+        }}
+      >
         <Plus size={14} />
       </IconButton>
+      {menu && menuBox && (
+        <Dropdown
+          open={menu.open}
+          onOpenChange={(open) => {
+            if (!open) onMenuClose()
+          }}
+          trigger={
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-hidden
+              className="tab-menu-anchor absolute p-0 border-0 opacity-0 pointer-events-none"
+              style={menuBox}
+              // The menu hands focus back here when it closes; pass it on to the tab.
+              onFocus={() => menu.anchor.isConnected && menu.anchor.focus()}
+            />
+          }
+        >
+          <MenuItem onClick={() => act('rules')}>
+            <PencilEdit size={14} />
+            Edit rules…
+          </MenuItem>
+          <MenuItem onClick={() => act('rename')}>
+            <PenLine size={14} />
+            Rename…
+          </MenuItem>
+          <MenuItem onClick={() => act('left')} disabled={moves.left === undefined}>
+            <ChevronLeft size={14} />
+            Move left
+          </MenuItem>
+          <MenuItem onClick={() => act('right')} disabled={moves.right === undefined}>
+            <ChevronRight size={14} />
+            Move right
+          </MenuItem>
+          <MenuItem onClick={() => act('delete')} danger>
+            <Trash2 size={14} />
+            Delete tab
+          </MenuItem>
+        </Dropdown>
+      )}
     </div>
   )
 }

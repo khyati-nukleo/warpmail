@@ -5,12 +5,16 @@ import {
   activeTabId,
   adjacentTab,
   dropIndex,
+  editorState,
+  matchCountText,
   moveTab,
+  putTab,
   rovingTarget,
   serialQueue,
   tabEmptyCopy,
   tabEntries,
   tabForShortcut,
+  tabMoves,
   untabbedAccounts,
   whenIdle,
 } from '../apps/desktop/src/renderer/src/split/tab-model'
@@ -169,5 +173,106 @@ describe('split tab model', () => {
     expect(idle).toBe(true)
     // Resolves at once (after a tick) when nothing is loading.
     await whenIdle(client, ['mail'])
+  })
+
+  describe('tab editor', () => {
+    const own = ['me@work.example', 'me.personal@gmail.com']
+    const tabs = [
+      { id: 'a', name: 'Client', rules: ['@client.example'] },
+      { id: 'b', name: 'GitHub', rules: ['notifications@github.com'] },
+    ]
+
+    it('accepts a new tab and normalises its rules', () => {
+      const state = editorState(
+        '  Partners ',
+        '  Someone@Gmail.COM \n\npartner.example.\n<x@other.example>\nsomeone@gmail.com',
+        own,
+        tabs,
+      )
+      expect(state).toEqual({
+        rules: ['someone@gmail.com', '@partner.example', 'x@other.example'],
+        problems: [],
+        nameError: undefined,
+        canSave: true,
+      })
+    })
+
+    it('allows a tab with no rules yet', () => {
+      expect(editorState('Later', '  \n', own, tabs).canSave).toBe(true)
+    })
+
+    it('requires a name of 60 characters or fewer', () => {
+      expect(editorState('   ', '', own, tabs)).toMatchObject({
+        nameError: 'Name the tab.',
+        canSave: false,
+      })
+      expect(editorState('x'.repeat(60), '', own, tabs).canSave).toBe(true)
+      expect(editorState('x'.repeat(61), '', own, tabs)).toMatchObject({
+        nameError: 'Keep the name to 60 characters or fewer.',
+        canSave: false,
+      })
+    })
+
+    it('refuses a name another tab has, ignoring case', () => {
+      expect(editorState('client ', '', own, tabs)).toMatchObject({
+        nameError: 'You already have a tab called “Client”.',
+        canSave: false,
+      })
+      // Keeping a tab's own name, or changing only its case, is fine.
+      expect(editorState('Client', '', own, tabs, 'a').canSave).toBe(true)
+      expect(editorState('CLIENT', '', own, tabs, 'a').canSave).toBe(true)
+      expect(editorState('github', '', own, tabs, 'a').canSave).toBe(false)
+    })
+
+    it('refuses the built-in tab names', () => {
+      expect(editorState('Inbox', '', own, tabs)).toMatchObject({
+        nameError: 'Inbox is a built-in tab. Choose another name.',
+        canSave: false,
+      })
+      expect(editorState(' important', '', own, tabs)).toMatchObject({
+        nameError: 'Important is a built-in tab. Choose another name.',
+        canSave: false,
+      })
+    })
+
+    it('reports refused and unreadable rules and can’t save while any remain', () => {
+      const state = editorState('Client', 'a@client.example\n@work.example\nhello', own, tabs, 'a')
+      expect(state.rules).toEqual(['a@client.example'])
+      expect(state.problems).toEqual([
+        {
+          line: 2,
+          text: '@work.example',
+          reason:
+            '@work.example is on your own domain, so every conversation would match. Tabs are decided by the people you write with.',
+        },
+        { line: 3, text: 'hello', reason: 'hello is not an address or a domain.' },
+      ])
+      expect(state.nameError).toBeUndefined()
+      expect(state.canSave).toBe(false)
+    })
+
+    it('adds a new tab at the end and replaces an edited one in place', () => {
+      const added = putTab(tabs, { id: 'c', name: 'New', rules: [] })
+      expect(added.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+      const edited = putTab(tabs, { id: 'a', name: 'Renamed', rules: ['x@y.example'] })
+      expect(edited).toEqual([{ id: 'a', name: 'Renamed', rules: ['x@y.example'] }, tabs[1]])
+      expect(tabs[0].name).toBe('Client')
+    })
+
+    it('says where a tab can move', () => {
+      const three = [...tabs, { id: 'c', name: 'C', rules: [] }]
+      expect(tabMoves(three, 'a')).toEqual({ left: undefined, right: 1 })
+      expect(tabMoves(three, 'b')).toEqual({ left: 0, right: 2 })
+      expect(tabMoves(three, 'c')).toEqual({ left: 1, right: undefined })
+      expect(tabMoves(three, 'gone')).toEqual({ left: undefined, right: undefined })
+    })
+
+    it('words the match count', () => {
+      expect(matchCountText(0)).toBe('Matches no conversations in your inbox')
+      expect(matchCountText(1)).toBe('Matches 1 conversation in your inbox')
+      expect(matchCountText(1234)).toBe(
+        'Matches ' + (1234).toLocaleString() + ' conversations in your inbox',
+      )
+    })
   })
 })

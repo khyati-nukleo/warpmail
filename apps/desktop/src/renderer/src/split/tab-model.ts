@@ -1,5 +1,5 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query'
-import type { Account, Settings, SplitTab } from '@inlark/core'
+import { parseRuleLines, type Account, type Settings, type SplitTab } from '@inlark/core'
 
 export interface TabEntry {
   id: string
@@ -37,6 +37,72 @@ export function moveTab(tabs: SplitTab[], id: string, toIndex: number): SplitTab
   const next = tabs.filter((tab) => tab.id !== id)
   next.splice(Math.max(0, Math.min(toIndex, next.length)), 0, tabs[from])
   return next
+}
+
+/** The indexes `moveTab` takes to move a user tab one place left or right, where it can go. */
+export function tabMoves(tabs: { id: string }[], id: string): { left?: number; right?: number } {
+  const index = tabs.findIndex((tab) => tab.id === id)
+  if (index < 0) return { left: undefined, right: undefined }
+  return {
+    left: index > 0 ? index - 1 : undefined,
+    right: index < tabs.length - 1 ? index + 1 : undefined,
+  }
+}
+
+/** What a user tab's menu and its commands do. */
+export type TabAction = 'rules' | 'rename' | 'left' | 'right' | 'delete'
+
+/** Replaces the tab with the same id, or adds it at the end, without changing the input. */
+export function putTab(tabs: SplitTab[], tab: SplitTab): SplitTab[] {
+  return tabs.some((t) => t.id === tab.id)
+    ? tabs.map((t) => (t.id === tab.id ? tab : t))
+    : [...tabs, tab]
+}
+
+export const tabNameMax = 60
+
+export type RuleProblem = ReturnType<typeof parseRuleLines>['problems'][number]
+
+export interface EditorState {
+  /** The rules to save, normalised and without duplicates. */
+  rules: string[]
+  problems: RuleProblem[]
+  nameError?: string
+  canSave: boolean
+}
+
+/** What the tab editor shows and whether it can save, for a tab being made or `editingId`. */
+export function editorState(
+  name: string,
+  rulesText: string,
+  own: string[],
+  existing: SplitTab[],
+  editingId?: string,
+): EditorState {
+  const { rules, problems } = parseRuleLines(rulesText, own)
+  const nameError = tabNameError(name, existing, editingId)
+  return { rules, problems, nameError, canSave: !nameError && !problems.length }
+}
+
+function tabNameError(name: string, existing: SplitTab[], editingId?: string) {
+  const trimmed = name.trim()
+  if (!trimmed) return 'Name the tab.'
+  if (trimmed.length > tabNameMax) return 'Keep the name to 60 characters or fewer.'
+  const key = trimmed.toLowerCase()
+  const builtIn = ['Inbox', 'Important'].find((n) => n.toLowerCase() === key)
+  if (builtIn) return builtIn + ' is a built-in tab. Choose another name.'
+  const twin = existing.find((t) => t.id !== editingId && t.name.trim().toLowerCase() === key)
+  if (twin) return 'You already have a tab called “' + twin.name + '”.'
+}
+
+export function matchCountText(n: number) {
+  if (!n) return 'Matches no conversations in your inbox'
+  return (
+    'Matches ' +
+    n.toLocaleString() +
+    (n === 1 ? ' conversation' : ' conversations') +
+    ' in your inbox'
+  )
 }
 
 /** Where focus goes in the tab row for a key, or nothing for keys the row doesn't handle. */

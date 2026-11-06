@@ -1,4 +1,4 @@
-import type { Settings } from './model'
+import type { Account, Settings } from './model'
 
 export type SplitRule = { kind: 'address'; value: string } | { kind: 'domain'; value: string }
 
@@ -48,6 +48,17 @@ const FREE_MAIL = new Set([
   'videotron.ca',
   'sympatico.ca',
 ])
+
+/** Every address the user receives mail as, so rules never match their own mail. */
+export function ownAddresses(accounts: Account[]): string[] {
+  return [
+    ...new Set(
+      accounts
+        .flatMap((a) => [a.email, ...(a.aliases ?? []).map((x) => x.email)])
+        .map((e) => e.trim().toLowerCase()),
+    ),
+  ]
+}
 
 export function isFreeMailDomain(domain: string): boolean {
   return FREE_MAIL.has(domain.toLowerCase())

@@ -1,21 +1,11 @@
 import {
+  ownAddresses,
   resolveSplitScope,
   tabApplies,
   type Account,
   type Settings,
   type SplitScope,
 } from '@inlark/core'
-
-/** Every address the user receives mail as, so rules never match their own mail. */
-export function ownAddresses(accounts: Account[]): string[] {
-  return [
-    ...new Set(
-      accounts
-        .flatMap((a) => [a.email, ...(a.aliases ?? []).map((x) => x.email)])
-        .map((e) => e.trim().toLowerCase()),
-    ),
-  ]
-}
 
 export function resolveTab(
   settings: Settings,

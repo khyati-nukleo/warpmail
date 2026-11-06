@@ -1,7 +1,21 @@
 import { useQuery } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
-import { Inbox, UserRound } from '@inlark/ui/icons'
-import type { Account, Bootstrap, Settings, SplitTab } from '@inlark/core'
+import { useMemo, useRef, useState } from 'react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Inbox,
+  PencilEdit,
+  PenLine,
+  Trash2,
+  UserRound,
+} from '@inlark/ui/icons'
+import {
+  ownAddresses,
+  type Account,
+  type Bootstrap,
+  type Settings,
+  type SplitTab,
+} from '@inlark/core'
 import { api } from '../api'
 import { queryClient } from '../cache'
 import type { Command } from '../CommandPalette'
@@ -16,14 +30,19 @@ import {
   activeTabId,
   adjacentTab,
   moveTab,
+  putTab,
   serialQueue,
   tabElementId,
   tabEntries,
   tabForShortcut,
+  tabMoves,
   tabPanelId,
   untabbedAccounts,
   whenIdle,
+  type TabAction,
 } from './tab-model'
+import type { TabDialogState } from './TabEditor'
+import type { TabMenuState } from './TabRow'
 
 /** The tab row's state, shortcuts and commands, kept out of App.tsx. */
 export function useSplitInbox({
@@ -102,9 +121,51 @@ export function useSplitInbox({
       if (!saved) showTabs(savedOrder.current)
     })
   }
-  // The tab menu and the new-tab box come with the tab editor.
-  const openMenu = (_id: string, _anchor: HTMLElement) => {}
-  const add = () => {}
+
+  const userTabs = settings.splitTabs ?? []
+  // The cache, not this render's settings, so an edit builds on a reorder still saving.
+  const latestTabs = () =>
+    queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings.splitTabs ?? userTabs
+  const own = useMemo(() => ownAddresses(accounts), [accounts])
+
+  const [menu, setMenu] = useState<TabMenuState>()
+  const openMenu = (id: string, anchor: HTMLElement) => {
+    if (userTabs.some((tab) => tab.id === id)) setMenu({ id, anchor, open: true })
+  }
+  const closeMenu = () => setMenu((shown) => shown && { ...shown, open: false })
+
+  const [dialog, setDialog] = useState<TabDialogState>()
+  const dialogs = useRef(0)
+  const editTab = (tab: SplitTab | undefined, focus: 'name' | 'rules') =>
+    setDialog({ kind: 'edit', tab, focus, open: true, seq: ++dialogs.current })
+  const closeDialog = () => setDialog((shown) => shown && { ...shown, open: false })
+  const add = () => editTab(undefined, 'name')
+
+  const act = (id: string, action: TabAction) => {
+    const tab = latestTabs().find((t) => t.id === id)
+    if (!tab) return
+    if (action === 'rules' || action === 'rename')
+      editTab(tab, action === 'rules' ? 'rules' : 'name')
+    else if (action === 'delete')
+      setDialog({ kind: 'delete', tab, open: true, seq: ++dialogs.current })
+    else {
+      const to = tabMoves(latestTabs(), id)[action]
+      if (to !== undefined) reorder(id, to)
+    }
+  }
+  /** Saves a new or edited tab; a new one opens once saved. A failed save keeps the box open. */
+  const saveTab = async (tab: SplitTab) => {
+    const tabs = latestTabs()
+    const added = !tabs.some((t) => t.id === tab.id)
+    if (!(await saveTabs(putTab(tabs, tab)))) return
+    closeDialog()
+    if (added) select(tab.id)
+  }
+  const deleteTab = async (tab: SplitTab) => {
+    if (!(await saveTabs(latestTabs().filter((t) => t.id !== tab.id)))) return
+    closeDialog()
+    if (tab.id === active) select('inbox')
+  }
 
   const shortcutHandlers: Partial<Record<ShortcutId, ShortcutHandler>> = {
     // Undefined keeps the caller's `enabled`, so dialogs and the composer still block these.
@@ -139,6 +200,27 @@ export function useSplitInbox({
     run: () => select(entry.id),
   }))
 
+  // The active user tab's menu, in Ctrl+K.
+  const activeTab = visible ? userTabs.find((tab) => tab.id === active) : undefined
+  if (activeTab) {
+    const moves = tabMoves(userTabs, activeTab.id)
+    const command = (action: TabAction, label: string, icon: Command['icon']): Command => ({
+      id: 'tab-action-' + action,
+      group: 'Tabs',
+      label,
+      icon,
+      keywords: 'split inbox ' + activeTab.name,
+      run: () => act(activeTab.id, action),
+    })
+    commands.push(
+      command('rules', 'Edit tab rules', PencilEdit),
+      command('rename', 'Rename tab', PenLine),
+      ...(moves.left !== undefined ? [command('left', 'Move tab left', ChevronLeft)] : []),
+      ...(moves.right !== undefined ? [command('right', 'Move tab right', ChevronRight)] : []),
+      command('delete', 'Delete tab', Trash2),
+    )
+  }
+
   const empty =
     visible && active !== 'inbox'
       ? {
@@ -154,6 +236,17 @@ export function useSplitInbox({
     visible,
     select,
     saveTabs,
+    /** A tab dialog is open, so the app's shortcuts wait. */
+    dialogOpen: !!dialog?.open,
+    /** Props for `TabDialogs`. */
+    dialogs: {
+      dialog,
+      tabs: userTabs,
+      own,
+      onClose: closeDialog,
+      onSave: saveTab,
+      onDelete: deleteTab,
+    },
     shortcutHandlers,
     commands,
     /** The `tab` route and query parameter for the list on screen, if any. */
@@ -171,6 +264,9 @@ export function useSplitInbox({
       onReorder: reorder,
       onMenu: openMenu,
       onAdd: add,
+      menu,
+      onMenuClose: closeMenu,
+      onMenuAction: act,
     },
   }
 }
