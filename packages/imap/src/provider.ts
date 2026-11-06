@@ -50,6 +50,7 @@ import type {
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
 import { submitSmtp, verifySmtp, type SmtpSettings } from './smtp'
+import { SourceCache } from './source-cache'
 
 export interface ImapProviderOptions {
   connectionId: string
@@ -88,6 +89,22 @@ interface Timing {
   previews: number
   /** Grace period for a server that files its own Sent copy after submission. */
   sentCopyGraceMs: number
+  /** Inbox and Sent mail this recent is downloaded ahead of time and kept on disk. */
+  prefetchDays: number
+  /**
+   * Largest message read ahead: one such message alone fits a short background task. Larger
+   * ones load on open, and are kept from there up to `storedMaxSize`.
+   */
+  prefetchMaxSize: number
+  /** Largest message kept on disk; beyond it only the readable parts load, on open. */
+  storedMaxSize: number
+  /** Messages and bytes per background download, so the user's own commands wait little. */
+  prefetchBatch: number
+  prefetchBatchBytes: number
+  /** Stored sources per account on disk; the oldest mail goes first. */
+  storedBytes: number
+  /** Reading ahead holds back this long after the user opens mail. */
+  prefetchQuietMs: number
 }
 const defaultTiming: Timing = {
   reconcileMs: 120_000,
@@ -96,6 +113,14 @@ const defaultTiming: Timing = {
   historicalBatch: 500,
   previews: 30,
   sentCopyGraceMs: 1500,
+  prefetchDays: 30,
+  // About 340 ms per background task on a slow link: a user command waits for one at most.
+  prefetchMaxSize: 768 * 1024,
+  storedMaxSize: 2 * 1024 * 1024,
+  prefetchBatch: 10,
+  prefetchBatchBytes: 192 * 1024,
+  storedBytes: 300 * 1024 * 1024,
+  prefetchQuietMs: 2000,
 }
 type Task = {
   run: (port: ImapPort) => Promise<unknown>
@@ -113,6 +138,34 @@ const byMailbox = <T extends { mailboxId: string }>(items: T[]) => {
   return groups
 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * How well a location represents an email that exists in several folders (Gmail labels): the
+ * folder being viewed, then Inbox, then ordinary folders, then virtual ones like All Mail.
+ */
+function locationRank(boxes: IndexedMailbox[], preferred?: string) {
+  const byId = new Map(boxes.map((b) => [b.id, b]))
+  return (mailboxId: string) => {
+    const box = byId.get(mailboxId)
+    if (!box) return 4
+    if (mailboxId === preferred) return 0
+    if (isInbox(box.path)) return 1
+    return ['\\All', '\\Flagged', '\\Important'].includes(box.specialUse || '') ? 3 : 2
+  }
+}
+/** One entry per email: the best-ranked location of each server identity, in input order. */
+function onePerEmail<T extends { mailboxId: string; emailId?: string }>(
+  rows: T[],
+  rank: (mailboxId: string) => number,
+): T[] {
+  const best = new Map<string, T>()
+  for (const row of rows) {
+    const current = row.emailId && best.get(row.emailId)
+    if (row.emailId && (!current || rank(row.mailboxId) < rank(current.mailboxId)))
+      best.set(row.emailId, row)
+  }
+  return rows.filter((row) => !row.emailId || best.get(row.emailId) === row)
+}
+export { SourceCache }
 
 export class ImapProvider implements MailProvider {
   readonly capabilities: ProviderCapabilities = {
@@ -146,6 +199,11 @@ export class ImapProvider implements MailProvider {
   private searches = new Map<string, { ids: string[]; incomplete: boolean; at: number }>()
   private cursors = new Map<string, ConversationCursor>()
   private bodies = new Map<string, { html: string; text: string }>()
+  private sources = new SourceCache()
+  /** Messages that could not be downloaded ahead this session; they load on open instead. */
+  private prefetchSkipped = new Set<string>()
+  /** When the user last opened mail; background downloads hold back briefly after it. */
+  private lastOpened = 0
   private state: 'connected' | 'offline' | 'authentication' = 'connected'
   private lastFailure?: { at: number; error: unknown }
   private limits: AccountLimits = {}
@@ -449,6 +507,8 @@ export class ImapProvider implements MailProvider {
         await this.syncPass(scope)
         failures = 0
         this.setState('connected')
+        // Recent mail first, so opening it needs no round trip; then older metadata.
+        await this.prefetchBodies()
         let more = true
         while (!this.disposed && more && this.pending === 'none')
           more = await this.historicalBatch()
@@ -530,6 +590,7 @@ export class ImapProvider implements MailProvider {
     if (box.uidValidity && status.uidValidity && status.uidValidity !== box.uidValidity) {
       // Every stored UID in this folder is meaningless now.
       await this.index.resetMailbox(this.accountId, box.id, status.uidValidity)
+      this.sources.forget(box.id)
       this.uidLists.delete(box.id)
       box = {
         ...box,
@@ -616,6 +677,7 @@ export class ImapProvider implements MailProvider {
       )
       if (gone.length) {
         await this.index.removeUids(this.accountId, box.id, gone)
+        this.sources.forget(box.id, gone)
         changed = true
       }
       this.lastFull.set(box.id, Date.now())
@@ -703,6 +765,92 @@ export class ImapProvider implements MailProvider {
     this.emit({ type: 'changed', accountId: this.accountId, historical: true })
   }
 
+  /**
+   * Downloads recent Inbox and Sent mail ahead of time and stores it on disk, so opening it
+   * needs no round trip. Each background task fetches a few messages of one folder in a single
+   * UID FETCH with BODY.PEEK[], so nothing is marked read and the user's own commands wait for
+   * one short batch at most. Stops as soon as a sync is requested; the next pass resumes.
+   */
+  private async prefetchBodies() {
+    const boxes = await this.index.listMailboxes(this.accountId)
+    const sent = this.review(boxes).mappings.sent?.path
+    const targets = boxes.filter(
+      (b) => !b.noSelect && b.uidValidity && (isInbox(b.path) || b.path === sent),
+    )
+    const candidates = (mailboxIds: string[], limit: number) =>
+      this.index.sourceCandidates(this.accountId, {
+        mailboxIds,
+        after: new Date(Date.now() - this.timing.prefetchDays * 86_400_000).toISOString(),
+        maxSize: this.timing.prefetchMaxSize,
+        limit,
+        limitBytes: this.timing.storedBytes,
+        exclude: [...this.prefetchSkipped],
+      })
+    if (!targets.length) return
+    // One folder at a time, the one with most to download first: every batch after the first
+    // finds its folder already selected, and so does the user's next command there.
+    const counts = new Map<string, number>()
+    for (const row of await candidates(
+      targets.map((b) => b.id),
+      200,
+    ))
+      counts.set(row.mailboxId, (counts.get(row.mailboxId) || 0) + 1)
+    const order = targets
+      .filter((b) => counts.has(b.id))
+      .sort((a, b) => counts.get(b.id)! - counts.get(a.id)!)
+    for (const box of order)
+      while (!this.disposed && this.pending === 'none') {
+        // Hold back while the user is opening mail, so the next open finds the connection
+        // free. A requested sync ends the wait at once.
+        const quiet = this.lastOpened + this.timing.prefetchQuietMs - Date.now()
+        if (quiet > 0) {
+          await this.wait(quiet)
+          continue
+        }
+        const rows = await candidates([box.id], this.timing.prefetchBatch * 3)
+        if (!rows.length) break
+        const batch: IndexedMessage[] = []
+        const emails = new Set<string>()
+        let bytes = 0
+        for (const row of rows) {
+          if (emails.has(row.emailId || row.id)) continue
+          if (batch.length >= this.timing.prefetchBatch) break
+          if (batch.length && bytes + row.size > this.timing.prefetchBatchBytes) break
+          emails.add(row.emailId || row.id)
+          batch.push(row)
+          bytes += row.size
+        }
+        let fetched = new Map<number, Uint8Array>()
+        try {
+          fetched = await this.run(async (port) => {
+            const selected = await port.select(box.path)
+            const valid = batch.filter((row) => row.uidValidity === selected.uidValidity)
+            return valid.length
+              ? port.sources(
+                  valid.map((row) => row.uid),
+                  this.timing.prefetchMaxSize,
+                )
+              : new Map<number, Uint8Array>()
+          }, true)
+        } catch (error) {
+          if (isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline'))
+            throw error
+          // The server refused this batch: those messages load on open as before.
+        }
+        const written = await this.index.storeSources(
+          this.accountId,
+          batch
+            .filter((row) => fetched.has(row.uid))
+            .map((row) => ({ message: row, raw: fetched.get(row.uid)! })),
+          this.timing.storedBytes,
+        )
+        // Not downloaded, or downloaded but declined (larger than its RFC822.SIZE said, with
+        // no room left): it loads on open instead of being downloaded again and again.
+        const kept = new Set(written.filter((w) => w.mailboxId === box.id).map((w) => w.uid))
+        for (const row of batch) if (!kept.has(row.uid)) this.prefetchSkipped.add(row.id)
+      }
+  }
+
   // Reading
 
   private async scope(query: MailQuery, boxes: IndexedMailbox[]) {
@@ -752,13 +900,23 @@ export class ImapProvider implements MailProvider {
       this.accountId,
       page.items.map((i) => i.threadId),
     )
+    // Gmail shows one email at several locations; the summary lists each email once. Actions
+    // never use these: they resolve every location from the index (`conversationMetadata`).
+    const rank = locationRank(boxes, scope.boxes.length === 1 ? scope.boxes[0]!.id : undefined)
     const items = page.items.map((row) => {
-      const messages = threads.filter((m) => m.threadId === row.threadId)
+      const located = threads.filter((m) => m.threadId === row.threadId)
+      const all = (located.length ? located : [row.latest]).map((m) => toMessage(account.id, m))
       const c = conversationFromMessages(
         account.id,
         row.threadId,
-        (messages.length ? messages : [row.latest]).map((m) => toMessage(account.id, m)),
+        onePerEmail(located.length ? located : [row.latest], rank).map((m) =>
+          toMessage(account.id, m),
+        ),
       )
+      // State still reflects every location, as the filters that matched this row do.
+      c.unread = all.some((m) => !m.keywords.$seen)
+      c.starred = all.some((m) => m.keywords.$flagged)
+      c.hasAttachment = all.some((m) => m.hasAttachment)
       // Display the matching representative, even if the thread has newer mail elsewhere.
       c.receivedAt = row.latest.receivedAt
       c.subject = row.latest.subject || '(No subject)'
@@ -856,6 +1014,7 @@ export class ImapProvider implements MailProvider {
             this.accountId,
             stale.map((m) => m.id),
           )
+        this.sources.delete([...gone, ...stale].map((m) => m.id))
       })
     }
     return this.index.messages(
@@ -872,11 +1031,15 @@ export class ImapProvider implements MailProvider {
     if (!bodies) return rows.map((m) => toMessage(account.id, m))
     return this.withBodies(account, rows)
   }
-  async conversation(account: Account, threadId: string): Promise<Message[]> {
+  async conversation(
+    account: Account,
+    threadId: string,
+    options?: { background?: boolean },
+  ): Promise<Message[]> {
     const rows = await this.index.threadMessages(this.accountId, [threadId])
     if (!rows.length)
       throw new ProviderError('notFound', 'This conversation is no longer available.')
-    const messages = await this.withBodies(account, rows, true)
+    const messages = await this.withBodies(account, rows, true, options?.background)
     if (!messages.length)
       throw new ProviderError('notFound', 'This conversation is no longer available.')
     return messages.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
@@ -885,59 +1048,137 @@ export class ImapProvider implements MailProvider {
     account: Account,
     rows: IndexedMessage[],
     deduplicate = false,
+    background = false,
   ): Promise<Message[]> {
     const boxes = await this.index.listMailboxes(this.accountId)
+    const rank = locationRank(boxes)
     const result: Message[] = []
     const displayed = new Set<string>()
-    for (const [mailboxId, items] of byMailbox(rows)) {
-      const box = boxes.find((b) => b.id === mailboxId)
-      if (!box) continue
+    // Gmail labels expose the same email at several UIDs. Keep every location for mutations,
+    // but read its body once. A missing/stale location allows another to load.
+    const shown = (row: IndexedMessage) =>
+      deduplicate && !!row.emailId && displayed.has(row.emailId)
+    const tried = new Set<string>()
+    if (!background) this.lastOpened = Date.now()
+    // Memory, then disk: recent mail opens without a round trip. Best locations first.
+    for (const row of [...rows].sort((a, b) => rank(a.mailboxId) - rank(b.mailboxId))) {
+      if (shown(row) || !boxes.some((b) => b.id === row.mailboxId)) continue
+      const body = await this.localBody(row)
+      if (!body) continue
+      tried.add(row.id)
+      result.push(await this.withBody(account, row, body))
+      if (row.emailId) displayed.add(row.emailId)
+    }
+    for (;;) {
+      const left = rows.filter(
+        (row) => !tried.has(row.id) && !shown(row) && boxes.some((b) => b.id === row.mailboxId),
+      )
+      if (!left.length) break
+      const box = this.fullestBox(left, boxes, rank, deduplicate)
+      let items = left.filter((row) => row.mailboxId === box.id)
+      // Background read-ahead takes one message per task, so the user's own open waits for at
+      // most one download, never a whole folder's.
+      if (background) items = items.slice(0, 1)
+      for (const row of items) tried.add(row.id)
       await this.run(async (port) => {
         const selected = await port.select(box.path)
         for (const row of items) {
-          if (row.uidValidity !== selected.uidValidity) continue
-          // Gmail labels expose the same email at several UIDs. Keep every location for
-          // mutations, but read its body once. A missing/stale location allows another to load.
-          if (deduplicate && row.emailId && displayed.has(row.emailId)) continue
+          if (row.uidValidity !== selected.uidValidity || shown(row)) continue
           const body = await this.body(port, row)
           if (!body) {
             await this.index.removeMessages(this.accountId, [row.id])
+            this.sources.delete([row.id])
             continue
           }
-          const preview = row.preview || previewText(body.text || body.html, !body.text)
-          if (preview && !row.preview) await this.index.setPreview(this.accountId, row.id, preview)
-          result.push({
-            ...toMessage(account.id, { ...row, preview }),
-            html: body.html,
-            text: body.text,
-            attachments: attachmentsOf(row),
-          })
+          result.push(await this.withBody(account, row, body))
           if (row.emailId) displayed.add(row.emailId)
         }
-      })
+      }, background)
     }
     return result
+  }
+  /**
+   * The folder holding the most emails still to load, so a conversation spread over Inbox and
+   * Sent loads from All Mail in one SELECT. Ties go to the best-ranked location.
+   */
+  private fullestBox(
+    rows: IndexedMessage[],
+    boxes: IndexedMailbox[],
+    rank: (mailboxId: string) => number,
+    deduplicate: boolean,
+  ): IndexedMailbox {
+    const emails = new Map<string, Set<string>>()
+    for (const row of rows) {
+      const set = emails.get(row.mailboxId) || new Set<string>()
+      set.add((deduplicate && row.emailId) || row.id)
+      emails.set(row.mailboxId, set)
+    }
+    const [best] = [...emails].sort(([a, x], [b, y]) => y.size - x.size || rank(a) - rank(b))
+    return boxes.find((b) => b.id === best![0])!
+  }
+  private async withBody(
+    account: Account,
+    row: IndexedMessage,
+    body: { html: string; text: string },
+  ): Promise<Message> {
+    const preview = row.preview || previewText(body.text || body.html, !body.text)
+    if (preview && !row.preview) await this.index.setPreview(this.accountId, row.id, preview)
+    return {
+      ...toMessage(account.id, { ...row, preview }),
+      html: body.html,
+      text: body.text,
+      attachments: attachmentsOf(row),
+    }
+  }
+  /** A body already downloaded, from memory or from the sources stored on disk. */
+  private async localBody(row: IndexedMessage) {
+    const cached = this.bodies.get(row.id)
+    if (cached) return cached
+    if (row.size > bodyLimit) return undefined
+    const source = this.sources.get(row) || (await this.storedSource(row))
+    return source && this.parsedBody(row, source)
+  }
+  private async storedSource(row: IndexedMessage) {
+    if (row.size > this.timing.storedMaxSize) return undefined
+    const source = await this.index.storedSource(this.accountId, row)
+    if (source) this.sources.set(row, source)
+    return source
+  }
+  /** Keeps a source read on open for next time, under the same size rule as reading ahead. */
+  private keep(row: IndexedMessage, raw: Uint8Array) {
+    // The index writes nothing it would evict at once (older than all it holds, when full).
+    if (raw.length > this.timing.storedMaxSize) return
+    void this.index
+      .storeSources(this.accountId, [{ message: row, raw }], this.timing.storedBytes)
+      .catch(() => {})
+  }
+  private async parsedBody(row: IndexedMessage, source: Uint8Array) {
+    const parsed = await parseMime(source, { maxBytes: bodyLimit })
+    const body = { html: parsed.html, text: parsed.text }
+    this.bodies.set(row.id, body)
+    if (this.bodies.size > 40) this.bodies.delete(this.bodies.keys().next().value!)
+    return body
   }
   private async body(port: ImapPort, row: IndexedMessage) {
     const cached = this.bodies.get(row.id)
     if (cached) return cached
-    let body: { html: string; text: string } | undefined
     if (row.size <= bodyLimit) {
-      const source = await port.source(row.uid, bodyLimit)
-      if (!source) return undefined
-      const parsed = await parseMime(source, { maxBytes: bodyLimit })
-      body = { html: parsed.html, text: parsed.text }
-    } else {
-      // Large messages: fetch only the readable parts, never the attachments.
-      const { html, text } = textParts(row.bodyStructure)
-      const read = async (part?: typeof html) =>
-        part
-          ? new TextDecoder().decode(
-              await port.download(row.uid, partSection(part), partLimit, true),
-            )
-          : ''
-      body = { html: await read(html), text: await read(text) }
+      let source = this.sources.get(row)
+      if (!source) {
+        source = await port.source(row.uid, bodyLimit)
+        if (!source) return undefined
+        this.sources.set(row, source)
+        this.keep(row, source)
+      }
+      return this.parsedBody(row, source)
     }
+    // Large messages: fetch only the readable parts, never the attachments.
+    const { html, text } = textParts(row.bodyStructure)
+    const read = async (part?: typeof html) =>
+      part
+        ? new TextDecoder().decode(await port.download(row.uid, partSection(part), partLimit, true))
+        : ''
+    const body = { html: await read(html), text: await read(text) }
     this.bodies.set(row.id, body)
     if (this.bodies.size > 40) this.bodies.delete(this.bodies.keys().next().value!)
     return body
@@ -1046,7 +1287,16 @@ export class ImapProvider implements MailProvider {
           })
         for (const [key, operation] of operations) {
           const [add, flag] = JSON.parse(key) as [boolean, string]
-          await port.store(operation.uids, add ? 'add' : 'remove', [flag], operation.modseq)
+          try {
+            await port.store(operation.uids, add ? 'add' : 'remove', [flag], operation.modseq)
+          } catch (error) {
+            if (
+              isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline')
+            )
+              throw error
+            // A refused STORE: the flags read back below tell what did and did not change, so
+            // other folders still change and every change made gets its undo entry.
+          }
         }
         const after = valid.length
           ? await port.fetch(uidSet(valid.map((m) => m.uid)), { flags: true })
@@ -1145,6 +1395,7 @@ export class ImapProvider implements MailProvider {
             this.accountId,
             valid.map((m) => m.id),
           )
+          this.sources.delete(valid.map((m) => m.id))
           updated.push(...valid.map((m) => m.id))
         } else failures.push(...valid.map((m) => m.id + ': the server refused the deletion'))
       })
@@ -1186,20 +1437,35 @@ export class ImapProvider implements MailProvider {
     }
     // The next sync indexes them again under new IDs.
     if (lost.length) await this.index.removeMessages(this.accountId, lost)
+    this.sources.delete(lost)
   }
 
-  async rawMessage(_account: Account, messageId: string, maxBytes: number): Promise<Uint8Array> {
+  async rawMessage(
+    _account: Account,
+    messageId: string,
+    maxBytes: number,
+    options?: { background?: boolean },
+  ): Promise<Uint8Array> {
     const rows = await this.index.messages(this.accountId, [messageId])
     const boxes = await this.index.listMailboxes(this.accountId)
     for (const row of rows) {
       const box = boxes.find((b) => b.id === row.mailboxId)
       if (!box || row.size > maxBytes) continue
+      if (!options?.background) this.lastOpened = Date.now()
+      // Already downloaded or stored: answer without waiting for the command connection.
+      const cached = this.sources.get(row) || (await this.storedSource(row))
+      if (cached && cached.length <= maxBytes) return cached
       const raw = await this.run(async (port) => {
         const selected = await port.select(box.path)
         if (selected.uidValidity !== row.uidValidity) return
         return port.source(row.uid, Math.min(maxBytes, 64 * 1024 * 1024))
-      })
-      if (raw) return raw
+      }, !!options?.background)
+      if (raw) {
+        // Messages over the body limit are read in parts, so this is their only full download.
+        this.sources.set(row, raw)
+        this.keep(row, raw)
+        return raw
+      }
     }
     throw new ProviderError(
       'rawMessage',

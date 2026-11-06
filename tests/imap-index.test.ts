@@ -460,7 +460,8 @@ describe('SQLite metadata index', () => {
     // Recreate the prior schema from the same stored locations.
     const db = new DatabaseSync(path)
     db.exec(
-      'DROP INDEX messages_email_id; ALTER TABLE messages DROP COLUMN email_id; PRAGMA user_version = 1',
+      `DROP TABLE sources; DROP INDEX messages_mailbox_received; DROP INDEX messages_email_id;
+        ALTER TABLE messages DROP COLUMN email_id; PRAGMA user_version = 1`,
     )
     db.close()
     index = openInProcessIndex(path)
@@ -499,6 +500,236 @@ describe('SQLite metadata index', () => {
       expect(page.items[0].count).toBe(1)
       expect(await index.threadMessages(accountId, [page.items[0].threadId])).toHaveLength(1)
     }
+  })
+
+  describe('stored original sources', () => {
+    const bytes = (text: string) => new TextEncoder().encode(text)
+    const text = (raw?: Uint8Array) => raw && new TextDecoder().decode(raw)
+    const stored = (m: NewMessage, raw: string) => ({ message: m, raw: bytes(raw) })
+
+    it('stores one source per Gmail email, readable from each of its locations', async () => {
+      const { INBOX, Archive } = await mailboxes()
+      const inbox = message(INBOX!, 1, { emailId: '777' })
+      const archived = message(Archive!, 9, { emailId: '777' })
+      const plain = message(INBOX!, 2)
+      await index.upsertMessages('a', [inbox, archived, plain])
+      // Reports what it wrote, so a caller can tell a declined source from a stored one.
+      const written = await index.storeSources(
+        'a',
+        [stored(inbox, 'gmail'), stored(plain, 'plain')],
+        1e9,
+      )
+      expect(written.sort((a, b) => a.uid - b.uid)).toEqual([
+        { mailboxId: INBOX, uidValidity: '1', uid: 1 },
+        { mailboxId: INBOX, uidValidity: '1', uid: 2 },
+      ])
+      expect(text(await index.storedSource('a', archived))).toBe('gmail')
+      expect(text(await index.storedSource('a', plain))).toBe('plain')
+      // Without a server identity only the exact location answers.
+      expect(await index.storedSource('a', { ...plain, uid: 3 })).toBeUndefined()
+      expect(await index.storedSource('a', { ...plain, uidValidity: '2' })).toBeUndefined()
+      // Accounts never share stored mail.
+      expect(await index.storedSource('b', inbox)).toBeUndefined()
+      // A source survives reopening the index.
+      await index.close()
+      index = openInProcessIndex(path)
+      expect(text(await index.storedSource('a', inbox))).toBe('gmail')
+    })
+
+    it('keeps stored sources under the cap by dropping the oldest mail first', async () => {
+      const { INBOX } = await mailboxes()
+      const [old, middle, recent] = [1, 2, 3].map((uid) => message(INBOX!, uid))
+      await index.upsertMessages('a', [old!, middle!, recent!])
+      await index.storeSources('a', [stored(recent!, 'cccc'), stored(old!, 'aaaa')], 10)
+      await index.storeSources('a', [stored(middle!, 'bbbb')], 10)
+      expect(await index.storedSource('a', old!)).toBeUndefined()
+      expect(text(await index.storedSource('a', middle!))).toBe('bbbb')
+      expect(text(await index.storedSource('a', recent!))).toBe('cccc')
+    })
+
+    it('drops a source once its email is gone from every location', async () => {
+      const { INBOX, Archive } = await mailboxes()
+      const gmail = [
+        message(INBOX!, 1, { emailId: '777' }),
+        message(Archive!, 9, { emailId: '777' }),
+      ]
+      const plain = message(INBOX!, 2)
+      const removed = message(INBOX!, 3)
+      const ids = await index.upsertMessages('a', [...gmail, plain, removed])
+      await index.storeSources(
+        'a',
+        [stored(gmail[0]!, 'g'), stored(plain, 'p'), stored(removed, 'r')],
+        1e9,
+      )
+      await index.removeUids('a', INBOX!, [1, 2])
+      expect(text(await index.storedSource('a', gmail[1]!))).toBe('g')
+      expect(await index.storedSource('a', plain)).toBeUndefined()
+      await index.removeMessages('a', [ids[1]!, ids[3]!])
+      expect(await index.storedSource('a', gmail[1]!)).toBeUndefined()
+      expect(await index.storedSource('a', removed)).toBeUndefined()
+      // A folder deleted on the server takes its mail with it.
+      const other = message(Archive!, 10)
+      await index.upsertMessages('a', [other])
+      await index.storeSources('a', [stored(other, 'o')], 1e9)
+      await index.syncMailboxes('a', [folder('INBOX')])
+      expect(await index.storedSource('a', other)).toBeUndefined()
+    })
+
+    it('drops sources stored by location when the folder’s UIDVALIDITY resets', async () => {
+      const { INBOX } = await mailboxes()
+      const plain = message(INBOX!, 1)
+      await index.upsertMessages('a', [plain])
+      await index.storeSources('a', [stored(plain, 'p')], 1e9)
+      await index.resetMailbox('a', INBOX!, '2')
+      await index.upsertMessages('a', [{ ...plain, uidValidity: '2' }])
+      expect(await index.storedSource('a', { ...plain, uidValidity: '2' })).toBeUndefined()
+      expect(await index.storedSource('a', plain)).toBeUndefined()
+    })
+
+    it('keeps a stored source with its message through a confirmed move', async () => {
+      const { INBOX, Archive } = await mailboxes()
+      const plain = message(INBOX!, 1)
+      const [id] = await index.upsertMessages('a', [plain])
+      await index.storeSources('a', [stored(plain, 'p')], 1e9)
+      const moved = { mailboxId: Archive!, uidValidity: '1', uid: 40 }
+      await index.relocate('a', id!, moved)
+      expect(text(await index.storedSource('a', moved))).toBe('p')
+      expect(await index.storedSource('a', plain)).toBeUndefined()
+    })
+
+    it('never stores a source for a message no longer indexed', async () => {
+      const { INBOX } = await mailboxes()
+      await index.storeSources('a', [stored(message(INBOX!, 5), 'x')], 1e9)
+      await index.upsertMessages('a', [message(INBOX!, 5)])
+      expect(await index.storedSource('a', message(INBOX!, 5))).toBeUndefined()
+    })
+
+    it('lists recent unstored mail to download, newest first and within bounds', async () => {
+      const { INBOX, Sent, Archive } = await mailboxes()
+      const ids = await index.upsertMessages('a', [
+        message(INBOX!, 1),
+        message(INBOX!, 2, { emailId: '7' }),
+        message(Sent!, 3),
+        message(Archive!, 4),
+        message(INBOX!, 5, { size: 5000 }),
+        message(INBOX!, 6, { emailId: '7' }),
+        message(INBOX!, 7),
+      ])
+      await index.storeSources('a', [stored(message(INBOX!, 6, { emailId: '7' }), 'x')], 1e9)
+      const candidates = (exclude: string[] = []) =>
+        index
+          .sourceCandidates('a', {
+            mailboxIds: [INBOX!, Sent!],
+            after: day(2),
+            maxSize: 2000,
+            limit: 3,
+            limitBytes: 1e9,
+            exclude,
+          })
+          .then((rows) => rows.map((m) => m.uid))
+      // UID 1 is too old, 4 is in another folder, 5 too large; 2 shares 6's stored email.
+      expect(await candidates()).toEqual([7, 3])
+      expect(await candidates([ids[6]!])).toEqual([3])
+    })
+
+    it('stops listing older mail once the store is full, so nothing is downloaded to be dropped', async () => {
+      const { INBOX } = await mailboxes()
+      const rows = [1, 2, 3].map((uid) => message(INBOX!, uid, { size: 4 }))
+      await index.upsertMessages('a', rows)
+      await index.storeSources('a', [stored(rows[1]!, 'bbbb')], 6)
+      const candidates = await index.sourceCandidates('a', {
+        mailboxIds: [INBOX!],
+        after: day(0),
+        maxSize: 100,
+        limit: 10,
+        limitBytes: 6,
+      })
+      expect(candidates.map((m) => m.uid)).toEqual([3])
+    })
+
+    it('writes nothing for mail older than everything stored once the store is full', async () => {
+      const { INBOX } = await mailboxes()
+      const [old, recent] = [1, 2].map((uid) => message(INBOX!, uid))
+      await index.upsertMessages('a', [old!, recent!])
+      await index.storeSources('a', [stored(recent!, 'cccc')], 6)
+      const watcher = new DatabaseSync(path)
+      const version = () => watcher.prepare('PRAGMA data_version').get()
+      const before = version()
+      expect(await index.storeSources('a', [stored(old!, 'aaaa')], 6)).toEqual([])
+      expect(version()).toEqual(before)
+      watcher.close()
+      expect(await index.storedSource('a', old!)).toBeUndefined()
+      expect(text(await index.storedSource('a', recent!))).toBe('cccc')
+    })
+
+    it('overwrites a removed message’s stored mail in the database file', async () => {
+      const { INBOX } = await mailboxes()
+      const secret = message(INBOX!, 1)
+      const [id] = await index.upsertMessages('a', [secret])
+      await index.storeSources('a', [stored(secret, 'TOP-SECRET-BODY '.repeat(500))], 1e9)
+      await index.removeMessages('a', [id!])
+      await index.close()
+      expect((await readFile(path)).includes('TOP-SECRET-BODY')).toBe(false)
+      index = openInProcessIndex(path)
+    })
+
+    it('lists only as much older mail as still fits', async () => {
+      const { INBOX } = await mailboxes()
+      await index.upsertMessages(
+        'a',
+        [1, 2, 3].map((uid) => message(INBOX!, uid, { size: 4 })),
+      )
+      const candidates = await index.sourceCandidates('a', {
+        mailboxIds: [INBOX!],
+        after: day(0),
+        maxSize: 100,
+        limit: 10,
+        limitBytes: 10,
+      })
+      expect(candidates.map((m) => m.uid)).toEqual([3, 2])
+    })
+  })
+
+  it('runs the version 3 migration again over a file that already has its tables', async () => {
+    const { INBOX } = await mailboxes()
+    const kept = message(INBOX!, 1)
+    await index.upsertMessages('a', [kept])
+    await index.storeSources('a', [{ message: kept, raw: new TextEncoder().encode('kept') }], 1e9)
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec('PRAGMA user_version = 2')
+    db.close()
+    index = openInProcessIndex(path)
+    expect(new TextDecoder().decode(await index.storedSource('a', kept))).toBe('kept')
+  })
+
+  it('upgrades a version 2 index to store sources without losing anything', async () => {
+    const { INBOX } = await mailboxes()
+    const [id] = await index.upsertMessages('a', [message(INBOX!, 1, { emailId: '5' })])
+    await index.updateMailbox('a', INBOX!, { uidNext: 2, indexedFrom: 1, complete: true })
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec('DROP TABLE sources; DROP INDEX messages_mailbox_received; PRAGMA user_version = 2')
+    db.close()
+    index = openInProcessIndex(path)
+    expect((await index.listMailboxes('a')).find((b) => b.id === INBOX)).toMatchObject({
+      uidNext: 2,
+      complete: true,
+    })
+    expect((await one('a', id!)).emailId).toBe('5')
+    await index.storeSources(
+      'a',
+      [{ message: message(INBOX!, 1, { emailId: '5' }), raw: new Uint8Array([1]) }],
+      1e9,
+    )
+    expect(await index.storedSource('a', message(INBOX!, 1, { emailId: '5' }))).toEqual(
+      new Uint8Array([1]),
+    )
+    await index.close()
+    const migrated = new DatabaseSync(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: SCHEMA_VERSION })
+    migrated.close()
+    index = openInProcessIndex(path)
   })
 
   it('pages and searches a large mailbox using indexed queries', async () => {
@@ -645,6 +876,13 @@ describe('worker metadata index client', () => {
     const [inbox] = await worker.syncMailboxes('a', [folder('INBOX')])
     const [id] = await worker.upsertMessages('a', [message(inbox!.id, 1)])
     expect((await worker.conversations('a', {}, { limit: 5 })).items[0]!.latest.id).toBe(id)
+    // Stored sources cross the thread boundary as bytes.
+    await worker.storeSources(
+      'a',
+      [{ message: message(inbox!.id, 1), raw: new Uint8Array([7]) }],
+      1e9,
+    )
+    expect(await worker.storedSource('a', message(inbox!.id, 1))).toEqual(new Uint8Array([7]))
     await expect(
       worker.relocate('a', 'nope', { mailboxId: inbox!.id, uidValidity: '1', uid: 2 }),
     ).rejects.toThrow(/Unknown message/)

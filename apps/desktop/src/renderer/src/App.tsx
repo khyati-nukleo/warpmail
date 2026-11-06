@@ -113,10 +113,20 @@ import { useUnlock } from './encryption-actions'
 import { HintIconButton } from './HintIconButton'
 import { targetAccounts, targetLimit } from './account-limits'
 import { newMessageAccount } from './compose-account'
-import { SubmissionList } from './SendingStatus'
+import { recipientSuggestions } from './recipient-suggestions'
+import { SubmissionList, type NotSent } from './SendingStatus'
+import { deliver, latestDraft } from './background-send'
 import { IndexingMeter } from './IndexingMeter'
 import { UpdateNotice } from './UpdateNotice'
 import { offersAction } from './view-actions'
+import { markReadOptimistically, readOnOpen } from './optimistic-read'
+import {
+  aheadHasBodies,
+  openedThreadQuery,
+  readAhead,
+  readAheadKey,
+  readAheadQuery,
+} from './read-ahead'
 import { version as packagedVersion } from '../../../package.json'
 const Composer = lazy(() => import('./Composer').then((m) => ({ default: m.Composer })))
 const SettingsPanel = lazy(() => import('./Settings').then((m) => ({ default: m.SettingsPanel })))
@@ -126,7 +136,10 @@ type Toast = {
   undoId?: string
   /** Undoes a change the client has not committed yet. */
   onUndo?: () => void
-  tone?: 'error' | 'info'
+  /** A follow-up, such as reopening a draft that was not sent. */
+  action?: { label: string; run: () => void; draftId?: string }
+  /** `progress` stays until replaced, like any toast with an action. */
+  tone?: 'error' | 'info' | 'progress'
 }
 let toastSequence = 0
 const discardKeys = (item: DraftItem) =>
@@ -191,6 +204,12 @@ export function App() {
   const [discarding, setDiscarding] = useState(new Set<string>()),
     pendingDiscard = useRef<{ toastId: number; items: DraftItem[] } | undefined>(undefined)
   const pendingMailto = useRef<string | undefined>(undefined)
+  // Drafts handed over by a closed composer and not yet accepted or refused.
+  const [outbox, setOutbox] = useState(new Set<string>())
+  // Background sends that failed, listed until reopened or dismissed so none hides another.
+  const [notSent, setNotSent] = useState<NotSent[]>([])
+  const forgetNotSent = (id: string) =>
+    setNotSent((current) => current.filter((n) => n.draft.id !== id))
   const setToast = (next?: Toast) => {
     const id = ++toastSequence
     setToastState(next && { ...next, id })
@@ -198,6 +217,65 @@ export function App() {
   }
   const notify = (text: string, tone?: Toast['tone']) => setToast({ text, tone })
   const fail = (error: unknown) => notify(friendlyError(error), 'error')
+  /** Sends a draft the composer saved before closing, and reports how it went. */
+  const sendInBackground = (draft: Draft) => {
+    forgetNotSent(draft.id)
+    setOutbox((current) => new Set(current).add(draft.id))
+    setToast({
+      text: draft.status === 'uncertain' ? 'Checking delivery…' : 'Sending…',
+      tone: 'progress',
+    })
+    void deliver(draft, {
+      send: (d) => api.send(d),
+      reconcile: (id) => api.reconcile(id),
+      drafts: () => api.drafts(),
+      localSaveDraft,
+      localDeleteDraft,
+    }).then((outcome) => {
+      setOutbox((current) => {
+        const next = new Set(current)
+        next.delete(draft.id)
+        return next
+      })
+      const reopen = outcome.draft
+      // Unconfirmed sends are already listed from the main process.
+      if (reopen && reopen.status !== 'uncertain')
+        setNotSent((current) => [
+          { draft: reopen, text: outcome.text },
+          ...current.filter((n) => n.draft.id !== reopen.id),
+        ])
+      setToast({
+        text: outcome.text,
+        tone: outcome.tone,
+        action: reopen && {
+          label: 'Open draft',
+          run: () => void openNotSent(reopen.id),
+          draftId: reopen.id,
+        },
+      })
+      void refresh()
+    })
+  }
+  /** Opens a draft that was not sent as it is now: it may have been fixed since. */
+  const openNotSent = async (id: string) => {
+    forgetNotSent(id)
+    try {
+      const draft = await latestDraft(id, async () => {
+        await queryClient.refetchQueries({ queryKey: ['drafts'] })
+        return queryClient.getQueryData<Draft[]>(['drafts']) || []
+      })
+      if (draft) setComposer(draft)
+      else notify('This draft has since been sent or deleted.', 'info')
+    } catch (e) {
+      fail(e)
+    }
+  }
+  // Once a draft is open again, its not-sent notice has done its job.
+  useEffect(() => {
+    if (!composer) return
+    forgetNotSent(composer.id)
+    setToastState((current) => (current?.action?.draftId === composer.id ? undefined : current))
+  }, [composer?.id])
   const shortcuts = useShortcuts()
   const keys = useShortcutText()
   const explain = ({ account, reason }: { account: { name: string }; reason: string }) =>
@@ -297,12 +375,19 @@ export function App() {
         )
           merged.set(draft.id, draft)
       }
+      // Sent records stay in the list only to hide the server draft a message replaced.
       return [...merged.values()]
-        .filter((d) => accounts.some((a) => a.id === d.accountId) && d.status !== 'sent')
+        .filter(
+          (d) => accounts.some((a) => a.id === d.accountId) && (d.status !== 'sent' || d.serverId),
+        )
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     },
     enabled: !!accounts.length,
   })
+  const unsent = useMemo(
+    () => (drafts.data || []).filter((d) => d.status !== 'sent'),
+    [drafts.data],
+  )
   const allDraftItems = useMemo<DraftItem[]>(
     () => [
       ...unlinkedServerDrafts(conversations, drafts.data || []).map((message) => ({
@@ -310,11 +395,11 @@ export function App() {
         key: 'server:' + scopeKey(message.accountId, message.id),
         message,
       })),
-      ...(drafts.data || [])
+      ...unsent
         .filter((draft) => !route.account || draft.accountId === route.account)
         .map((draft) => ({ kind: 'local' as const, key: 'local:' + draft.id, draft })),
     ],
-    [conversations, drafts.data, route.account],
+    [conversations, drafts.data, unsent, route.account],
   )
   const draftItems = allDraftItems.filter((item) => !discarding.has(item.key))
   const submissions = useQuery({
@@ -329,15 +414,23 @@ export function App() {
   const listed = conversations.find(
     (c) => c.id === route.thread && c.accountId === route.threadAccount,
   )
+  // Watched, never fetched here, so a read-ahead that lands while the conversation opens shows.
+  const ahead = useQuery<Message[]>({
+    queryKey: readAheadKey(route.threadAccount, route.thread),
+    enabled: false,
+  }).data
   const thread = useQuery({
-    queryKey: ['thread', route.threadAccount, route.thread],
-    queryFn: () => api.conversation(route.threadAccount!, route.thread!),
+    ...openedThreadQuery(api, route.threadAccount!, route.thread!, {
+      ahead,
+      // Open instantly from the list summary; bodies arrive a moment later.
+      listed: listed
+        ? [...listed.messages].sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
+        : undefined,
+    }),
     enabled: !!route.thread && !!readerAccount,
-    // Open instantly from the list summary; bodies arrive a moment later.
-    placeholderData: listed
-      ? [...listed.messages].sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
-      : undefined,
   })
+  // The list summary lacks bodies, and so does a read-ahead that left a large message to the open.
+  const summaryOnly = thread.isPlaceholderData && !aheadHasBodies(ahead)
   useEffect(() => {
     localStorage.setItem('mail-density', density)
   }, [density])
@@ -696,6 +789,8 @@ export function App() {
     if (!range || !draftAnchor.current) draftAnchor.current = key
   }
   const openDraft = async (item: DraftItem) => {
+    if (item.kind === 'local' && outbox.has(item.draft.id))
+      return notify('This message is still sending.', 'info')
     if (item.kind === 'local') return setComposer(item.draft)
     try {
       const draft = await api.resumeDraft(item.message.accountId, item.message.id)
@@ -737,9 +832,7 @@ export function App() {
   }
   /** A draft filed in the open conversation, preferring the local copy the composer edits. */
   const threadDraft = (message: Message): DraftItem => {
-    const local = drafts.data?.find(
-      (d) => d.accountId === message.accountId && d.serverId === message.id,
-    )
+    const local = unsent.find((d) => d.accountId === message.accountId && d.serverId === message.id)
     return local
       ? { kind: 'local', key: 'local:' + local.id, draft: local }
       : { kind: 'server', key: 'server:' + scopeKey(message.accountId, message.id), message }
@@ -808,24 +901,25 @@ export function App() {
     }
   }, [route.view, route.account, route.folder])
   useEffect(() => {
-    const key = route.threadAccount + ':' + route.thread
-    if (
-      route.thread &&
-      thread.data &&
-      readerAccount?.status === 'connected' &&
-      lastRead.current !== key
-    ) {
-      lastRead.current = key
-      if (thread.data.some((m) => !m.keywords.$seen))
-        void api
-          .mutate({
-            targets: [{ accountId: readerAccount.id, threadId: route.thread }],
-            action: 'read',
-          })
-          .then(refresh)
-          .catch((e) => fail(e))
-    }
-  }, [route.thread, route.threadAccount, thread.data, readerAccount?.status])
+    if (!route.thread || readerAccount?.status !== 'connected') return
+    const marking = readOnOpen(lastRead, route.threadAccount + ':' + route.thread, thread, listed)
+    if (!marking) return
+    const target = { accountId: readerAccount.id, threadId: route.thread }
+    void markReadOptimistically(
+      queryClient,
+      target,
+      marking,
+      () => api.mutate({ targets: [target], action: 'read' }),
+      refresh,
+    ).catch((e) => fail(e))
+  }, [
+    route.thread,
+    route.threadAccount,
+    thread.data,
+    thread.isPlaceholderData,
+    listed?.unread,
+    readerAccount?.status,
+  ])
   useEffect(() => {
     const unsubscribe = api.onEvent((event) => {
       if (event.type === 'encryption') {
@@ -874,24 +968,27 @@ export function App() {
     }
   }, [accounts.length])
   useEffect(() => {
-    if (!route.thread) return
-    const index = conversations.findIndex(
-      (c) => c.id === route.thread && c.accountId === route.threadAccount,
-    )
-    for (const nearby of [conversations[index - 1], conversations[index + 1]]) {
-      if (nearby && accounts.some((a) => a.id === nearby.accountId && a.status === 'connected'))
-        void queryClient.prefetchQuery({
-          queryKey: ['thread', nearby.accountId, nearby.id],
-          queryFn: () => api.conversation(nearby.accountId, nearby.id),
-          staleTime: 60_000,
-        })
-    }
-  }, [route.thread, route.threadAccount, conversations])
+    for (const nearby of readAhead(conversations, route.threadAccount, route.thread, thread, (id) =>
+      accounts.some((a) => a.id === id && a.status === 'connected'),
+    ))
+      void queryClient.prefetchQuery(readAheadQuery(api, nearby))
+  }, [
+    route.thread,
+    route.threadAccount,
+    conversations,
+    // A reconnect starts reading ahead on that account.
+    accounts,
+    thread.status,
+    thread.isPlaceholderData,
+    thread.isFetching,
+  ])
   const [toastHeld, setToastHeld] = useState(false)
   const canUndo = !!toast?.undoId || !!toast?.onUndo
   const toastDuration = canUndo ? 9000 : toast?.tone === 'error' ? 8000 : 5000
+  // A send in progress, or one that needs a decision, stays until it is replaced or dismissed.
+  const toastStays = toast?.tone === 'progress' || !!toast?.action
   useEffect(() => {
-    if (!toast || toastHeld) return
+    if (!toast || toastHeld || toastStays) return
     const timer = setTimeout(() => setToast(undefined), toastDuration)
     return () => clearTimeout(timer)
   }, [toast, toastHeld])
@@ -1076,23 +1173,14 @@ export function App() {
     },
     !blocked,
   )
-  const suggestions = useMemo(() => {
-    // People you hear from most come first; your own addresses never appear.
-    const own = new Set(accounts.map((a) => a.email.toLowerCase()))
-    const seen = new Map<string, { address: Address; count: number }>()
-    for (const c of conversations)
-      for (const m of c.messages)
-        for (const address of [...m.from, ...m.to, ...m.cc]) {
-          const key = address.email.toLowerCase()
-          if (own.has(key)) continue
-          const entry = seen.get(key)
-          if (entry) {
-            entry.count++
-            if (!entry.address.name && address.name) entry.address = address
-          } else seen.set(key, { address, count: 1 })
-        }
-    return [...seen.values()].sort((a, b) => b.count - a.count).map((entry) => entry.address)
-  }, [conversations, accounts])
+  const suggestions = useMemo(
+    () =>
+      recipientSuggestions(
+        conversations,
+        accounts.map((a) => a.email),
+      ),
+    [conversations, accounts],
+  )
   const savePreferences = async (patch: Partial<typeof settings>) => {
     try {
       const next = await api.settings({ ...settings, ...patch })
@@ -1538,7 +1626,7 @@ export function App() {
         boxesByAccount={mailboxCounts.boxesByAccount}
         route={route}
         view={view}
-        draftCount={drafts.data?.filter((d) => !discarding.has('local:' + d.id)).length || 0}
+        draftCount={unsent.filter((d) => !discarding.has('local:' + d.id)).length}
         hasServerDrafts={mailboxCounts.drafts > 0}
         sendingIssues={pendingSends.length}
         unreadCount={mailboxCounts.unread}
@@ -1605,7 +1693,7 @@ export function App() {
                   : undefined
               }
               position={activeIndex >= 0 ? activeIndex + 1 + ' of ' + total.toLocaleString() : ''}
-              loading={thread.isPlaceholderData}
+              loading={summaryOnly}
               onAction={(action) => void act(action)}
               onMove={() => openMove(targets())}
               onReply={(message, kind) => void compose(message, kind)}
@@ -1718,9 +1806,9 @@ export function App() {
                     {view === 'drafts'
                       ? (
                           total +
-                          (drafts.data?.filter(
+                          unsent.filter(
                             (d) => (!route.account || d.accountId === route.account) && !d.serverId,
-                          ).length || 0) -
+                          ).length -
                           (allDraftItems.length - draftItems.length)
                         ).toLocaleString()
                       : total.toLocaleString() + (incomplete.length ? '+' : '')}
@@ -2113,11 +2201,16 @@ export function App() {
                   submissions={pendingSends.filter(
                     (s) => !route.account || s.accountId === route.account,
                   )}
+                  notSent={notSent.filter(
+                    (n) => !route.account || n.draft.accountId === route.account,
+                  )}
                   accounts={accounts}
                   onOpenDraft={setComposer}
+                  onDismissNotSent={forgetNotSent}
+                  onOpenNotSent={(id) => void openNotSent(id)}
                   notify={notify}
                 />
-                {!!pendingSends.length && !!draftItems.length && (
+                {!!(pendingSends.length + notSent.length) && !!draftItems.length && (
                   <h2 className="draft-section-label m-0 pt-4.5 pb-1.5 px-8 text-[11px] font-medium text-muted @max-[680px]/mail:pl-5 @max-[680px]/mail:pr-5">
                     Drafts
                   </h2>
@@ -2140,7 +2233,7 @@ export function App() {
                     </Button>
                   </div>
                 )}
-                {!draftItems.length && !pendingSends.length && (
+                {!draftItems.length && !pendingSends.length && !notSent.length && (
                   <EmptyState
                     icon={FileText}
                     title="No drafts"
@@ -2375,10 +2468,23 @@ export function App() {
             <AlertCircle size={15} />
           ) : toast.tone === 'info' ? (
             <Info size={15} />
+          ) : toast.tone === 'progress' ? (
+            <Spinner size={15} />
           ) : (
             <Check size={15} />
           )}
           <span>{toast.text}</span>
+          {toast.action && (
+            <button
+              className="toast-undo"
+              onClick={() => {
+                toast.action!.run()
+                setToast(undefined)
+              }}
+            >
+              {toast.action.label}
+            </button>
+          )}
           {canUndo && (
             <button
               className="toast-undo [&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:text-[9px] [&_kbd]:text-primary [&_kbd]:border-primary/35"
@@ -2394,7 +2500,7 @@ export function App() {
           >
             <X size={13} />
           </button>
-          {!toastHeld && (
+          {!toastHeld && !toastStays && (
             <span
               className="toast-timer absolute left-0 bottom-0 h-[2px] w-full bg-primary/45 origin-left animate-[toast-timer_linear_forwards]"
               style={{ animationDuration: toastDuration + 'ms' }}
@@ -2438,6 +2544,7 @@ export function App() {
             onOpenEncryption={() => openSettings('encryption')}
             notify={notify}
             onSaved={() => void queryClient.invalidateQueries({ queryKey: ['drafts'] })}
+            onSend={sendInBackground}
           />
         )}
         {settingsOpen && (

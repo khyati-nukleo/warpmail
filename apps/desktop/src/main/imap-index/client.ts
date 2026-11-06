@@ -132,4 +132,13 @@ export class WorkerMetadataIndex implements MetadataIndex {
   setMeta(...args: Args<'setMeta'>) {
     return this.call('setMeta', args)
   }
+  storedSource(...args: Args<'storedSource'>) {
+    return this.call('storedSource', args)
+  }
+  storeSources(...args: Args<'storeSources'>) {
+    return this.call('storeSources', args)
+  }
+  sourceCandidates(...args: Args<'sourceCandidates'>) {
+    return this.call('sourceCandidates', args)
+  }
 }

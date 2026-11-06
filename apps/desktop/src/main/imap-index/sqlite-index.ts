@@ -13,6 +13,8 @@ import type {
   MessageLocation,
   MetadataIndex,
   NewMessage,
+  SourceCandidateFilter,
+  SourceLocation,
 } from '@inlark/imap'
 
 /** The synchronous shape of `MetadataIndex`, as run inside the worker. */
@@ -46,10 +48,13 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   counts: true,
   getMeta: true,
   setMeta: true,
+  storedSource: true,
+  storeSources: true,
+  sourceCandidates: true,
 }
 export const indexMethods = Object.keys(methodTable) as (keyof MetadataIndex)[]
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 const MAX_REFERENCES = 50
 
 const migrations = [
@@ -141,6 +146,26 @@ const migrations = [
   CREATE INDEX messages_email_id ON messages (account_id, email_id) WHERE email_id IS NOT NULL;
   -- Refresh metadata for existing locations without discarding their stable IDs or threads.
   UPDATE mailboxes SET uid_next = NULL, highest_modseq = NULL, indexed_from = NULL, complete = 0;`,
+  // Original sources downloaded ahead of time. `key` is 'e:' + server identity, or
+  // 'l:' + mailbox + UIDVALIDITY + UID without one; the location columns serve both pruning
+  // and relocation. Sizes come before the blob so totals never read it. Written to run again
+  // over a file that already has them, so it can be renumbered after an upstream migration.
+  `CREATE TABLE IF NOT EXISTS sources (
+    seq INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    email_id TEXT,
+    mailbox_id TEXT NOT NULL,
+    uid_validity TEXT NOT NULL,
+    uid INTEGER NOT NULL,
+    received_ms INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    raw BLOB NOT NULL,
+    UNIQUE (account_id, key)
+  );
+  CREATE INDEX IF NOT EXISTS sources_age ON sources (account_id, received_ms, size);
+  CREATE INDEX IF NOT EXISTS messages_mailbox_received
+    ON messages (account_id, mailbox_id, received_ms);`,
 ]
 
 interface MailboxRow {
@@ -207,6 +232,8 @@ function time(value: string) {
 }
 
 const json = (value: unknown) => JSON.stringify(value)
+const locationKey = (m: MessageLocation) => 'l:' + m.mailboxId + ':' + m.uidValidity + ':' + m.uid
+const sourceKey = (m: SourceLocation) => (m.emailId ? 'e:' + m.emailId : locationKey(m))
 const list = (values: readonly unknown[]) => JSON.stringify(values)
 
 function toMailbox(row: MailboxRow): IndexedMailbox {
@@ -296,7 +323,8 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         )
       db.exec(
         `PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;
-          PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY`,
+          PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY;
+          PRAGMA secure_delete = ON`,
       )
       for (let from = version; from < SCHEMA_VERSION; from++) {
         db.exec('BEGIN IMMEDIATE')
@@ -394,9 +422,13 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
             ...fields,
           )
       })
+      let removed = false
       for (const [path, id] of known)
-        if (!listed.has(path))
+        if (!listed.has(path)) {
           this.run('DELETE FROM mailboxes WHERE account_id = ? AND id = ?', accountId, id)
+          removed = true
+        }
+      if (removed) this.pruneSources(accountId)
     })
     return this.listMailboxes(accountId)
   }
@@ -502,6 +534,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         uidValidity,
         mailboxId,
       )
+      this.pruneSources(accountId)
     })
   }
 
@@ -721,6 +754,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         mailboxId,
         list(uids),
       )
+      this.pruneSources(accountId)
     })
   }
 
@@ -732,6 +766,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         accountId,
         list(ids),
       )
+      this.pruneSources(accountId)
     })
   }
 
@@ -746,8 +781,23 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   relocate(accountId: string, id: string, location: MessageLocation) {
     this.tx(() => {
       this.checkLocation(accountId, location, new Map())
-      if (!this.get('SELECT 1 FROM messages WHERE account_id = ? AND id = ?', accountId, id))
-        throw new Error('Unknown message in the mail index.')
+      const from = this.get<{ mailbox_id: string; uid_validity: string; uid: number }>(
+        'SELECT mailbox_id, uid_validity, uid FROM messages WHERE account_id = ? AND id = ?',
+        accountId,
+        id,
+      )
+      if (!from) throw new Error('Unknown message in the mail index.')
+      // A source stored by location moves with its message.
+      this.run(
+        `UPDATE OR REPLACE sources SET key = ?, mailbox_id = ?, uid_validity = ?, uid = ?
+          WHERE account_id = ? AND key = ?`,
+        locationKey(location),
+        location.mailboxId,
+        location.uidValidity,
+        location.uid,
+        accountId,
+        locationKey({ mailboxId: from.mailbox_id, uidValidity: from.uid_validity, uid: from.uid }),
+      )
       // The confirmed move identifies this message; a copy indexed there meanwhile is the same one.
       this.run(
         `DELETE FROM messages WHERE account_id = ? AND mailbox_id = ? AND uid = ?
@@ -982,6 +1032,143 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         key,
         value,
       )
+  }
+
+  /** Drops sources whose email is no longer at any indexed location. Bounded by the store. */
+  private pruneSources(accountId: string) {
+    this.run(
+      `DELETE FROM sources WHERE account_id = ? AND email_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM messages m INDEXED BY messages_email_id
+          WHERE m.account_id = sources.account_id AND m.email_id = sources.email_id)`,
+      accountId,
+    )
+    this.run(
+      `DELETE FROM sources WHERE account_id = ? AND email_id IS NULL AND NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.account_id = sources.account_id
+          AND m.mailbox_id = sources.mailbox_id AND m.uid = sources.uid
+          AND m.uid_validity = sources.uid_validity)`,
+      accountId,
+    )
+  }
+
+  storedSource(accountId: string, message: SourceLocation) {
+    const keys = [...new Set([sourceKey(message), locationKey(message)])]
+    const row = this.get<{ raw: Uint8Array }>(
+      `SELECT raw FROM sources WHERE account_id = ? AND key IN (SELECT value FROM json_each(?))
+        LIMIT 1`,
+      accountId,
+      list(keys),
+    )
+    return row?.raw
+  }
+
+  storeSources(
+    accountId: string,
+    sources: { message: SourceLocation & { receivedAt: string }; raw: Uint8Array }[],
+    limitBytes: number,
+  ): MessageLocation[] {
+    const written: MessageLocation[] = []
+    if (!sources.length) return written
+    const store = () =>
+      this.get<{ total: number | null; oldest: number | null }>(
+        'SELECT sum(size) AS total, min(received_ms) AS oldest FROM sources WHERE account_id = ?',
+        accountId,
+      )
+    return this.tx(() => {
+      // Newest first, so older mail is measured against what this call already added.
+      const ordered = [...sources].sort(
+        (a, b) => time(b.message.receivedAt) - time(a.message.receivedAt),
+      )
+      for (const { message, raw } of ordered) {
+        // Mail the eviction below would drop at once is never written.
+        const now = store()
+        const full = (now?.total ?? 0) + raw.byteLength > limitBytes
+        if (full && (now?.oldest == null || time(message.receivedAt) < now.oldest)) continue
+        // A message removed meanwhile must not leave its content behind.
+        if (
+          !this.get(
+            `SELECT 1 FROM messages WHERE account_id = ? AND mailbox_id = ? AND uid = ?
+              AND uid_validity = ?`,
+            accountId,
+            message.mailboxId,
+            message.uid,
+            message.uidValidity,
+          )
+        )
+          continue
+        this.run(
+          `INSERT INTO sources (account_id, key, email_id, mailbox_id, uid_validity, uid,
+            received_ms, size, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (account_id, key) DO UPDATE SET mailbox_id = excluded.mailbox_id,
+              uid_validity = excluded.uid_validity, uid = excluded.uid,
+              received_ms = excluded.received_ms, size = excluded.size, raw = excluded.raw`,
+          accountId,
+          sourceKey(message),
+          message.emailId ?? null,
+          message.mailboxId,
+          message.uidValidity,
+          message.uid,
+          time(message.receivedAt),
+          raw.byteLength,
+          raw,
+        )
+        written.push({
+          mailboxId: message.mailboxId,
+          uidValidity: message.uidValidity,
+          uid: message.uid,
+        })
+      }
+      let total =
+        this.get<{ n: number | null }>(
+          'SELECT sum(size) AS n FROM sources WHERE account_id = ?',
+          accountId,
+        )?.n ?? 0
+      if (total <= limitBytes) return written
+      const evicted: number[] = []
+      for (const row of this.stmt(
+        'SELECT seq, size FROM sources WHERE account_id = ? ORDER BY received_ms, seq',
+      ).iterate(accountId) as Iterable<{ seq: number; size: number }>) {
+        if (total <= limitBytes) break
+        evicted.push(row.seq)
+        total -= row.size
+      }
+      this.run('DELETE FROM sources WHERE seq IN (SELECT value FROM json_each(?))', list(evicted))
+      return written
+    })
+  }
+
+  sourceCandidates(accountId: string, filter: SourceCandidateFilter) {
+    const store = this.get<{ total: number | null; oldest: number | null }>(
+      'SELECT sum(size) AS total, min(received_ms) AS oldest FROM sources WHERE account_id = ?',
+      accountId,
+    )
+    const rows = this.all<MessageRow & { received_ms: number }>(
+      `SELECT ${MESSAGE_COLUMNS}, received_ms FROM messages m
+        WHERE m.account_id = ? AND m.mailbox_id IN (SELECT value FROM json_each(?))
+          AND m.received_ms >= ? AND m.size <= ?
+          AND m.id NOT IN (SELECT value FROM json_each(?))
+          AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.account_id = m.account_id
+            AND s.key IN ('e:' || m.email_id,
+              'l:' || m.mailbox_id || ':' || m.uid_validity || ':' || m.uid))
+        ORDER BY m.received_ms DESC, m.seq DESC LIMIT ?`,
+      accountId,
+      list(filter.mailboxIds),
+      time(filter.after),
+      filter.maxSize,
+      list(filter.exclude ?? []),
+      Math.max(0, Math.floor(filter.limit)),
+    )
+    // Mail newer than everything stored displaces older entries. Older mail is listed only
+    // while it still fits, so nothing is downloaded just to be evicted again.
+    let room = filter.limitBytes - (store?.total ?? 0)
+    const picked: IndexedMessage[] = []
+    for (const row of rows) {
+      const displaces = store?.oldest != null && row.received_ms > store.oldest
+      if (!displaces && row.size > room) break
+      room -= row.size
+      picked.push(toMessage(row))
+    }
+    return picked
   }
 }
 

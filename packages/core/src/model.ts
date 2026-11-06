@@ -470,7 +470,12 @@ export interface MailProvider {
     position?: number,
     limit?: number,
   ): Promise<ProviderPage>
-  conversation(account: Account, threadId: string): Promise<Message[]>
+  /** `background` loads run behind the user's own work, such as reading ahead to nearby threads. */
+  conversation(
+    account: Account,
+    threadId: string,
+    options?: { background?: boolean },
+  ): Promise<Message[]>
   getStateToken(account: Account): string | undefined
   update(
     account: Account,
@@ -489,7 +494,12 @@ export interface MailProvider {
   ): Promise<void>
   upload(account: Account, data: Uint8Array, type: string): Promise<string>
   download(account: Account, attachment: Attachment): Promise<Uint8Array>
-  rawMessage?(account: Account, messageId: string, maxBytes: number): Promise<Uint8Array>
+  rawMessage?(
+    account: Account,
+    messageId: string,
+    maxBytes: number,
+    options?: { background?: boolean },
+  ): Promise<Uint8Array>
   /** Bounded recent header-only samples for Autocrypt, including messages without a key header. */
   encryptionHints?(
     account: Account,
@@ -668,7 +678,12 @@ export interface DesktopMailAPI {
   mailboxes(accountId: string): Promise<Mailbox[]>
   identities(accountId: string): Promise<Identity[]>
   query(query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage>
-  conversation(accountId: string, threadId: string): Promise<Message[]>
+  /** `prefetch` marks a read-ahead load that must never delay the thread being opened. */
+  conversation(
+    accountId: string,
+    threadId: string,
+    options?: { prefetch?: boolean },
+  ): Promise<Message[]>
   mutate(input: MutationInput): Promise<MutationResult>
   mutateAll(query: MailQuery, action: MailAction): Promise<MutationResult>
   undo(id: string): Promise<MutationResult>

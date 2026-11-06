@@ -29,7 +29,6 @@ import {
   type Address,
   type Account,
   type Draft,
-  type SendResult,
   type Settings,
   type Identity,
 } from '@inlark/core'
@@ -50,30 +49,13 @@ import {
 import { SignatureNode } from './signature'
 import { linkTarget } from './link-target'
 import { SignatureParagraph, hasDraftContent, replaceSignature } from './composer-document'
+import { serverSaves } from './draft-sync'
 
 /** One From choice: an account and one of its sending addresses. */
 const senderKey = (accountId: string, identityId: string) => JSON.stringify([accountId, identityId])
 /** The editor's own formatting keys, which follow the platform (⌘ on macOS, Ctrl elsewhere). */
 const boldKeys = bindingText(['Mod+B'])
 const italicKeys = bindingText(['Mod+I'])
-
-/** Plain wording for a finished send; the Drafts view offers recovery for anything left over. */
-function sentMessage(result: SendResult): string {
-  const copy = result.sentCopy === 'pending' ? ' Its copy in Sent isn’t saved yet.' : ''
-  if (result.status === 'partial') {
-    const refused = result.rejected || []
-    return (
-      (refused.length
-        ? 'Sent, but refused by ' +
-          (refused.length === 1 ? refused[0].email : refused.length + ' recipients') +
-          '.'
-        : 'Sent, but some recipients refused it.') +
-      copy +
-      ' Drafts has the details.'
-    )
-  }
-  return copy ? 'Message sent.' + copy + ' Drafts shows its status.' : result.message
-}
 
 /** What went wrong with a draft, in terms of what the user can do next. */
 function draftProblem(draft: Draft): { text: string; detail?: string } | undefined {
@@ -116,6 +98,7 @@ export function Composer({
   onOpenEncryption,
   notify,
   onSaved,
+  onSend,
 }: {
   initial: Draft
   suggestions: Address[]
@@ -128,6 +111,8 @@ export function Composer({
   onOpenEncryption: () => void
   notify: (message: string, tone?: 'error' | 'info') => void
   onSaved: () => void
+  /** Takes over a saved draft to send once the composer has closed. */
+  onSend: (draft: Draft) => void
 }) {
   const [downgradeMode, setDowngradeMode] = useState<'none' | 'sign' | undefined>()
   // Once someone picks a protection mode, the recommendation never overrides it.
@@ -155,7 +140,8 @@ export function Composer({
     [editingLink, setEditingLink] = useState(false),
     [discardOpen, setDiscardOpen] = useState(false)
   const latest = useRef(draft),
-    sync = useRef<Promise<unknown>>(Promise.resolve()),
+    syncToServer = useRef<() => Promise<unknown>>(async () => {}),
+    saves = useRef(serverSaves(() => syncToServer.current())),
     persisted = useRef(!!initial.serverId || initial.status !== 'local'),
     alive = useRef(true)
   const account = accounts.find((a) => a.id === draft.accountId)!
@@ -231,14 +217,8 @@ export function Composer({
     (draft.encryption === 'encrypt' && vault.data?.vault !== 'unlocked')
   const lockedRef = useRef(locked)
   lockedRef.current = locked
-  // A failed send is kept apart from the draft, so a later autosave can't clear the explanation.
-  const [sendError, setSendError] = useState<Pick<Draft, 'error' | 'errorKind'>>()
-  const shown = sendError ? { ...draft, ...sendError } : draft
-  const problem = draftProblem(shown)
-  const update = (patch: Partial<Draft>) => {
-    setSendError(undefined)
-    change(patch)
-  }
+  const problem = draftProblem(draft)
+  const update = (patch: Partial<Draft>) => change(patch)
   const change = (patch: Partial<Draft>) =>
     setDraft((current) => {
       if (['uncertain', 'sent'].includes(current.status)) return current
@@ -307,7 +287,7 @@ export function Composer({
       const tasks = (event as CustomEvent<Promise<unknown>[]>).detail
       tasks.push(
         (async () => {
-          await sync.current
+          await saves.current.settled()
           if (shouldSave()) {
             await localSaveDraft(latest.current)
             await api.saveDraft(latest.current)
@@ -326,6 +306,8 @@ export function Composer({
     alive.current = true
     return () => {
       alive.current = false
+      // Drafts left unsaved on the server are picked up by the background sync.
+      saves.current.cancel()
     }
   }, [])
   const shouldSave = () =>
@@ -354,59 +336,51 @@ export function Composer({
           if (alive.current) setState('Could not save: ' + friendlyError(e))
         })
     }, 350)
-    const serverTimer = setTimeout(() => {
-      const captured = latest.current
-      if (!captured.identityId || account.status !== 'connected') return
-      sync.current = sync.current
-        .then(() =>
-          api.syncDraft({
-            ...captured,
-            serverId: latest.current.serverId,
-            serverFingerprint: latest.current.serverFingerprint,
-          }),
-        )
-        .then((saved) => {
-          const result = saved as Draft
-          if (!alive.current) return
-          const current = latest.current
-          const merged = {
-            ...current,
-            serverId: result.serverId || current.serverId,
-            serverFingerprint: result.serverFingerprint || current.serverFingerprint,
-            ...(current.updatedAt === captured.updatedAt
-              ? { status: result.status, error: result.error, errorKind: result.errorKind }
-              : {}),
-          }
-          latest.current = merged
-          setDraft(merged)
-          if (current.updatedAt === captured.updatedAt)
-            setState(
-              result.status === 'synced'
-                ? 'All changes saved'
-                : 'Saved locally · server sync failed',
-            )
-          void localSaveDraft(merged)
-        })
-        .catch(() => {
-          if (alive.current) setState('Saved locally · waiting for connection')
-        })
-    }, 2200)
-    return () => {
-      clearTimeout(localTimer)
-      clearTimeout(serverTimer)
-    }
+    saves.current.schedule()
+    return () => clearTimeout(localTimer)
   }, [draft.updatedAt, editor, changingFrom, signature?.format, signature?.value])
+  // Saves to the server after a pause in typing; local saves above keep every edit safe.
+  syncToServer.current = async () => {
+    const captured = latest.current
+    if (!captured.identityId || account.status !== 'connected') return
+    try {
+      const result = await api.syncDraft(captured)
+      if (!alive.current) return
+      const current = latest.current
+      const merged = {
+        ...current,
+        serverId: result.serverId || current.serverId,
+        serverFingerprint: result.serverFingerprint || current.serverFingerprint,
+        ...(current.updatedAt === captured.updatedAt
+          ? { status: result.status, error: result.error, errorKind: result.errorKind }
+          : {}),
+      }
+      latest.current = merged
+      setDraft(merged)
+      if (current.updatedAt === captured.updatedAt)
+        setState(
+          result.status === 'synced' ? 'All changes saved' : 'Saved locally · server sync failed',
+        )
+      void localSaveDraft(merged)
+    } catch {
+      if (alive.current) setState('Saved locally · waiting for connection')
+    }
+  }
   const close = async () => {
     if (changingFrom) return
+    const due = saves.current.cancel()
     try {
-      await sync.current
+      await saves.current.settled()
       if (shouldSave()) {
         await localSaveDraft(latest.current)
         await api.saveDraft(latest.current)
         onSaved()
+        // The server copy catches up after the composer has gone.
+        if (due) void syncToServer.current()
       }
       onClose()
     } catch (e) {
+      if (due) saves.current.schedule()
       notify('Your draft could not be saved. ' + friendlyError(e), 'error')
     }
   }
@@ -424,6 +398,14 @@ export function Composer({
       })
   }
   const send = async () => {
+    if (draft.status === 'uncertain') {
+      if (sending || changingFrom || account.status !== 'connected') return
+      // Checking delivery sends nothing and changes nothing, so it needs no save or review.
+      setSending(true)
+      onSend(latest.current)
+      onClose()
+      return
+    }
     if (locked || account.status !== 'connected') return
     const fields = ['to', 'cc', 'bcc'] as const
     if (!fields.some((field) => latest.current[field].length)) {
@@ -462,56 +444,21 @@ export function Composer({
       }
     }
     setSending(true)
-    setSendError(undefined)
+    // Send uses this content; a server save still running finishes first in the main process.
+    const due = saves.current.cancel()
     try {
-      await sync.current
       await localSaveDraft(latest.current)
-      const result =
-        latest.current.status === 'uncertain'
-          ? await api.reconcile(latest.current.id)
-          : await api.send(latest.current)
-      if (result.status === 'sent' || result.status === 'partial') {
-        notify(sentMessage(result))
-        await localDeleteDraft(latest.current.id).catch(() =>
-          notify('Message sent. The local draft cache could not be cleaned up.'),
-        )
-        onSaved()
-        onClose()
-      } else {
-        notify(result.message, 'error')
-        const uncertain = { ...latest.current, status: 'uncertain' as const }
-        latest.current = uncertain
-        setDraft(uncertain)
-        await localSaveDraft(uncertain)
-        setState('Delivery unconfirmed')
-      }
+      await api.saveDraft(latest.current)
     } catch (error) {
-      notify(friendlyError(error), 'error')
-      setState('Not sent · draft preserved')
-      const saved = await api
-        .drafts()
-        .then((values) => values.find((d) => d.id === latest.current.id))
-        .catch(() => undefined)
-      if (saved?.status === 'sent') {
-        notify('Delivery confirmed.')
-        onSaved()
-        onClose()
-        return
-      }
-      if (saved?.status === 'uncertain') setState('Delivery unconfirmed')
-      if (saved?.status !== 'uncertain')
-        setSendError({
-          error: saved?.error || friendlyError(error),
-          errorKind: saved?.errorKind,
-        })
-      if (saved) {
-        latest.current = saved
-        setDraft(saved)
-        await localSaveDraft(saved).catch(() => {})
-      }
-    } finally {
+      notify('Your draft could not be saved, so it wasn’t sent. ' + friendlyError(error), 'error')
+      if (due) saves.current.schedule()
       setSending(false)
+      return
     }
+    // The draft is safe on this device: sending carries on, and reports back, after closing.
+    onSend(latest.current)
+    onSaved()
+    onClose()
   }
   const selectIdentity = (identity: Identity) => {
     if (!editor) return
@@ -529,7 +476,8 @@ export function Composer({
     setChangingFrom(true)
     try {
       const identities = await api.identities(accountId)
-      await sync.current
+      saves.current.cancel()
+      await saves.current.settled()
       // A sync already underway may have bound the draft to its original account.
       if (!alive.current || latest.current.serverId) return
       if (!identities.length) throw new Error('This account has no permitted sending identities.')
@@ -911,7 +859,7 @@ export function Composer({
                   </small>
                 )}
               </span>
-              {(shown.errorKind === 'conflict' || shown.error?.includes('another client')) && (
+              {(draft.errorKind === 'conflict' || draft.error?.includes('another client')) && (
                 <Button
                   size="small"
                   onClick={() => update({ serverId: undefined, serverFingerprint: undefined })}
@@ -919,8 +867,8 @@ export function Composer({
                   Keep both versions
                 </Button>
               )}
-              {(shown.errorKind === 'outgoingAuthentication' ||
-                shown.errorKind === 'certificate') && (
+              {(draft.errorKind === 'outgoingAuthentication' ||
+                draft.errorKind === 'certificate') && (
                 <Button
                   size="small"
                   onClick={async () => {
@@ -1070,7 +1018,8 @@ export function Composer({
             variant="danger"
             onClick={async () => {
               try {
-                await sync.current
+                saves.current.cancel()
+                await saves.current.settled()
                 await api.deleteDraft(draft.id)
                 await localDeleteDraft(draft.id)
                 onSaved()

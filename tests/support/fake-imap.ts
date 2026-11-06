@@ -142,6 +142,8 @@ export class FakeImapServer {
   modseq = 1
   ports: FakePort[] = []
   commands: string[] = []
+  /** The UIDs of each batch source download, in order. */
+  sourceBatches: { path: string; uids: number[] }[] = []
   /** Runs once before the named command; may throw to simulate a failure. */
   hooks = new Map<string, (stage: 'before' | 'after') => void>()
   private validity = 100
@@ -398,6 +400,18 @@ export class FakePort implements ImapPort {
     if (!m) return undefined
     const raw = (m.raw ??= rfc822(m.input))
     return raw.length > maxBytes ? undefined : raw
+  }
+  async sources(uids: number[], maxBytes: number) {
+    this.check('FETCH')
+    const box = this.selectedBox()
+    this.server.sourceBatches.push({ path: box.path, uids: [...uids] })
+    const result = new Map<number, Uint8Array>()
+    for (const m of box.messages.filter((x) => uids.includes(x.uid))) {
+      // Like BODY.PEEK[]: flags stay as they are.
+      const raw = (m.raw ??= rfc822(m.input))
+      if (raw.length <= maxBytes) result.set(m.uid, raw)
+    }
+    return result
   }
   async download(uid: number, part: string, maxBytes: number, truncate = false) {
     this.check('FETCH')

@@ -1,5 +1,5 @@
 import { cn } from '@inlark/ui'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { AlertCircle, Check, RefreshCw, Send } from '@inlark/ui/icons'
 import { Button, Modal, Spinner } from '@inlark/ui'
 import {
@@ -52,22 +52,32 @@ function describe(s: SubmissionSummary): { state: string; detail: string; tone: 
   }
 }
 
+/** A send that failed after its composer closed. Its draft is saved and can be reopened. */
+export type NotSent = { draft: Draft; text: string }
+
 /** Sends that still need a decision: filing retries, refused recipients, unconfirmed delivery. */
 export function SubmissionList({
   submissions,
+  notSent = [],
   accounts,
   onOpenDraft,
+  onDismissNotSent,
+  onOpenNotSent,
   notify,
 }: {
   submissions: SubmissionSummary[]
+  notSent?: NotSent[]
   accounts: Account[]
   onOpenDraft: (draft: Draft) => void
+  onDismissNotSent?: (draftId: string) => void
+  /** Opens the draft as it is now, which may have changed since the send failed. */
+  onOpenNotSent?: (draftId: string) => void
   notify: (message: string, tone?: 'error') => void
 }) {
   const [working, setWorking] = useState<Record<string, string>>({})
   const [replace, setReplace] = useState<SubmissionSummary>()
   const [dismiss, setDismiss] = useState<SubmissionSummary>()
-  if (!submissions.length) return null
+  if (!submissions.length && !notSent.length) return null
   const run = async (s: SubmissionSummary, action: string, task: () => Promise<void>) => {
     setWorking((current) => ({ ...current, [s.draftId]: action }))
     try {
@@ -182,6 +192,51 @@ export function SubmissionList({
       </>
     )
   }
+  const row = (
+    key: string,
+    accountId: string,
+    subject: string,
+    at: string,
+    icon: ReactNode,
+    text: { state: string; detail: string; tone: string },
+    buttons: ReactNode,
+  ) => {
+    const account = accounts.find((a) => a.id === accountId)
+    return (
+      <div
+        className={cn(
+          'submission flex gap-4 items-start py-3.5 px-8 [&+.submission]:border-t [&+.submission]:border-solid',
+          '[&+.submission]:border-t-border [&_time]:shrink-0 [&_time]:text-[11px] [&_time]:text-muted',
+          '@max-[680px]/mail:pl-5 @max-[680px]/mail:pr-5 submission-',
+          text.tone,
+        )}
+        key={key}
+      >
+        <span className="submission-icon flex mt-[1px] text-muted" aria-hidden="true">
+          {icon}
+        </span>
+        <div className="submission-text [&_strong]:block [&_strong]:text-[13px] [&_strong]:font-medium [&_strong]:text-foreground flex-1 min-w-0">
+          <strong>{subject || '(No subject)'}</strong>
+          <span className="submission-state flex flex-wrap items-center gap-[4px_12px] mt-[3px] text-[12px] text-secondary">
+            {text.state}
+            {account && (
+              <span className="submission-account inline-flex items-center gap-1.5 text-[11px] text-muted">
+                <AccountMark account={account} size={14} />
+                {account.name}
+              </span>
+            )}
+          </span>
+          <span className="submission-detail [overflow-wrap:anywhere] block mt-1 max-w-140 text-[11px] leading-[1.6] text-muted">
+            {text.detail}
+          </span>
+          <div className="submission-actions flex flex-wrap gap-1.5 mt-2.5">{buttons}</div>
+        </div>
+        <time dateTime={at} title={new Date(at).toLocaleString()}>
+          {shortDate(at)}
+        </time>
+      </div>
+    )
+  }
   return (
     <section
       className="submissions border-b border-solid border-b-border pb-1.5"
@@ -193,52 +248,43 @@ export function SubmissionList({
       >
         Needs attention
       </h2>
-      {submissions.map((s) => {
-        const account = accounts.find((a) => a.id === s.accountId)
-        const text = describe(s)
-        return (
-          <div
-            className={cn(
-              'submission flex gap-4 items-start py-3.5 px-8 [&+.submission]:border-t [&+.submission]:border-solid',
-              '[&+.submission]:border-t-border [&_time]:shrink-0 [&_time]:text-[11px] [&_time]:text-muted',
-              '@max-[680px]/mail:pl-5 @max-[680px]/mail:pr-5 submission-',
-              text.tone,
-            )}
-            key={s.draftId}
-          >
-            <span className="submission-icon flex mt-[1px] text-muted" aria-hidden="true">
-              {s.state === 'uncertain' ? (
-                <AlertCircle size={16} />
-              ) : s.state === 'partial' ? (
-                <Send size={16} />
-              ) : s.sentCopy === 'failed' ? (
-                <RefreshCw size={15} />
-              ) : (
-                <Check size={16} />
-              )}
-            </span>
-            <div className="submission-text [&_strong]:block [&_strong]:text-[13px] [&_strong]:font-medium [&_strong]:text-foreground flex-1 min-w-0">
-              <strong>{s.subject || '(No subject)'}</strong>
-              <span className="submission-state flex flex-wrap items-center gap-[4px_12px] mt-[3px] text-[12px] text-secondary">
-                {text.state}
-                {account && (
-                  <span className="submission-account inline-flex items-center gap-1.5 text-[11px] text-muted">
-                    <AccountMark account={account} size={14} />
-                    {account.name}
-                  </span>
-                )}
-              </span>
-              <span className="submission-detail [overflow-wrap:anywhere] block mt-1 max-w-140 text-[11px] leading-[1.6] text-muted">
-                {text.detail}
-              </span>
-              <div className="submission-actions flex flex-wrap gap-1.5 mt-2.5">{actions(s)}</div>
-            </div>
-            <time dateTime={s.at} title={new Date(s.at).toLocaleString()}>
-              {shortDate(s.at)}
-            </time>
-          </div>
-        )
-      })}
+      {notSent.map(({ draft, text }) =>
+        row(
+          draft.id,
+          draft.accountId,
+          draft.subject,
+          draft.updatedAt,
+          <AlertCircle size={16} />,
+          { state: 'Not sent', detail: text + ' Your draft is saved.', tone: 'attention' },
+          <>
+            <Button size="small" onClick={() => onOpenNotSent?.(draft.id)}>
+              Open draft
+            </Button>
+            <Button size="small" variant="ghost" onClick={() => onDismissNotSent?.(draft.id)}>
+              Dismiss
+            </Button>
+          </>,
+        ),
+      )}
+      {submissions.map((s) =>
+        row(
+          s.draftId,
+          s.accountId,
+          s.subject,
+          s.at,
+          s.state === 'uncertain' ? (
+            <AlertCircle size={16} />
+          ) : s.state === 'partial' ? (
+            <Send size={16} />
+          ) : s.sentCopy === 'failed' ? (
+            <RefreshCw size={15} />
+          ) : (
+            <Check size={16} />
+          ),
+          describe(s),
+          actions(s),
+        ),
+      )}
       <Modal
         open={!!replace}
         onOpenChange={(open) => {
@@ -286,7 +332,7 @@ export function SubmissionList({
         description={
           'inlark will stop checking whether “' +
           (dismiss?.subject || '(No subject)') +
-          '” was delivered and remove its unconfirmed draft from this device. Look in Sent first if you’re unsure.'
+          '” was delivered and remove its unconfirmed draft, here and on the server. Look in Sent first if you’re unsure.'
         }
       >
         <div

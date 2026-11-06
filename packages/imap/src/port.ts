@@ -31,6 +31,11 @@ export interface ImapPort {
   /** The complete message, or undefined if it no longer exists or exceeds `maxBytes`. */
   source(uid: number, maxBytes: number): Promise<Uint8Array | undefined>
   /**
+   * Complete messages at several UIDs of the selected mailbox in one UID FETCH, by UID. Uses
+   * BODY.PEEK[], so nothing is marked \Seen. Missing messages and any over `maxBytes` are left out.
+   */
+  sources(uids: number[], maxBytes: number): Promise<Map<number, Uint8Array>>
+  /**
    * One body part, with transfer encoding decoded and text converted to UTF-8. Larger parts
    * fail unless `truncate` is set, which returns the first `maxBytes` (for previews).
    */

@@ -2,6 +2,7 @@ import { openCryptoWorker } from './crypto-open'
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   protocol,
   net,
@@ -378,8 +379,44 @@ else {
       app.quit()
     })
 }
-app.on('before-quit', () => {
+/** How long quitting waits for a message that is still sending. */
+const quitSendWaitMs = 30_000
+let quitWaiting = false
+app.on('before-quit', (event) => {
   quitting = true
+  const sends = quitWaiting ? undefined : service?.sendsSettled()
+  if (sends) {
+    // The composer closes on Send, so a quit often comes right after it. Let the message
+    // finish (never for long); a second quit request goes straight through.
+    event.preventDefault()
+    quitWaiting = true
+    const options = {
+      type: 'info' as const,
+      title: 'inlark',
+      message: 'Finishing sending…',
+      detail: 'inlark will quit as soon as your message has been sent.',
+      buttons: ['Quit now'],
+    }
+    // Only say so if it takes a moment; a quick finish quits without a flash of dialog.
+    const notice = setTimeout(() => {
+      const parent = window && !window.isDestroyed() && window.isVisible() ? window : undefined
+      void (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options)).then(
+        () => app.quit(),
+      )
+    }, 500)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    void Promise.race([
+      sends,
+      new Promise((resolve) => (timer = setTimeout(resolve, quitSendWaitMs))),
+    ]).then(() => {
+      clearTimeout(timer)
+      clearTimeout(notice)
+      app.quit()
+    })
+    return
+  }
+  // An open “Finishing sending…” box must never keep the app from exiting.
+  if (quitWaiting) setTimeout(() => app.exit(0), 5000).unref()
   service?.dispose()
 })
 app.on('window-all-closed', () => {
