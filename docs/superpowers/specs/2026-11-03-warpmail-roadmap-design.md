@@ -55,7 +55,7 @@ Protocols today: JMAP, IMAP and SMTP with passwords only. **No Google or Microso
 | 2   | Split inbox per project                            | Designed; build session ready         |
 | 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; build after split inbox     |
 | 4   | Draft improvement (AI)                             | Designed; build when API key is ready |
-| 5   | Read status, per recipient                         | Direction agreed, Cloudflare Worker   |
+| 5   | Read status, per recipient                         | Designed; send test comes first       |
 | 6   | Undo send                                          | Not started                           |
 | 7   | Snippets (reusable text)                           | Not started                           |
 | 8   | Snooze                                             | Not started                           |
@@ -240,7 +240,15 @@ Follow-up: the app's background process still freezes for 1–5 s now and then (
   - **No signal:** for example, images blocked
   - A reply always counts as opened.
 
-**Open:** whether tracking is on for every message or chosen per message. How sending one copy per recipient interacts with Gmail's Sent folder and threading (risk for the design pass to test). Encrypted messages are probably excluded.
+**Which emails are tracked (2026-11-05):** on by default for emails to people, with an off switch in the composer ("Read status: on", one click to turn off), like the follow-up switch. Automated addresses are never tracked.
+
+**Where it shows (2026-11-05):** in the conversation, under each sent email, a status per recipient (for example "Opened 2× · last today 3:12 pm" or "No signal yet"), plus a small eye marker in the list for emails someone opened. No desktop notifications.
+
+**How opens are counted:** one count per image load, with loads less than a minute apart merged, automatic loads (Apple Mail) excluded, and Khyati's own Sent copy carrying no image. Caveats to show in small print: Gmail recipients often show 1× even after several opens (Google caches the image); blocked images mean "No signal" even if read; several devices count separately; forwarded copies count as the original recipient. "Opened or not" and the first-open time are the reliable signals; the count is a rough guide.
+
+**Colleagues too (2026-11-05):** emails to Khyati's own company are tracked like any other, with the composer switch to turn it off.
+
+**Full design:** [2026-11-05-read-status-design.md](2026-11-05-read-status-design.md). Sending one copy per recipient is tested against Gmail first; encrypted emails are never tracked; the Worker stores no IP addresses and deletes records after 90 days.
 
 ### 6–16. Later features
 
