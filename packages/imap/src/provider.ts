@@ -33,6 +33,7 @@ import {
   messageIds,
   metadataQuery,
   parseBlobId,
+  automationOf,
   parseHeaderLines,
   partSection,
   previewText,
@@ -209,6 +210,7 @@ export class ImapProvider implements MailProvider {
   private sources = new SourceCache()
   /** Messages that could not be downloaded ahead this session; they load on open instead. */
   private prefetchSkipped = new Set<string>()
+  private headerSkipped = new Set<string>()
   /** When the user last opened mail; background downloads hold back briefly after it. */
   private lastOpened = 0
   private state: 'connected' | 'offline' | 'authentication' = 'connected'
@@ -728,41 +730,50 @@ export class ImapProvider implements MailProvider {
     )
     if (!inbox) return
     let written = false
-    while (!this.disposed && this.pending === 'none') {
-      const rows = await this.index.uncheckedHeaders(
-        this.accountId,
-        inbox.id,
-        this.timing.headerBatch,
-      )
-      if (!rows.length) break
-      const done = await this.run(async (port) => {
-        const selected = await port.select(inbox.path)
-        const valid = rows.filter((row) => row.uidValidity === selected.uidValidity)
-        if (!valid.length) return false
-        const fetched = await port.fetch(uidSet(valid.map((row) => row.uid)), {
-          headers: ['list-id', 'precedence', 'auto-submitted'],
-        })
-        const byUid = new Map(fetched.map((m) => [m.uid, parseHeaderLines(m.headers)]))
-        await this.index.setAutomationHeaders(
+    try {
+      while (!this.disposed && this.pending === 'none') {
+        const unchecked = await this.index.uncheckedHeaders(
           this.accountId,
           inbox.id,
-          valid.map((row) => {
-            const headers = byUid.get(row.uid) || {}
-            return {
-              uid: row.uid,
-              listId: headers['list-id'] || null,
-              precedence: headers['precedence'] || null,
-              autoSubmitted: headers['auto-submitted'] || null,
-            }
-          }),
+          this.timing.headerBatch + this.headerSkipped.size,
         )
-        return true
-      }, true)
-      // A batch that wrote nothing (stale UIDVALIDITY) would repeat forever; the next sync resets it.
-      if (!done) break
-      written = true
+        const rows = unchecked
+          .filter((row) => !this.headerSkipped.has(row.uidValidity + ':' + row.uid))
+          .slice(0, this.timing.headerBatch)
+        if (!rows.length) break
+        try {
+          const done = await this.run(async (port) => {
+            const selected = await port.select(inbox.path)
+            const valid = rows.filter((row) => row.uidValidity === selected.uidValidity)
+            if (!valid.length) return false
+            const fetched = await port.fetch(uidSet(valid.map((row) => row.uid)), {
+              headers: ['list-id', 'precedence', 'auto-submitted'],
+            })
+            const byUid = new Map(fetched.map((m) => [m.uid, parseHeaderLines(m.headers)]))
+            await this.index.setAutomationHeaders(
+              this.accountId,
+              inbox.id,
+              selected.uidValidity,
+              valid.map((row) => ({ uid: row.uid, ...automationOf(byUid.get(row.uid) || {}) })),
+            )
+            return true
+          }, true)
+          // Nothing written (stale UIDVALIDITY): the next sync resets the folder.
+          if (!done) break
+          written = true
+        } catch (error) {
+          if (
+            this.disposed ||
+            isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline')
+          )
+            throw error
+          // The server refused this batch: leave it alone for the rest of the session.
+          for (const row of rows) this.headerSkipped.add(row.uidValidity + ':' + row.uid)
+        }
+      }
+    } finally {
+      if (written) this.emit({ type: 'changed', accountId: this.accountId, historical: true })
     }
-    if (written) this.emit({ type: 'changed', accountId: this.accountId, historical: true })
   }
   /** Indexes one batch of older mail. Returns whether any folder still has older mail. */
   private async historicalBatch(): Promise<boolean> {

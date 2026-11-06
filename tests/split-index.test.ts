@@ -8,6 +8,7 @@ import {
   openInProcessIndex,
   SCHEMA_VERSION,
   SqliteMetadataIndex,
+  UNCHECKED_HEADERS_SQL,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import { tabCountsQuery } from '../apps/desktop/src/main/imap-index/split-sql'
 import type { FolderListing, MetadataIndex, NewMessage } from '@inlark/imap'
@@ -93,7 +94,7 @@ describe('schema v4', () => {
     ])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
+    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person; DROP INDEX messages_unchecked_headers;
       ALTER TABLE messages DROP COLUMN from_email;
       ALTER TABLE messages DROP COLUMN list_id;
       ALTER TABLE messages DROP COLUMN precedence;
@@ -147,7 +148,7 @@ describe('schema v4', () => {
     await index.upsertMessages('a', [message(box, 1)])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
+    db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person; DROP INDEX messages_unchecked_headers;
       ALTER TABLE messages DROP COLUMN from_email;
       ALTER TABLE messages DROP COLUMN list_id;
       ALTER TABLE messages DROP COLUMN precedence;
@@ -247,7 +248,7 @@ describe('schema v4', () => {
       { uid: 3, uidValidity: '1' },
       { uid: 2, uidValidity: '1' },
     ])
-    await index.setAutomationHeaders('a', box, [
+    await index.setAutomationHeaders('a', box, '1', [
       { uid: 3, listId: '<news.example>', precedence: null, autoSubmitted: null },
       { uid: 2, listId: null, precedence: null, autoSubmitted: null },
     ])
@@ -261,6 +262,32 @@ describe('schema v4', () => {
       { uid: 3, headers_checked: 1, automated: 1, list_id: '<news.example>' },
       { uid: 4, headers_checked: 1, automated: 0, list_id: null },
     ])
+  })
+
+  it('only stores headers for the stated UIDVALIDITY', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [message(box, 1)])
+    await index.setAutomationHeaders('a', box, '2', [
+      { uid: 1, listId: '<x>', precedence: null, autoSubmitted: null },
+    ])
+    expect(await index.uncheckedHeaders('a', box, 10)).toEqual([{ uid: 1, uidValidity: '1' }])
+  })
+
+  it('reads unchecked headers through a partial index', async () => {
+    const box = await inbox()
+    await index.upsertMessages('a', [message(box, 1)])
+    await index.close()
+    const db = new DatabaseSync(path)
+    try {
+      const plan = db.prepare('EXPLAIN QUERY PLAN ' + UNCHECKED_HEADERS_SQL).all('a', box, 10) as {
+        detail: string
+      }[]
+      expect(plan.map((row) => row.detail).join('\n')).toMatch(
+        /USING (COVERING )?INDEX messages_unchecked_headers/,
+      )
+    } finally {
+      db.close()
+    }
   })
 
   it('drops participants with their message', async () => {

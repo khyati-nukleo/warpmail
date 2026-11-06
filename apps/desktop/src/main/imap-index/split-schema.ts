@@ -113,5 +113,7 @@ export function migrateToV4(db: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS participants_domain ON participants (account_id, domain);
     DROP INDEX IF EXISTS messages_mailbox_sender;
     CREATE INDEX IF NOT EXISTS messages_mailbox_person
-      ON messages (account_id, mailbox_id, thread_id, received_ms, automated, from_email, seen);`)
+      ON messages (account_id, mailbox_id, thread_id, received_ms, automated, from_email, seen);
+    CREATE INDEX IF NOT EXISTS messages_unchecked_headers
+      ON messages (account_id, mailbox_id, uid) WHERE headers_checked = 0;`)
 }

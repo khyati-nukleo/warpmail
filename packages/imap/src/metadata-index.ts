@@ -60,6 +60,7 @@ export interface MetadataIndex {
   setAutomationHeaders(
     accountId: string,
     mailboxId: string,
+    uidValidity: string,
     rows: {
       uid: number
       listId: string | null

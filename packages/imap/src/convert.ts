@@ -171,6 +171,15 @@ export const metadataQuery = {
   ],
 }
 
+/** The headers that mark mail as automated, from parsed header lines. */
+export function automationOf(headers: Record<string, string>) {
+  return {
+    listId: headers['list-id'] || null,
+    precedence: headers['precedence'] || null,
+    autoSubmitted: headers['auto-submitted'] || null,
+  }
+}
+
 export function toNewMessage(
   fetched: FetchedMessage,
   location: { mailboxId: string; uidValidity: string },
@@ -202,11 +211,7 @@ export function toNewMessage(
     preview: '',
     bodyStructure: fetched.bodyStructure,
     unsubscribe: parseUnsubscribe(headers['list-unsubscribe'], headers['list-unsubscribe-post']),
-    automation: {
-      listId: headers['list-id'] || null,
-      precedence: headers['precedence'] || null,
-      autoSubmitted: headers['auto-submitted'] || null,
-    },
+    automation: automationOf(headers),
   }
 }
 

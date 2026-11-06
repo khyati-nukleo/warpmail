@@ -61,6 +61,9 @@ const methodTable: Record<keyof MetadataIndex, true> = {
 export const indexMethods = Object.keys(methodTable) as (keyof MetadataIndex)[]
 
 export const SCHEMA_VERSION = 4
+export const UNCHECKED_HEADERS_SQL = `SELECT uid, uid_validity AS uidValidity FROM messages
+  WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
+  ORDER BY uid DESC LIMIT ?`
 const MAX_REFERENCES = 50
 
 const migrations: (string | ((db: DatabaseSync) => void))[] = [
@@ -882,9 +885,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
 
   uncheckedHeaders(accountId: string, mailboxId: string, limit: number) {
     return this.all<{ uid: number; uidValidity: string }>(
-      `SELECT uid, uid_validity AS uidValidity FROM messages
-        WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
-        ORDER BY uid DESC LIMIT ?`,
+      UNCHECKED_HEADERS_SQL,
       accountId,
       mailboxId,
       limit,
@@ -894,6 +895,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   setAutomationHeaders(
     accountId: string,
     mailboxId: string,
+    uidValidity: string,
     rows: {
       uid: number
       listId: string | null
@@ -909,10 +911,12 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           unsubscribe: string | null
         }>(
           `SELECT id, from_email, unsubscribe FROM messages
-            WHERE account_id = ? AND mailbox_id = ? AND uid = ? AND headers_checked = 0`,
+            WHERE account_id = ? AND mailbox_id = ? AND uid = ? AND uid_validity = ?
+              AND headers_checked = 0`,
           accountId,
           mailboxId,
           row.uid,
+          uidValidity,
         )
         if (existing)
           this.storeAutomation(existing.id, existing.from_email, existing.unsubscribe, row)

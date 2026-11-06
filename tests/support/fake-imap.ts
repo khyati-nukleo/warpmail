@@ -144,6 +144,8 @@ export class FakeImapServer {
   modseq = 1
   ports: FakePort[] = []
   commands: string[] = []
+  /** Every FETCH query, in order. */
+  fetchQueries: { range: string; query: FetchQuery }[] = []
   /** The UIDs of each batch source download, in order. */
   sourceBatches: { path: string; uids: number[] }[] = []
   /** Runs once before the named command; may throw to simulate a failure. */
@@ -354,6 +356,7 @@ export class FakePort implements ImapPort {
       .map((m) => m.uid)
   }
   async fetch(range: string, query: FetchQuery, changedSince?: string): Promise<FetchedMessage[]> {
+    this.server.fetchQueries.push({ range, query })
     this.check('FETCH')
     const box = this.selectedBox()
     const max = Math.max(0, ...box.messages.map((m) => m.uid))
