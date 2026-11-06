@@ -316,7 +316,7 @@ SQL shape (the implementer writes it; these are the decisions):
 **Files:**
 
 - Create: `apps/desktop/src/renderer/src/split/tab-model.ts`
-- Modify: `apps/desktop/src/renderer/src/main.tsx` (`RouteSearch.tab`, `validateSearch`, last-location restore), `apps/desktop/src/renderer/src/shortcuts.tsx`
+- Modify: `apps/desktop/src/renderer/src/main.tsx` (`RouteSearch.tab`, `validateSearch`), `apps/desktop/src/renderer/src/shortcuts.tsx`
 - Test: `tests/split-tabs.test.ts`, `tests/shortcuts.test.ts`
 
 **Interfaces:**
@@ -328,7 +328,7 @@ SQL shape (the implementer writes it; these are the decisions):
   - `tabForShortcut(n: number, entries: TabEntry[]): string | undefined` (n = 1–9)
   - `adjacentTab(current: string, entries: TabEntry[], step: 1 | -1): string` (wraps around)
   - `moveTab(tabs: SplitTab[], id: string, toIndex: number): SplitTab[]` (index among user tabs; clamps)
-  - `RouteSearch.tab?: string`, kept by `validateSearch` and by the last-location restore list.
+  - `RouteSearch.tab?: string`, kept by `validateSearch` so back and forward follow tabs. The last-location restore on launch does **not** restore `tab`: Inbox always opens on launch (spec decision 4).
   - Shortcut section `'Tabs'` (after `'Go to'`) with ids `goTab1`…`goTab9` (defaults `Mod+1`…`Mod+9`; labels `Inbox tab`, `Important tab`, `Tab 3`…`Tab 9`), `nextTab` (`Control+Tab`), `previousTab` (`Control+Shift+Tab`), `addToTab` (section `'Organize'`, label `Add sender to tab…`, default `Shift+T`).
 
 - [ ] **Step 1: Write failing tests:**
