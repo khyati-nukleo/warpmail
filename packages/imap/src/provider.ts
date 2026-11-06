@@ -165,6 +165,23 @@ function onePerEmail<T extends { mailboxId: string; emailId?: string }>(
   }
   return rows.filter((row) => !row.emailId || best.get(row.emailId) === row)
 }
+/**
+ * Every copy of an email that also sits in the Drafts folder is a draft. Gmail lists drafts
+ * saved by some clients (Superhuman) with only `\Seen`, so the `\Draft` flag alone misses them.
+ */
+function withDraftFlag<
+  T extends { id: string; mailboxId: string; emailId?: string; flags: string[] },
+>(rows: T[], drafts: IndexedMailbox | undefined): T[] {
+  if (!drafts) return rows
+  const unsent = new Set(
+    rows.filter((row) => row.mailboxId === drafts.id).map((row) => row.emailId || row.id),
+  )
+  return rows.map((row) =>
+    unsent.has(row.emailId || row.id) && !row.flags.some((f) => f.toLowerCase() === '\\draft')
+      ? { ...row, flags: [...row.flags, '\\Draft'] }
+      : row,
+  )
+}
 export { SourceCache }
 
 export class ImapProvider implements MailProvider {
@@ -896,9 +913,12 @@ export class ImapProvider implements MailProvider {
       limit,
       ...(after ? { after } : { offset: position }),
     })
-    const threads = await this.index.threadMessages(
-      this.accountId,
-      page.items.map((i) => i.threadId),
+    const threads = withDraftFlag(
+      await this.index.threadMessages(
+        this.accountId,
+        page.items.map((i) => i.threadId),
+      ),
+      await this.roleBox('drafts'),
     )
     // Gmail shows one email at several locations; the summary lists each email once. Actions
     // never use these: they resolve every location from the index (`conversationMetadata`).
@@ -1036,7 +1056,10 @@ export class ImapProvider implements MailProvider {
     threadId: string,
     options?: { background?: boolean },
   ): Promise<Message[]> {
-    const rows = await this.index.threadMessages(this.accountId, [threadId])
+    const rows = withDraftFlag(
+      await this.index.threadMessages(this.accountId, [threadId]),
+      await this.roleBox('drafts'),
+    )
     if (!rows.length)
       throw new ProviderError('notFound', 'This conversation is no longer available.')
     const messages = await this.withBodies(account, rows, true, options?.background)
