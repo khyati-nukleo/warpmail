@@ -23,6 +23,7 @@ export interface RouteSearch {
   thread?: string
   threadAccount?: string
   q?: string
+  tab?: string
 }
 const rootRoute = createRootRoute()
 const indexRoute = createRoute({
@@ -32,7 +33,7 @@ const indexRoute = createRoute({
     Object.fromEntries(
       Object.entries(input).filter(
         ([key, value]) =>
-          ['view', 'account', 'folder', 'thread', 'threadAccount', 'q'].includes(key) &&
+          ['view', 'account', 'folder', 'thread', 'threadAccount', 'q', 'tab'].includes(key) &&
           typeof value === 'string',
       ),
     ),

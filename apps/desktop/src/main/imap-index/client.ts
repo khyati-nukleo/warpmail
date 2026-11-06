@@ -10,6 +10,15 @@ export interface IndexPort {
 }
 
 type Reply = { id: number; result?: unknown; error?: { message: string } }
+/** Sent by the worker around a schema update, outside any call. */
+type Update = { updating: boolean; ms?: number }
+
+export interface WorkerIndexOptions {
+  /** A schema update is taking a while (`true`), or has ended (`false`, with its duration). */
+  onUpdating?: (updating: boolean, ms?: number) => void
+  /** How long an update runs before it is reported; quick ones never are. */
+  noticeAfterMs?: number
+}
 type Args<K extends keyof MetadataIndex> = Parameters<MetadataIndex[K]>
 
 /** Forwards every index call to the worker that owns the SQLite database. */
@@ -21,9 +30,14 @@ export class WorkerMetadataIndex implements MetadataIndex {
   >()
   private failure: Error | undefined
   private closing: Promise<void> | undefined
+  private notice: { timer?: ReturnType<typeof setTimeout>; shown: boolean } | undefined
 
-  constructor(private readonly port: IndexPort) {
-    port.on('message', (reply: Reply) => {
+  constructor(
+    private readonly port: IndexPort,
+    private readonly options: WorkerIndexOptions = {},
+  ) {
+    port.on('message', (reply: Reply | Update) => {
+      if ('updating' in reply) return this.updating(reply)
       const call = this.pending.get(reply.id)
       if (!call) return
       this.pending.delete(reply.id)
@@ -36,7 +50,27 @@ export class WorkerMetadataIndex implements MetadataIndex {
     )
   }
 
+  private updating({ updating, ms }: Update) {
+    if (updating) {
+      const notice: { timer?: ReturnType<typeof setTimeout>; shown: boolean } = { shown: false }
+      const show = () => {
+        notice.shown = true
+        this.options.onUpdating?.(true)
+      }
+      this.notice = notice
+      const delay = this.options.noticeAfterMs ?? 2000
+      if (delay > 0) notice.timer = setTimeout(show, delay)
+      else show()
+      return
+    }
+    const notice = this.notice
+    this.notice = undefined
+    clearTimeout(notice?.timer)
+    if (notice?.shown) this.options.onUpdating?.(false, ms)
+  }
+
   private fail(error: Error) {
+    if (this.notice) this.updating({ updating: false })
     this.failure ??= error
     for (const call of this.pending.values()) call.reject(this.failure)
     this.pending.clear()
@@ -105,6 +139,12 @@ export class WorkerMetadataIndex implements MetadataIndex {
   setPreview(...args: Args<'setPreview'>) {
     return this.call('setPreview', args)
   }
+  uncheckedHeaders(...args: Args<'uncheckedHeaders'>) {
+    return this.call('uncheckedHeaders', args)
+  }
+  setAutomationHeaders(...args: Args<'setAutomationHeaders'>) {
+    return this.call('setAutomationHeaders', args)
+  }
   messages(...args: Args<'messages'>) {
     return this.call('messages', args)
   }
@@ -122,6 +162,12 @@ export class WorkerMetadataIndex implements MetadataIndex {
   }
   conversations(...args: Args<'conversations'>) {
     return this.call('conversations', args)
+  }
+  tabCounts(...args: Args<'tabCounts'>) {
+    return this.call('tabCounts', args)
+  }
+  addressesSeen(...args: Args<'addressesSeen'>) {
+    return this.call('addressesSeen', args)
   }
   counts(...args: Args<'counts'>) {
     return this.call('counts', args)

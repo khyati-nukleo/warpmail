@@ -1,3 +1,5 @@
+import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
+import type { AddressSeen, RuleSuggestion } from './split-suggest'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -56,6 +58,8 @@ export interface Account {
   limits?: AccountLimits
   /** Present while the local index is still catching up with the server. */
   indexing?: IndexingProgress
+  /** The local index is being updated for a new version of the app, which happens once. */
+  updatingIndex?: boolean
 }
 /** An address the provider delivers to this account and lets it send from. */
 export interface Alias {
@@ -182,6 +186,8 @@ export interface MailQuery {
   before?: string
   hasAttachment?: boolean
   unread?: boolean
+  /** Inbox split: `important` or a user tab id. Only applies to the inbox view. */
+  tab?: string
 }
 export interface QueryPage {
   items: Conversation[]
@@ -247,6 +253,9 @@ export interface Settings {
    * pressed in turn, such as `['Mod+K']` or `['G', 'I']`; an empty list turns a shortcut off.
    */
   shortcuts?: Record<string, string[][]>
+  /** Inbox split tabs, in display order. */
+  splitTabs?: SplitTab[]
+  important?: ImportantSettings
 }
 export const defaultSettings: Settings = {
   theme: 'dark',
@@ -450,6 +459,10 @@ export interface ProviderEvent {
   /** Set for changes found by historical indexing, which must never notify. */
   historical?: boolean
 }
+/** A query as providers see it: the main process has already resolved `tab` into `split`. */
+export interface ProviderQuery extends MailQuery {
+  split?: SplitScope
+}
 export interface MailProvider {
   readonly capabilities: ProviderCapabilities
   connect(): Promise<Account[]>
@@ -466,10 +479,17 @@ export interface MailProvider {
   identities(account: Account): Promise<Identity[]>
   query(
     account: Account,
-    query: MailQuery,
+    query: ProviderQuery,
     position?: number,
     limit?: number,
   ): Promise<ProviderPage>
+  /** Conversations and unread emails per tab scope, for the inbox. Omitted by providers without tabs. */
+  tabCounts?(
+    account: Account,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>>
+  /** Recent From and To addresses containing `term`, for rule suggestions. Omitted without tabs. */
+  addressesSeen?(account: Account, term: string): Promise<AddressSeen[]>
   /** `background` loads run behind the user's own work, such as reading ahead to nearby threads. */
   conversation(
     account: Account,
@@ -678,6 +698,16 @@ export interface DesktopMailAPI {
   mailboxes(accountId: string): Promise<Mailbox[]>
   identities(accountId: string): Promise<Identity[]>
   query(query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage>
+  /** Unread per tab (`important` and each tab id) across connected IMAP accounts. */
+  tabCounts(accountId?: string): Promise<Record<string, number>>
+  /** Inbox conversations matching these rules, across IMAP accounts. */
+  tabMatchCount(rules: string[]): Promise<number>
+  /** Rules to offer for the rules box line being typed, leaving out those in `exclude`. */
+  ruleSuggestions(text: string, exclude: string[]): Promise<RuleSuggestion[]>
+  /** Saves the tabs and Important lists to a file the user picks; false when cancelled. */
+  exportInbox(): Promise<boolean>
+  /** Reads an inbox export the user picks (it isn't applied); undefined when cancelled. */
+  importInbox(): Promise<InboxExport | undefined>
   /** `prefetch` marks a read-ahead load that must never delay the thread being opened. */
   conversation(
     accountId: string,

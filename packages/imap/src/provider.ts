@@ -16,6 +16,11 @@ import {
   type Mailbox,
   type MailProvider,
   type MailQuery,
+  type ProviderQuery,
+  type SplitScope,
+  suggestionDays,
+  tabApplies,
+  type AddressSeen,
   type Message,
   type MessageChanges,
   type OutgoingMessage,
@@ -30,6 +35,8 @@ import {
   messageIds,
   metadataQuery,
   parseBlobId,
+  automationOf,
+  parseHeaderLines,
   partSection,
   previewText,
   textParts,
@@ -86,6 +93,8 @@ interface Timing {
   fullReconcileMs: number
   initialBatch: number
   historicalBatch: number
+  /** Inbox messages whose automation headers are read per background task. */
+  headerBatch: number
   previews: number
   /** Grace period for a server that files its own Sent copy after submission. */
   sentCopyGraceMs: number
@@ -98,6 +107,11 @@ interface Timing {
   prefetchMaxSize: number
   /** Largest message kept on disk; beyond it only the readable parts load, on open. */
   storedMaxSize: number
+  /**
+   * Header backfill batches per sync pass: after an upgrade the backfill can be long, and
+   * recent bodies download after it. The rest waits for the next pass.
+   */
+  headerBatches: number
   /** Messages and bytes per background download, so the user's own commands wait little. */
   prefetchBatch: number
   prefetchBatchBytes: number
@@ -111,6 +125,8 @@ const defaultTiming: Timing = {
   fullReconcileMs: 15 * 60_000,
   initialBatch: 200,
   historicalBatch: 500,
+  headerBatch: 500,
+  headerBatches: 4,
   previews: 30,
   sentCopyGraceMs: 1500,
   prefetchDays: 30,
@@ -219,6 +235,7 @@ export class ImapProvider implements MailProvider {
   private sources = new SourceCache()
   /** Messages that could not be downloaded ahead this session; they load on open instead. */
   private prefetchSkipped = new Set<string>()
+  private headerSkipped = new Set<string>()
   /** When the user last opened mail; background downloads hold back briefly after it. */
   private lastOpened = 0
   private state: 'connected' | 'offline' | 'authentication' = 'connected'
@@ -524,6 +541,7 @@ export class ImapProvider implements MailProvider {
         await this.syncPass(scope)
         failures = 0
         this.setState('connected')
+        await this.checkHeaders()
         // Recent mail first, so opening it needs no round trip; then older metadata.
         await this.prefetchBodies()
         let more = true
@@ -726,6 +744,63 @@ export class ImapProvider implements MailProvider {
     }
     return ids
   }
+  /**
+   * Reads List-Id, Precedence and Auto-Submitted for Inbox mail indexed before they were
+   * fetched with the rest, so Important can leave out lists and automated mail there too.
+   * Batches run as short background tasks and stop as soon as a sync is requested.
+   */
+  private async checkHeaders() {
+    const inbox = (await this.index.listMailboxes(this.accountId)).find(
+      (b) => !b.noSelect && b.uidValidity && isInbox(b.path),
+    )
+    if (!inbox) return
+    let written = false
+    try {
+      for (let batch = 0; batch < this.timing.headerBatches; batch++) {
+        if (this.disposed || this.pending !== 'none') break
+        const unchecked = await this.index.uncheckedHeaders(
+          this.accountId,
+          inbox.id,
+          this.timing.headerBatch + this.headerSkipped.size,
+        )
+        const rows = unchecked
+          .filter((row) => !this.headerSkipped.has(row.uidValidity + ':' + row.uid))
+          .slice(0, this.timing.headerBatch)
+        if (!rows.length) break
+        try {
+          const done = await this.run(async (port) => {
+            const selected = await port.select(inbox.path)
+            const valid = rows.filter((row) => row.uidValidity === selected.uidValidity)
+            if (!valid.length) return false
+            const fetched = await port.fetch(uidSet(valid.map((row) => row.uid)), {
+              headers: ['list-id', 'precedence', 'auto-submitted'],
+            })
+            const byUid = new Map(fetched.map((m) => [m.uid, parseHeaderLines(m.headers)]))
+            await this.index.setAutomationHeaders(
+              this.accountId,
+              inbox.id,
+              selected.uidValidity,
+              valid.map((row) => ({ uid: row.uid, ...automationOf(byUid.get(row.uid) || {}) })),
+            )
+            return true
+          }, true)
+          // Nothing written (stale UIDVALIDITY): the next sync resets the folder.
+          if (!done) break
+          written = true
+        } catch (error) {
+          if (
+            this.disposed ||
+            isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline')
+          )
+            throw error
+          // The server refused this batch: leave it alone for the rest of the session.
+          for (const row of rows) this.headerSkipped.add(row.uidValidity + ':' + row.uid)
+        }
+      }
+    } finally {
+      if (written) this.emit({ type: 'changed', accountId: this.accountId, historical: true })
+    }
+  }
   /** Indexes one batch of older mail. Returns whether any folder still has older mail. */
   private async historicalBatch(): Promise<boolean> {
     const boxes = await this.index.listMailboxes(this.accountId)
@@ -889,10 +964,44 @@ export class ImapProvider implements MailProvider {
       filter: excluded.length ? { excludeMailboxIds: excluded.map((b) => b.id) } : {},
     }
   }
-  async query(account: Account, query: MailQuery, position = 0, limit = 50): Promise<ProviderPage> {
+  async tabCounts(
+    _account: Account,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>> {
+    const inbox = (await this.index.listMailboxes(this.accountId)).find(
+      (b) => !b.noSelect && isInbox(b.path),
+    )
+    if (!inbox)
+      return Object.fromEntries(
+        Object.keys(scopes).map((id) => [id, { conversations: 0, unread: 0 }]),
+      )
+    return this.index.tabCounts(this.accountId, inbox.id, scopes)
+  }
+  /** Addresses on the last 30 days of mail outside Junk and Trash, for rule suggestions. */
+  async addressesSeen(_account: Account, term: string): Promise<AddressSeen[]> {
+    const boxes = await this.index.listMailboxes(this.accountId)
+    const roles = rolesByPath(this.review(boxes))
+    const ids = boxes
+      .filter((b) => !b.noSelect && !['junk', 'trash'].includes(roles.get(b.path) || ''))
+      .map((b) => b.id)
+    return this.index.addressesSeen(
+      this.accountId,
+      ids,
+      Date.now() - suggestionDays * 86_400_000,
+      term,
+    )
+  }
+  async query(
+    account: Account,
+    query: ProviderQuery,
+    position = 0,
+    limit = 50,
+  ): Promise<ProviderPage> {
     const boxes = await this.index.listMailboxes(this.accountId)
     const scope = await this.scope(query, boxes)
     if (!scope) return { items: [], total: 0 }
+    const search = !!(query.text || query.from || query.to || query.subject)
+    const inboxOnly = tabApplies(query) && scope.filter.mailboxIds?.length === 1
     const filter: ConversationFilter = {
       ...scope.filter,
       ...(query.view === 'starred' ? { flagged: true } : {}),
@@ -900,9 +1009,10 @@ export class ImapProvider implements MailProvider {
       ...(query.hasAttachment ? { hasAttachment: true } : {}),
       ...(query.after ? { after: query.after } : {}),
       ...(query.before ? { before: query.before } : {}),
+      ...(query.split && inboxOnly ? { split: query.split } : {}),
     }
     let incomplete = scope.boxes.some((b) => !b.complete)
-    if (query.text || query.from || query.to || query.subject) {
+    if (search) {
       const found = await this.search(query, scope.boxes)
       filter.ids = found.ids
       incomplete = found.incomplete

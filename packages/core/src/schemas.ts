@@ -122,6 +122,7 @@ export const querySchema = z.object({
   before: z.string().max(40).optional(),
   hasAttachment: z.boolean().optional(),
   unread: z.boolean().optional(),
+  tab: z.string().min(1).max(64).optional(),
 })
 export const actionSchema = z.enum([
   'archive',
@@ -194,6 +195,22 @@ export const sendDraftSchema = draftSchema
     'Add valid recipients before sending.',
   )
   .refine((d) => !/[\r\n]/.test(d.subject), 'The subject must be a single line.')
+/** The inbox split's limits, shared by saved settings and the export file. */
+export const splitTabNameSchema = z.string().trim().min(1).max(60)
+export const splitRulesSchema = z.array(z.string().max(320)).max(500)
+export const splitTabsSchema = <T extends z.ZodType>(tab: T) => z.array(tab).max(50)
+export const subjectWordsSchema = z.array(z.string().max(100)).max(20)
+export const importantListSchema = <T extends z.ZodType>(entry: T) => z.array(entry).max(500)
+export const senderSchema = z.string().max(320)
+export const splitTabSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: splitTabNameSchema,
+  rules: splitRulesSchema,
+})
+export const alwaysSenderSchema = z.object({
+  address: senderSchema,
+  words: subjectWordsSchema.optional(),
+})
 export const settingsSchema = z.object({
   theme: z.enum(['dark', 'light', 'system']),
   remoteImages: z.boolean(),
@@ -207,6 +224,13 @@ export const settingsSchema = z.object({
   afterArchive: z.enum(['next', 'previous', 'list']).optional(),
   shortcuts: z
     .record(z.string().max(64), z.array(z.array(z.string().min(1).max(64)).min(1).max(4)).max(16))
+    .optional(),
+  splitTabs: splitTabsSchema(splitTabSchema).optional(),
+  important: z
+    .object({
+      always: importantListSchema(alwaysSenderSchema),
+      never: importantListSchema(senderSchema),
+    })
     .optional(),
 })
 export const ipcSchemas = {
@@ -264,6 +288,11 @@ export const ipcSchemas = {
   mailboxes: z.tuple([id]),
   identities: z.tuple([id]),
   query: z.tuple([querySchema, z.record(z.string(), z.number().int().nonnegative()).optional()]),
+  tabCounts: z.tuple([id.optional()]),
+  tabMatchCount: z.tuple([z.array(z.string().max(320)).max(500)]),
+  ruleSuggestions: z.tuple([z.string().max(320), z.array(z.string().max(320)).max(500)]),
+  exportInbox: z.tuple([]),
+  importInbox: z.tuple([]),
   conversation: z.tuple([
     id,
     id,

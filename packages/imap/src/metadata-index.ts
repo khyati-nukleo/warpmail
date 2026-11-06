@@ -1,4 +1,4 @@
-import type { Address } from '@inlark/core'
+import type { Address, AddressSeen, SplitScope } from '@inlark/core'
 
 /**
  * Persistent IMAP metadata, injected into the provider. The desktop app implements this with
@@ -50,6 +50,24 @@ export interface MetadataIndex {
   /** Moves an existing ID to a new location after the server confirmed the move. */
   relocate(accountId: string, id: string, location: MessageLocation): Promise<void>
   setPreview(accountId: string, id: string, preview: string): Promise<void>
+  /** Messages of a mailbox whose List-Id, Precedence and Auto-Submitted were never read, newest first. */
+  uncheckedHeaders(
+    accountId: string,
+    mailboxId: string,
+    limit: number,
+  ): Promise<{ uid: number; uidValidity: string }[]>
+  /** Stores the fetched automation headers, marks them checked and recomputes `automated`. */
+  setAutomationHeaders(
+    accountId: string,
+    mailboxId: string,
+    uidValidity: string,
+    rows: {
+      uid: number
+      listId: string | null
+      precedence: string | null
+      autoSubmitted: string | null
+    }[],
+  ): Promise<void>
 
   /** Messages by ID, in no particular order. Unknown IDs are skipped. */
   messages(accountId: string, ids: string[]): Promise<IndexedMessage[]>
@@ -76,6 +94,25 @@ export interface MetadataIndex {
     filter: ConversationFilter,
     page: { limit: number; offset?: number; after?: ConversationCursor },
   ): Promise<{ items: ConversationRow[]; total: number }>
+  /**
+   * Conversations and unread emails per tab, in one query. `conversations` counts threads with an
+   * inbox message in the tab; `unread` counts unseen inbox emails, each server identity once.
+   */
+  tabCounts(
+    accountId: string,
+    inboxId: string,
+    scopes: Record<string, SplitScope>,
+  ): Promise<Record<string, { conversations: number; unread: number }>>
+  /**
+   * From and To addresses on mail received after `sinceMs` in these mailboxes, whose address or
+   * name contains `term` (lowercase; empty for all), most emails first, for rule suggestions.
+   */
+  addressesSeen(
+    accountId: string,
+    mailboxIds: string[],
+    sinceMs: number,
+    term: string,
+  ): Promise<AddressSeen[]>
   /** Total and unread message counts stored for the account, for progress reporting. */
   counts(accountId: string): Promise<{ messages: number }>
 
@@ -187,6 +224,8 @@ export interface NewMessage extends MessageLocation {
   /** The server's BODYSTRUCTURE, kept to find body parts and attachments later. */
   bodyStructure?: BodyPart
   unsubscribe?: { url: string; oneClick: boolean }
+  /** Present when List-Id, Precedence and Auto-Submitted were fetched for this message. */
+  automation?: { listId: string | null; precedence: string | null; autoSubmitted: string | null }
 }
 
 export interface IndexedMessage extends NewMessage {
@@ -220,6 +259,8 @@ export interface ConversationFilter {
   /** ISO dates, inclusive lower and exclusive upper bound on `receivedAt`. */
   after?: string
   before?: string
+  /** Only conversations in this tab. Needs exactly one `mailboxIds` entry: the inbox. */
+  split?: SplitScope
 }
 
 export interface ConversationCursor {

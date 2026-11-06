@@ -2,6 +2,17 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlit
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { isAutomatedMessage, type AddressSeen, type SplitScope } from '@inlark/core'
+import {
+  firstEmail,
+  INSERT_PARTICIPANT_SQL,
+  migrateToV4,
+  needsV4Again,
+  participantsOf,
+  registerSplitFunctions,
+  storedAutomation,
+} from './split-schema'
+import { addressesSeenQuery, splitFilter, tabCountQuery } from './split-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -39,12 +50,16 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   knownUids: true,
   relocate: true,
   setPreview: true,
+  uncheckedHeaders: true,
+  setAutomationHeaders: true,
   messages: true,
   messagesAt: true,
   threadMessages: true,
   resolveThread: true,
   findByMessageId: true,
   conversations: true,
+  tabCounts: true,
+  addressesSeen: true,
   counts: true,
   getMeta: true,
   setMeta: true,
@@ -54,10 +69,13 @@ const methodTable: Record<keyof MetadataIndex, true> = {
 }
 export const indexMethods = Object.keys(methodTable) as (keyof MetadataIndex)[]
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
+export const UNCHECKED_HEADERS_SQL = `SELECT uid, uid_validity AS uidValidity FROM messages
+  WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
+  ORDER BY uid DESC LIMIT ?`
 const MAX_REFERENCES = 50
 
-const migrations = [
+const migrations: (string | ((db: DatabaseSync) => void))[] = [
   `CREATE TABLE mailboxes (
     id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL,
@@ -166,6 +184,7 @@ const migrations = [
   CREATE INDEX IF NOT EXISTS sources_age ON sources (account_id, received_ms, size);
   CREATE INDEX IF NOT EXISTS messages_mailbox_received
     ON messages (account_id, mailbox_id, received_ms);`,
+  migrateToV4,
 ]
 
 interface MailboxRow {
@@ -307,7 +326,8 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   private readonly statements = new Map<string, StatementSync>()
   private closed = false
 
-  constructor(path: string) {
+  /** `onMigrate` runs before an existing file's schema is upgraded, which can take a while. */
+  constructor(path: string, options: { onMigrate?: () => void } = {}) {
     prepareFile(path)
     const db = new DatabaseSync(path, { timeout: 5000 })
     try {
@@ -326,10 +346,15 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY;
           PRAGMA secure_delete = ON`,
       )
-      for (let from = version; from < SCHEMA_VERSION; from++) {
+      // A pre-release v4 file has the v4 version but not all of v4: it runs v4 again.
+      const start = version === SCHEMA_VERSION && needsV4Again(db) ? SCHEMA_VERSION - 1 : version
+      if (start > 0 && start < SCHEMA_VERSION) options.onMigrate?.()
+      for (let from = start; from < SCHEMA_VERSION; from++) {
         db.exec('BEGIN IMMEDIATE')
         try {
-          db.exec(migrations[from]!)
+          const migration = migrations[from]!
+          if (typeof migration === 'function') migration(db)
+          else db.exec(migration)
           db.exec('PRAGMA user_version = ' + (from + 1))
           db.exec('COMMIT')
         } catch (error) {
@@ -341,6 +366,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       db.close()
       throw error
     }
+    registerSplitFunctions(db)
     this.db = db
   }
 
@@ -593,6 +619,14 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     found.sort((a, b) => (a.seq ?? Infinity) - (b.seq ?? Infinity) || (a.id < b.id ? -1 : 1))
     const thread = found[0]?.id ?? this.newThread(accountId)
     for (const { id: loser } of found.slice(1)) {
+      // Participants (and, through triggers, `thread_participants`) follow their messages.
+      this.run(
+        `UPDATE participants SET thread_id = ? WHERE message_seq IN (
+          SELECT seq FROM messages WHERE account_id = ? AND thread_id = ?)`,
+        thread,
+        accountId,
+        loser,
+      )
       this.run(
         'UPDATE messages SET thread_id = ? WHERE account_id = ? AND thread_id = ?',
         thread,
@@ -637,8 +671,13 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         this.checkLocation(accountId, message, validities)
         const seen = hasFlag(message.flags, '\\seen')
         const flagged = hasFlag(message.flags, '\\flagged')
-        const existing = this.get<{ id: string }>(
-          `SELECT id FROM messages
+        const existing = this.get<{
+          id: string
+          headers_checked: number
+          from_email: string | null
+          unsubscribe: string | null
+        }>(
+          `SELECT id, headers_checked, from_email, unsubscribe FROM messages
             WHERE account_id = ? AND mailbox_id = ? AND uid = ? AND uid_validity = ?`,
           accountId,
           message.mailboxId,
@@ -659,6 +698,9 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
             message.preview,
             existing.id,
           )
+          const automation = message.automation
+          if (automation && existing.headers_checked === 0)
+            this.storeAutomation(existing.id, existing.from_email, existing.unsubscribe, automation)
           // Backfilling the server identity can join locations whose headers lacked Message-ID.
           if (message.emailId)
             this.assignThread(
@@ -683,12 +725,16 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           message.emailId,
         )
         const id = randomUUID()
-        this.run(
+        const fromEmail = firstEmail(message.from)
+        const automation = message.automation && storedAutomation(message.automation)
+        const info = this.run(
           `INSERT INTO messages (id, account_id, mailbox_id, uid_validity, uid, modseq, message_id,
             in_reply_to, refs, thread_id, subject, from_addr, to_addr, cc_addr, bcc_addr, reply_to,
             received_at, received_ms, sent_at, size, flags, seen, flagged, has_attachment, preview,
-            body_structure, unsubscribe, email_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            body_structure, unsubscribe, email_id, from_email, list_id, precedence, auto_submitted,
+            headers_checked, automated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?)`,
           id,
           accountId,
           message.mailboxId,
@@ -717,7 +763,22 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           message.bodyStructure ? json(message.bodyStructure) : null,
           message.unsubscribe ? json(message.unsubscribe) : null,
           message.emailId ?? null,
+          fromEmail,
+          automation?.listId ?? null,
+          automation?.precedence ?? null,
+          automation?.autoSubmitted ?? null,
+          automation ? 1 : 0,
+          isAutomatedMessage({
+            fromEmail: fromEmail ?? undefined,
+            unsubscribe: message.unsubscribe,
+            ...automation,
+          })
+            ? 1
+            : 0,
         )
+        const seq = Number(info.lastInsertRowid)
+        for (const p of participantsOf(message))
+          this.run(INSERT_PARTICIPANT_SQL, accountId, seq, threadId, p.address, p.domain, p.role)
         return id
       })
     })
@@ -820,6 +881,65 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     })
   }
 
+  private storeAutomation(
+    id: string,
+    fromEmail: string | null,
+    unsubscribe: unknown,
+    headers: { listId: string | null; precedence: string | null; autoSubmitted: string | null },
+  ) {
+    const automation = storedAutomation(headers)
+    this.run(
+      `UPDATE messages SET list_id = ?, precedence = ?, auto_submitted = ?,
+        headers_checked = 1, automated = ? WHERE id = ?`,
+      automation.listId,
+      automation.precedence,
+      automation.autoSubmitted,
+      isAutomatedMessage({ fromEmail: fromEmail ?? undefined, unsubscribe, ...automation }) ? 1 : 0,
+      id,
+    )
+  }
+
+  uncheckedHeaders(accountId: string, mailboxId: string, limit: number) {
+    return this.all<{ uid: number; uidValidity: string }>(
+      UNCHECKED_HEADERS_SQL,
+      accountId,
+      mailboxId,
+      limit,
+    )
+  }
+
+  setAutomationHeaders(
+    accountId: string,
+    mailboxId: string,
+    uidValidity: string,
+    rows: {
+      uid: number
+      listId: string | null
+      precedence: string | null
+      autoSubmitted: string | null
+    }[],
+  ) {
+    this.tx(() => {
+      for (const row of rows) {
+        const existing = this.get<{
+          id: string
+          from_email: string | null
+          unsubscribe: string | null
+        }>(
+          `SELECT id, from_email, unsubscribe FROM messages
+            WHERE account_id = ? AND mailbox_id = ? AND uid = ? AND uid_validity = ?
+              AND headers_checked = 0`,
+          accountId,
+          mailboxId,
+          row.uid,
+          uidValidity,
+        )
+        if (existing)
+          this.storeAutomation(existing.id, existing.from_email, existing.unsubscribe, row)
+      }
+    })
+  }
+
   setPreview(accountId: string, id: string, preview: string) {
     this.run(
       'UPDATE messages SET preview = ? WHERE account_id = ? AND id = ?',
@@ -898,6 +1018,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   /** The grouped, filtered conversation set, or `null` when the filter cannot match. */
   private conversationSource(accountId: string, filter: ConversationFilter) {
     const mailboxIds = filter.mailboxIds && [...new Set(filter.mailboxIds)]
+    if (filter.split && mailboxIds?.length !== 1) throw new Error('A tab needs the inbox scope.')
     if (mailboxIds?.length === 0 || filter.ids?.length === 0) return null
     const where: string[] = []
     const params: SQLInputValue[] = []
@@ -940,10 +1061,19 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       where.push('m.received_ms < ?')
       params.push(time(filter.before))
     }
+    // Applied to the grouped set, so totals and both kinds of paging work as for any filter.
+    const split = filter.split && splitFilter(filter.split, accountId, mailboxIds![0]!, filter)
+    if (split === null) return null
+    if (split?.where) {
+      where.push(split.where.sql)
+      params.push(...split.where.params)
+    }
+    if (split?.having) params.push(...split.having.params)
     // With a single max() aggregate, SQLite takes the bare `seq` from the row holding the max.
     return {
       sql: `SELECT m.thread_id AS t, max(m.received_ms) AS r, m.seq AS s FROM ${from}
-        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} GROUP BY m.thread_id`,
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} GROUP BY m.thread_id
+        ${split?.having ? 'HAVING ' + split.having.sql : ''}`,
       params,
     }
   }
@@ -1002,6 +1132,29 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     if (!source) return []
     return this.all<{ detail: string }>('EXPLAIN QUERY PLAN ' + source.sql, ...source.params).map(
       (row) => row.detail,
+    )
+  }
+
+  /** One statement per tab, so no tab's rules can make another's statement too large. */
+  tabCounts(accountId: string, inboxId: string, scopes: Record<string, SplitScope>) {
+    // Without a prototype, so a tab id such as `__proto__` is a key like any other.
+    const counts: Record<string, { conversations: number; unread: number }> = Object.create(null)
+    for (const [key, scope] of Object.entries(scopes)) {
+      const query = tabCountQuery(accountId, inboxId, scope)
+      const row = query && this.get<{ c: number; u: number }>(query.sql, ...query.params)
+      counts[key] = { conversations: row?.c ?? 0, unread: row?.u ?? 0 }
+    }
+    return counts
+  }
+
+  addressesSeen(accountId: string, mailboxIds: string[], sinceMs: number, term: string) {
+    const query = addressesSeenQuery(accountId, mailboxIds, sinceMs, term)
+    if (!query) return []
+    return this.all<{ email: string; name: string | null; count: number }>(
+      query.sql,
+      ...query.params,
+    ).map((row): AddressSeen =>
+      row.name ? { ...row, name: row.name } : { email: row.email, count: row.count },
     )
   }
 

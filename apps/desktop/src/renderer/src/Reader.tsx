@@ -32,6 +32,7 @@ import {
   Lock,
   Copy,
   ExternalLink,
+  UserRound,
 } from '@inlark/ui/icons'
 import { Tooltip } from '@base-ui/react/tooltip'
 import { Button, IconButton, Dropdown, MenuItem, Spinner } from '@inlark/ui'
@@ -629,6 +630,11 @@ interface ReaderProps {
   /** Set when the conversation comes from a mailing list that can be left. */
   unsubscribe?: UnsubscribeState
   onUnsubscribe: () => void
+  /** "Add sender to tab…", when tabs can take this conversation's sender. */
+  onAddToTab?: () => void
+  /** "Always show in Important…" and "Never show in Important" for this conversation's sender. */
+  alwaysShow?: { label: string; run: () => void }
+  neverShow?: { label: string; run: () => void }
   /** Messages are list summaries while the full conversation loads. */
   loading?: boolean
   onUnlock?: () => void
@@ -717,6 +723,9 @@ export function Reader({
   onMailto,
   unsubscribe,
   onUnsubscribe,
+  onAddToTab,
+  alwaysShow,
+  neverShow,
   loading = false,
   onUnlock,
   onOpenEncryption,
@@ -851,6 +860,25 @@ export function Reader({
             Move to folder
             <ShortcutHint id="move" className="menu-shortcut ml-auto" />
           </MenuItem>
+          {onAddToTab && (
+            <MenuItem onClick={onAddToTab}>
+              <UserRound size={14} />
+              Add sender to tab…
+              <ShortcutHint id="addToTab" className="menu-shortcut ml-auto" />
+            </MenuItem>
+          )}
+          {alwaysShow && (
+            <MenuItem onClick={alwaysShow.run}>
+              <Star size={14} />
+              {alwaysShow.label}
+            </MenuItem>
+          )}
+          {neverShow && (
+            <MenuItem onClick={neverShow.run}>
+              <MailMinus size={14} />
+              {neverShow.label}
+            </MenuItem>
+          )}
           {offersAction(view, 'spam') && (
             <MenuItem onClick={() => onAction('spam')} disabled={!!moveLimit}>
               <ShieldX size={14} />

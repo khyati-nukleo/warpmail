@@ -130,14 +130,19 @@ export function Dropdown({
   children,
   container,
   className,
+  open,
+  onOpenChange,
 }: {
   trigger: React.ReactElement
   children: React.ReactNode
   container?: React.RefObject<HTMLElement | null>
   className?: string
+  /** Opens the menu from code, for example on right-click; leave out to open from the trigger. */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }) {
   return (
-    <Menu.Root>
+    <Menu.Root open={open} onOpenChange={onOpenChange}>
       <Menu.Trigger render={trigger} />
       <Menu.Portal container={container}>
         {/* Above dialogs such as the composer; the popup's own z-index can't escape this. */}

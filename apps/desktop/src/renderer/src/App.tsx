@@ -107,6 +107,9 @@ import {
   useShortcuts,
 } from './shortcuts'
 import { emptyListState } from './empty-states'
+import { TabDialogs } from './split/TabEditor'
+import { TabEmptyState, TabRow } from './split/TabRow'
+import { useSplitInbox } from './split/useSplitInbox'
 import { AccountMark } from './AccountMark'
 import { lockVault, useEncryption } from './encryption-ui'
 import { useUnlock } from './encryption-actions'
@@ -316,6 +319,31 @@ export function App() {
         },
       ),
   })
+  const split = useSplitInbox({
+    settings,
+    accounts,
+    route,
+    go: (next) => go(next),
+    inboxUnread: account ? mailboxCounts.byAccount[account.id] || 0 : mailboxCounts.unread,
+    notify,
+    showToast: setToast,
+    saveSettings: (patch) => savePreferences(patch),
+    addToTab: {
+      available: view !== 'drafts' && (!!route.thread || !!focused),
+      // Only called from handlers, once `thread` below has its value.
+      conversation: () =>
+        !route.thread
+          ? conversations.find((c) => c.key === focused)
+          : route.threadAccount
+            ? {
+                accountId: route.threadAccount,
+                id: route.thread,
+                messages: thread.data,
+                partial: thread.isPlaceholderData,
+              }
+            : undefined,
+    },
+  })
   const currentFolder = boxes.data?.find((b) => b.id === route.folder)
   const query: MailQuery = useMemo(
     () => ({
@@ -324,9 +352,10 @@ export function App() {
       accountId: accounts.some((a) => a.id === route.account) ? route.account : undefined,
       mailboxId: route.folder,
       text: route.q || undefined,
+      tab: split.tabParam,
       ...filters,
     }),
-    [view, route.account, route.folder, route.q, filters, accounts],
+    [view, route.account, route.folder, route.q, filters, accounts, split.tabParam],
   )
   const queryId = JSON.stringify(query)
   useEffect(() => {
@@ -349,6 +378,13 @@ export function App() {
     [mail.data],
   )
   const total = mail.data?.pages[0]?.total || 0
+  // Once after an upgrade, an account's index may take a while to update before mail can load.
+  const updatingIndex = accounts.some(
+    (a) => a.updatingIndex && (!route.account || a.id === route.account),
+  )
+  // An account updating its index can't answer yet; the list explains why instead.
+  const mailUnavailable =
+    (mail.isError || mail.data?.pages.some((p) => p.failedAccounts.length)) && !updatingIndex
   // Accounts still indexing may be missing older mail, so their results are never the whole story.
   const incomplete = useMemo(
     () =>
@@ -442,7 +478,8 @@ export function App() {
     filterOpen ||
     !!folderDialog ||
     !!moveTargets ||
-    !!confirmAction
+    !!confirmAction ||
+    split.dialogOpen
   const go = (next: Partial<typeof route>, reset = true) => {
     if (reset) {
       setSelected(new Set())
@@ -469,7 +506,7 @@ export function App() {
           .map((c) => ({ accountId: c.accountId, threadId: c.id }))
   const refresh = async () => {
     await Promise.all(
-      ['mail', 'thread', 'mailboxes', 'drafts', 'submissions'].map((key) =>
+      ['mail', 'thread', 'mailboxes', 'drafts', 'submissions', 'tabCounts'].map((key) =>
         queryClient.invalidateQueries({ queryKey: [key] }),
       ),
     )
@@ -1170,6 +1207,7 @@ export function App() {
       goSpam: { run: () => go({ view: 'junk' }) },
       goTrash: { run: () => go({ view: 'trash' }) },
       goAll: { run: () => go({ view: 'all' }) },
+      ...split.shortcutHandlers,
     },
     !blocked,
   )
@@ -1183,10 +1221,14 @@ export function App() {
   )
   const savePreferences = async (patch: Partial<typeof settings>) => {
     try {
-      const next = await api.settings({ ...settings, ...patch })
+      // The cache, so a save queued before the last one landed doesn't undo it.
+      const latest = queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings ?? settings
+      const next = await api.settings({ ...latest, ...patch })
       queryClient.setQueryData<Bootstrap>(['bootstrap'], (old) => old && { ...old, settings: next })
+      return true
     } catch (e) {
       fail(e)
+      return false
     }
   }
   const commandTarget = view !== 'drafts' && (route.thread || selected.size || focused)
@@ -1400,6 +1442,7 @@ export function App() {
       keywords: 'go open view',
       run: () => go({ view: 'all' }),
     },
+    ...split.commands,
     ...(accounts.length > 1
       ? [
           {
@@ -1409,7 +1452,7 @@ export function App() {
             icon: Inbox,
             keywords: 'unified switch account',
             checked: !account,
-            run: () => go({ view: 'inbox' }),
+            run: () => go({ view: 'inbox', tab: split.tabParam }),
           },
           ...accounts.map((a) => ({
             id: 'account-' + a.id,
@@ -1419,7 +1462,7 @@ export function App() {
             account: a,
             keywords: a.email + ' switch account',
             checked: account?.id === a.id,
-            run: () => go({ view: 'inbox', account: a.id }),
+            run: () => go({ view: 'inbox', account: a.id, tab: split.tabParam }),
           })),
         ]
       : []),
@@ -1707,6 +1750,9 @@ export function App() {
               onMailto={onMailto}
               unsubscribe={unsubscribeState}
               onUnsubscribe={() => void unsubscribe()}
+              onAddToTab={split.addSender}
+              alwaysShow={split.important?.alwaysShow}
+              neverShow={split.important?.neverShow}
               onUnlock={() => void unlock()}
               onOpenEncryption={() => openSettings('encryption')}
             />
@@ -1757,7 +1803,7 @@ export function App() {
                       <div className="menu-label py-1.75 px-2.5 text-[11px] text-muted">
                         Mail accounts
                       </div>
-                      <MenuItem onClick={() => go({ view, q: route.q })}>
+                      <MenuItem onClick={() => go({ view, q: route.q, tab: split.tabParam })}>
                         <Inbox size={15} />
                         <span
                           className={cn(
@@ -1778,7 +1824,9 @@ export function App() {
                       {accounts.map((item) => (
                         <MenuItem
                           key={item.id}
-                          onClick={() => go({ view, q: route.q, account: item.id })}
+                          onClick={() =>
+                            go({ view, q: route.q, account: item.id, tab: split.tabParam })
+                          }
                         >
                           <AccountMark account={item} size={28} />
                           <span
@@ -1859,6 +1907,7 @@ export function App() {
                 )}
               </div>
             </div>
+            {split.visible && <TabRow {...split.row} />}
             {searchOpen && (
               <form
                 className={cn(
@@ -2164,7 +2213,7 @@ export function App() {
                 onClear={() => setDraftSelected(new Set())}
               />
             )}
-            {(mail.isError || mail.data?.pages.some((p) => p.failedAccounts.length)) && (
+            {mailUnavailable && (
               <div
                 className={cn(
                   'connection-banner [&_button]:ml-auto [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent',
@@ -2243,6 +2292,14 @@ export function App() {
                   </EmptyState>
                 )}
               </div>
+            ) : !conversations.length && updatingIndex ? (
+              <EmptyState
+                icon={RefreshCw}
+                title="Updating the mail index…"
+                description="This happens once after an update. Your mail appears when it’s done."
+              >
+                <Spinner />
+              </EmptyState>
             ) : !conversations.length && mail.isLoading ? (
               <div
                 className={cn(
@@ -2342,6 +2399,8 @@ export function App() {
                 <EmptyState icon={Mail} title="Loading mail">
                   <Spinner />
                 </EmptyState>
+              ) : split.empty && !hasSearchFilters ? (
+                <TabEmptyState {...split.empty} unreadOnly={!!filters.unread} />
               ) : (
                 <EmptyState
                   {...emptyListState(view, {
@@ -2387,6 +2446,7 @@ export function App() {
                     { accountId: conversation.accountId, threadId: conversation.id },
                   ])
                 }
+                panel={split.panel}
               />
             )}
             <footer
@@ -2600,6 +2660,7 @@ export function App() {
           setMoveTargets(undefined)
         }}
       />
+      <TabDialogs {...split.dialogs} />
       <ConfirmActionDialog
         action={confirmAction}
         count={allMatching ? total : targets().length}

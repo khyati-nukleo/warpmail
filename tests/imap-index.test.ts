@@ -461,6 +461,7 @@ describe('SQLite metadata index', () => {
     const db = new DatabaseSync(path)
     db.exec(
       `DROP TABLE sources; DROP INDEX messages_mailbox_received; DROP INDEX messages_email_id;
+        DROP INDEX messages_mailbox_person;
         ALTER TABLE messages DROP COLUMN email_id; PRAGMA user_version = 1`,
     )
     db.close()

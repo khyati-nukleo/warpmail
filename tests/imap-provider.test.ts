@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { ProviderError, type Account, type ImapConnectionConfig } from '../packages/core/src'
 import { ImapProvider, limitsFor, imapFlowOptions, ImapFlowPort } from '../packages/imap/src'
@@ -565,6 +566,134 @@ describe('IMAP indexing and reading', () => {
       ).length,
     ).toBe(1)
     expect(server.commandPorts).toHaveLength(2)
+  })
+})
+
+describe('IMAP header backfill for inbox mail', () => {
+  const check = (p: ImapProvider) => (p as any).checkHeaders() as Promise<void>
+  const important = { kind: 'important', always: [], never: [] } as const
+  const headerFetches = () =>
+    server.fetchQueries.filter((f) => f.query.headers?.includes('list-id') && !f.query.envelope)
+  async function uncheckedInbox(options: Parameters<typeof provider>[0] = {}, count = 3) {
+    server.deliver('INBOX', {
+      messageId: 'news@x',
+      date: at(1),
+      from: [{ name: 'News', email: 'news@shop.example' }],
+      headers: { 'List-Id': '<news.shop.example>', 'X-Other': 'ignored' },
+    })
+    for (let n = 2; n <= count; n++)
+      server.deliver('INBOX', { messageId: 'p' + n + '@x', date: at(n), from: [alex] })
+    const file = join(directory, 'backfill.sqlite')
+    const index = openInProcessIndex(file)
+    const p = await connected({ index, ...options })
+    await sync(p)
+    const unchecked = async () => {
+      // Mail indexed before schema v4 has no checked headers.
+      const db = new DatabaseSync(file)
+      db.exec('UPDATE messages SET headers_checked = 0, list_id = NULL, automated = 0')
+      db.close()
+      server.fetchQueries.length = 0
+    }
+    await unchecked()
+    const [inbox] = (await index.listMailboxes((p as any).accountId)).filter(
+      (b) => b.path === 'INBOX',
+    )
+    const count_ = async () =>
+      (
+        await index.conversations(
+          (p as any).accountId,
+          { mailboxIds: [inbox!.id], split: important },
+          { limit: 50 },
+        )
+      ).items.length
+    return {
+      p,
+      important: count_,
+      reset: unchecked,
+      left: async () => (await index.uncheckedHeaders((p as any).accountId, inbox!.id, 100)).length,
+    }
+  }
+  it('fetches only the three headers once and drops lists from Important', async () => {
+    const { p, important } = await uncheckedInbox()
+    expect(await important()).toBe(3)
+    const changed = vi.fn()
+    p.subscribe((e) => e.type === 'changed' && changed(e))
+    await check(p)
+    expect(await important()).toBe(2)
+    expect(headerFetches().map((f) => f.query)).toEqual([
+      { headers: ['list-id', 'precedence', 'auto-submitted'] },
+    ])
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ historical: true }))
+    const before = server.commands.length
+    await check(p)
+    expect(server.commands.slice(before)).toEqual([])
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+  it('works through several batches, newest first', async () => {
+    const { p, important, left } = await uncheckedInbox({ timing: { headerBatch: 2 } }, 5)
+    await check(p)
+    expect(headerFetches().map((f) => f.range)).toEqual(['4:5', '2:3', '1'])
+    expect(await left()).toBe(0)
+    expect(await important()).toBe(4)
+  })
+  it('checks a few batches per pass, so recent bodies still download early', async () => {
+    const { p, left } = await uncheckedInbox({ timing: { headerBatch: 1, headerBatches: 2 } }, 5)
+    await check(p)
+    expect(headerFetches().map((f) => f.range)).toEqual(['5', '4'])
+    expect(await left()).toBe(3)
+    await check(p)
+    expect(headerFetches().map((f) => f.range)).toEqual(['5', '4', '3', '2'])
+  })
+  it('marks a message that vanished from the server as checked', async () => {
+    const { p, left } = await uncheckedInbox()
+    const box = server.box('INBOX')
+    box.messages = box.messages.filter((m) => m.uid !== 2)
+    await check(p)
+    expect(await left()).toBe(0)
+  })
+  it('skips rows of another UIDVALIDITY', async () => {
+    const { p, left } = await uncheckedInbox()
+    server.box('INBOX').uidValidity += 1
+    await check(p)
+    expect(headerFetches()).toEqual([])
+    expect(await left()).toBe(3)
+  })
+  it('stops when a sync is requested', async () => {
+    const { p, important } = await uncheckedInbox()
+    p.requestSync('inbox')
+    await check(p)
+    expect(await important()).toBe(3)
+  })
+  it('does not retry a refused batch and lets the rest of the loop go on', async () => {
+    const { p, left } = await uncheckedInbox({ timing: { headerBatch: 2 } }, 4)
+    const refuse = () => {
+      server.hooks.set('FETCH:before', refuse)
+      throw new ProviderError('command', 'Refused.')
+    }
+    server.hooks.set('FETCH:before', refuse)
+    await check(p)
+    expect(headerFetches()).toHaveLength(2)
+    expect(await left()).toBe(4)
+    await check(p)
+    expect(headerFetches()).toHaveLength(2)
+  })
+  it('passes connection errors on to the sync loop', async () => {
+    const { p } = await uncheckedInbox()
+    server.hooks.set('FETCH:before', () => {
+      throw new ProviderError('network', 'Dropped.')
+    })
+    await expect(check(p)).rejects.toMatchObject({ code: 'network' })
+  })
+  it('runs from the sync loop', async () => {
+    const { p, important, reset } = await uncheckedInbox({
+      background: true,
+      timing: { reconcileMs: 60_000, sentCopyGraceMs: 0, previews: 0 },
+    })
+    await reset()
+    expect(await important()).toBe(3)
+    p.requestSync('inbox')
+    await vi.waitFor(async () => expect(await important()).toBe(2))
   })
 })
 

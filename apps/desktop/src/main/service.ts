@@ -21,6 +21,7 @@ import {
   type Alias,
   type AliasInput,
   type Settings,
+  type InboxExport,
   type ConnectInput,
   type ConnectionCheck,
   type ConnectionConfig,
@@ -45,12 +46,28 @@ import {
   type ServerSettings,
   type SubmissionSummary,
   type Message,
+  type AddressSeen,
+  type RuleSuggestion,
+  suggestionTerm,
 } from '@inlark/core'
 import { JmapProvider } from '@inlark/jmap'
 import { publicFetch } from './public-fetch'
 import { remoteImageData } from './remote-image'
 import { SenderAvatarResolver, rasterType } from './sender-avatar'
 import { planMutation, safeUndoUpdates, undoForUpdated, type UndoEntry } from './mail-mutations'
+import {
+  countScopes,
+  checkedSplitSettings,
+  exportInboxFile,
+  importInboxFile,
+  isImap,
+  ruleSuggestionsFrom,
+  rulesScope,
+  sumMatches,
+  sumUnread,
+  tabPlan,
+  type TabCounts,
+} from './split-inbox'
 import { JsonStore, encryptSecret, decryptSecret, secureStorageAvailable } from './storage'
 
 export type Connection = {
@@ -168,6 +185,8 @@ export type ProviderFactory = (input: {
   /** Where this connection may keep local data, removed when it is disconnected. */
   directory: string
   readAttachment: (id: string) => Promise<Uint8Array>
+  /** The connection's local index is being updated after an upgrade (see `updatingIndex`). */
+  onIndexUpdating?: (updating: boolean, ms?: number) => void
 }) => MailProvider
 export interface ServiceOptions {
   providers?: ProviderFactory
@@ -262,7 +281,10 @@ export class MailService {
   async init() {
     await this.store.init()
     await this.encryption.init()
-    this.settings = { ...defaultSettings, ...(await this.store.read('settings', defaultSettings)) }
+    this.settings = checkedSplitSettings({
+      ...defaultSettings,
+      ...(await this.store.read('settings', defaultSettings)),
+    })
     this.connections = await this.store.read<Connection[]>('connections', [], {
       version: CONNECTIONS_VERSION,
       migrate: migrateConnections,
@@ -543,6 +565,10 @@ export class MailService {
       temporary,
       directory: join(this.store.directory, 'index', id),
       readAttachment: this.readStagedAttachment,
+      onIndexUpdating: (updating, ms) => {
+        if (!updating && ms !== undefined) this.log('index-updated', Math.round(ms) + ' ms')
+        this.patchAccounts(id, { updatingIndex: updating || undefined })
+      },
     })
   }
   discover = async (email: string): Promise<DiscoveryResult> => {
@@ -921,16 +947,22 @@ export class MailService {
       )
     })
   query = async (query: MailQuery, cursor?: Record<string, number>): Promise<QueryPage> => {
+    const tab = tabPlan(this.settings, this.accounts, query)
     const accounts = this.accounts.filter(
-      (a) => (!query.accountId || query.accountId === a.id) && (!cursor || a.id in cursor),
+      (a) =>
+        (!query.accountId || query.accountId === a.id) &&
+        (!cursor || a.id in cursor) &&
+        (!tab || isImap(a)),
     )
-    if (!accounts.length) return { items: [], total: 0, failedAccounts: [] }
+    if (!accounts.length || (tab && 'empty' in tab))
+      return { items: [], total: 0, failedAccounts: [] }
+    const sent = tab && 'split' in tab ? { ...query, split: tab.split } : query
     const settled = await Promise.allSettled(
       accounts.map(async (a) => ({
         accountId: a.id,
         position: cursor?.[a.id] || 0,
         page: await this.guard(a.id, (p, account) =>
-          p.query(account, query, cursor?.[a.id] || 0, 50),
+          p.query(account, sent, cursor?.[a.id] || 0, 50),
         ),
       })),
     )
@@ -944,6 +976,43 @@ export class MailService {
       .filter((_, i) => settled[i].status === 'rejected')
       .map((a) => a.id)
     return result
+  }
+  tabCounts = async (accountId?: string): Promise<Record<string, number>> => {
+    const scopes = countScopes(this.settings, this.accounts)
+    return sumUnread(
+      scopes,
+      await this.askTabs(accountId, (p, a) => p.tabCounts?.(a, scopes) ?? Promise.resolve({})),
+    )
+  }
+  tabMatchCount = async (rules: string[]): Promise<number> =>
+    sumMatches(
+      await this.askTabs(
+        undefined,
+        (p, a) =>
+          p.tabCounts?.(a, { draft: rulesScope(rules, this.accounts) }) ?? Promise.resolve({}),
+      ),
+    )
+  ruleSuggestions = async (text: string, exclude: string[]): Promise<RuleSuggestion[]> => {
+    const term = suggestionTerm(text)
+    if (term === undefined) return []
+    const seen = await this.askTabs(
+      undefined,
+      (p, a) => p.addressesSeen?.(a, term) ?? Promise.resolve([] as AddressSeen[]),
+    )
+    return ruleSuggestionsFrom(text, exclude, this.accounts, seen)
+  }
+  exportInbox = (): Promise<boolean> => exportInboxFile(this.settings)
+  importInbox = (): Promise<InboxExport | undefined> => importInboxFile()
+  /** Each connected IMAP account's answer for the split inbox; an account that fails is left out. */
+  private async askTabs<T = TabCounts>(
+    accountId: string | undefined,
+    ask: (p: MailProvider, a: Account) => Promise<T>,
+  ): Promise<T[]> {
+    const accounts = this.accounts.filter(
+      (a) => isImap(a) && (!accountId || a.id === accountId) && this.providers.has(a.connectionId),
+    )
+    const settled = await Promise.allSettled(accounts.map((a) => this.guard(a.id, ask)))
+    return settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value as T] : []))
   }
   /**
    * Runs one read-plan-write cycle at a time per account. Each cycle checks the server state it

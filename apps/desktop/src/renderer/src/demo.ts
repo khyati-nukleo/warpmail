@@ -2,6 +2,15 @@ import {
   accountKey,
   conversationFromMessages,
   defaultSettings,
+  isAutomatedAddress,
+  resolveSplitScope,
+  suggestRules,
+  type AddressSeen,
+  inboxExport,
+  parseInboxExport,
+  ruleMatches,
+  tabApplies,
+  type SplitScope,
   folderRoles,
   mergePages,
   nextAccountColor,
@@ -344,7 +353,39 @@ function matches(m: Message, q: MailQuery): boolean {
   if (q.hasAttachment && !m.hasAttachment) return false
   if (q.after && m.receivedAt < q.after) return false
   if (q.before && m.receivedAt > q.before) return false
-  return true
+  return inTab(m, q)
+}
+const ownDemoAddresses = () =>
+  demoAccounts.flatMap((a) => [a.email, ...(a.aliases || []).map((x) => x.email)])
+function scopeOf(tab: string) {
+  return resolveSplitScope(tab, settings, ownDemoAddresses())
+}
+function inScope(m: Message, scope: SplitScope): boolean {
+  const senders = m.from.map((a) => a.email.toLowerCase())
+  if (scope.kind === 'rules') {
+    const rules = [
+      ...scope.addresses.map((value) => ({ kind: 'address', value }) as const),
+      ...scope.domains.map(
+        (d) => ({ kind: 'domain', value: d.split('.').reverse().join('.') }) as const,
+      ),
+    ]
+    return senders.some((e) => rules.some((r) => ruleMatches(r, e)))
+  }
+  // As the index: a person, or on Always (with a word in the subject when given), and not on Never.
+  if (senders.some((e) => scope.never.includes(e))) return false
+  const subject = m.subject.toLowerCase()
+  const always = scope.always.some(
+    (a) =>
+      senders.includes(a.address) && (!a.words.length || a.words.some((w) => subject.includes(w))),
+  )
+  return always || (senders.length > 0 && !senders.some(isAutomatedAddress) && !m.unsubscribe)
+}
+/** Tabs only narrow the inbox view, as in the desktop service. */
+function inTab(m: Message, q: MailQuery): boolean {
+  if (!q.tab || !tabApplies(q)) return true
+  const scope = scopeOf(q.tab)
+  if (scope === undefined) return true
+  return scope !== null && inScope(m, scope)
 }
 const indexing = (account: Account) => !!account.indexing && !account.indexing.complete
 function changed() {
@@ -1171,6 +1212,75 @@ export const demoAPI: DesktopMailAPI = {
     })
     return mergePages(pages, 50)
   },
+  tabCounts: async () => {
+    const scopes = ['important', ...(settings.splitTabs || []).map((t) => t.id)]
+    const counts: Record<string, number> = Object.fromEntries(scopes.map((id) => [id, 0]))
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (!m?.mailboxIds.inbox || m.keywords.$seen) continue
+        for (const id of scopes) if (inTab(m, { view: 'inbox', tab: id })) counts[id]!++
+      }
+    return counts
+  },
+  tabMatchCount: async (rules) => {
+    const scope = resolveSplitScope(
+      'draft',
+      { ...settings, splitTabs: [{ id: 'draft', name: '', rules }] },
+      ownDemoAddresses(),
+    )
+    let n = 0
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (m?.mailboxIds.inbox && scope && inScope(m, scope)) n++
+      }
+    return n
+  },
+  ruleSuggestions: async (text, exclude) => {
+    const seen = new Map<string, AddressSeen>()
+    for (let a = 0; a < demoAccounts.length; a++)
+      for (let i = 0; i < perAccount; i++) {
+        const m = get(a, i, false)
+        if (!m || m.mailboxIds.junk || m.mailboxIds.trash) continue
+        for (const { email, name } of [...m.from, ...m.to]) {
+          const key = email.toLowerCase()
+          const entry = seen.get(key)
+          if (entry) entry.count++
+          else seen.set(key, { email: key, name: name || undefined, count: 1 })
+        }
+      }
+    return suggestRules(text, [...seen.values()], ownDemoAddresses(), { exclude })
+  },
+  // The browser's download and file picker stand in for the desktop's dialogs.
+  exportInbox: async () => {
+    const text = JSON.stringify(inboxExport(settings), null, 2) + '\n'
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'warpmail-inbox.json'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    return true
+  },
+  importInbox: () =>
+    new Promise((resolve, reject) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = '.json,application/json'
+      input.addEventListener('cancel', () => resolve(undefined))
+      input.addEventListener('change', () => {
+        const file = input.files?.[0]
+        if (!file) return resolve(undefined)
+        if (file.size > 1024 * 1024)
+          return reject(new Error('This file is too large to be a Warpmail inbox export.'))
+        file
+          .text()
+          .then((text) => resolve(parseInboxExport(text)))
+          .catch(reject)
+      })
+      input.click()
+    }),
   conversation: async (accountId, threadId) => {
     const accountIndex = demoAccounts.findIndex((a) => a.id === accountId)
     const m = get(accountIndex, Number(threadId.replace('thread-', '')))

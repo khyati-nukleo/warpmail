@@ -19,6 +19,7 @@ import {
   SquarePen,
   Keyboard,
   LockKeyhole,
+  Inbox,
 } from '@inlark/ui/icons'
 import { Button, Dropdown, EmptyState, MenuItem, Modal, Select, Switch } from '@inlark/ui'
 import {
@@ -39,6 +40,7 @@ import { IndexingMeter } from './IndexingMeter'
 import { ShortcutEditor } from './ShortcutEditor'
 import { EncryptionPanel } from './EncryptionSettings'
 import { newMessageAccount } from './compose-account'
+import { InboxSettings } from './split/InboxSettings'
 
 /** A miniature of the app window in one theme. */
 function ThemePreview({ theme, className }: { theme: 'dark' | 'light'; className?: string }) {
@@ -207,7 +209,9 @@ export function SettingsPanel({
   }
   const update = async (patch: Partial<Preferences>) => {
     try {
-      const next = await api.settings({ ...bootstrap.settings, ...patch })
+      // The cache, so a split inbox save still running isn't undone, as in App.savePreferences.
+      const latest = queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings
+      const next = await api.settings({ ...(latest ?? bootstrap.settings), ...patch })
       onChange(next)
       return true
     } catch (e) {
@@ -252,6 +256,7 @@ export function SettingsPanel({
           >
             {[
               ['general', 'General', SlidersHorizontal],
+              ['inbox', 'Inbox', Inbox],
               ['accounts', 'Accounts', Mail],
               ['signatures', 'Signatures', PenLine],
               ['encryption', 'Encryption', LockKeyhole],
@@ -526,6 +531,7 @@ export function SettingsPanel({
                 )}
               </>
             )}
+            {tab === 'inbox' && <InboxSettings bootstrap={bootstrap} notify={notify} />}
             {tab === 'accounts' &&
               (setup ? (
                 <AccountSetup

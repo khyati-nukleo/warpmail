@@ -17,7 +17,9 @@ export const imapProviders: ProviderFactory = (input) => {
     // A connection test keeps nothing: its index lives only in memory.
     index: input.temporary
       ? openInProcessIndex(':memory:')
-      : openWorkerIndex(join(input.directory, 'metadata.sqlite')),
+      : openWorkerIndex(join(input.directory, 'metadata.sqlite'), {
+          onUpdating: input.onIndexUpdating,
+        }),
     readAttachment: input.readAttachment,
     background: !input.temporary,
   })
