@@ -18,7 +18,15 @@ import {
 /** One way to trigger a shortcut: a single chord such as `Mod+K`, or a sequence such as `G I`. */
 export type Binding = string[]
 
-export const shortcutSections = ['Navigate', 'Go to', 'Organize', 'Select', 'Write', 'App'] as const
+export const shortcutSections = [
+  'Navigate',
+  'Go to',
+  'Tabs',
+  'Organize',
+  'Select',
+  'Write',
+  'App',
+] as const
 
 export const shortcutDefinitions = [
   { id: 'next', section: 'Navigate', label: 'Next conversation', defaults: [['J'], ['ArrowDown']] },
@@ -54,6 +62,22 @@ export const shortcutDefinitions = [
   { id: 'goSpam', section: 'Go to', label: 'Spam', defaults: [['G', 'J']] },
   { id: 'goTrash', section: 'Go to', label: 'Trash', defaults: [['G', 'B']] },
   { id: 'goAll', section: 'Go to', label: 'All mail', defaults: [['G', 'M']] },
+  { id: 'goTab1', section: 'Tabs', label: 'Inbox tab', defaults: [['Mod+1']] },
+  { id: 'goTab2', section: 'Tabs', label: 'Important tab', defaults: [['Mod+2']] },
+  { id: 'goTab3', section: 'Tabs', label: 'Tab 3', defaults: [['Mod+3']] },
+  { id: 'goTab4', section: 'Tabs', label: 'Tab 4', defaults: [['Mod+4']] },
+  { id: 'goTab5', section: 'Tabs', label: 'Tab 5', defaults: [['Mod+5']] },
+  { id: 'goTab6', section: 'Tabs', label: 'Tab 6', defaults: [['Mod+6']] },
+  { id: 'goTab7', section: 'Tabs', label: 'Tab 7', defaults: [['Mod+7']] },
+  { id: 'goTab8', section: 'Tabs', label: 'Tab 8', defaults: [['Mod+8']] },
+  { id: 'goTab9', section: 'Tabs', label: 'Tab 9', defaults: [['Mod+9']] },
+  { id: 'nextTab', section: 'Tabs', label: 'Next tab', defaults: [['Control+Tab']] },
+  {
+    id: 'previousTab',
+    section: 'Tabs',
+    label: 'Previous tab',
+    defaults: [['Control+Shift+Tab']],
+  },
   { id: 'archive', section: 'Organize', label: 'Archive', defaults: [['E']] },
   {
     id: 'trash',
@@ -73,6 +97,7 @@ export const shortcutDefinitions = [
     label: 'Unsubscribe from mailing list',
     defaults: [['Mod+U']],
   },
+  { id: 'addToTab', section: 'Organize', label: 'Add sender to tab…', defaults: [['Shift+T']] },
   { id: 'star', section: 'Organize', label: 'Star or unstar', defaults: [['S']] },
   { id: 'unread', section: 'Organize', label: 'Mark as unread', defaults: [['U'], ['Shift+U']] },
   { id: 'read', section: 'Organize', label: 'Mark as read', defaults: [['Shift+I']] },

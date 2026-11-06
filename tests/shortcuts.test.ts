@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  validateHotkey,
   useHotkeys,
   useHotkeySequences,
 } from '../apps/desktop/node_modules/@tanstack/react-hotkeys'
@@ -116,5 +117,34 @@ describe('shortcut input priority', () => {
     expect(ignoreInputsForCommand(['Ctrl+Enter'])).toBe(false)
     expect(ignoreInputsForCommand(['Meta+Enter'])).toBe(false)
     expect(ignoreInputsForCommand(['Escape'])).toBe(false)
+  })
+
+  it('has valid, conflict-free tab shortcuts', () => {
+    const ids = [
+      ...Array.from({ length: 9 }, (_, index) => 'goTab' + (index + 1)),
+      'nextTab',
+      'previousTab',
+      'addToTab',
+    ] as const
+    const bindings = resolveShortcuts()
+    for (const id of ids) {
+      expect(bindings[id as keyof typeof bindings].length).toBeGreaterThan(0)
+      for (const binding of bindings[id as keyof typeof bindings]) {
+        for (const chord of binding) expect(validateHotkey(chord as never).valid).toBe(true)
+        expect(findConflicts(bindings, id as keyof typeof bindings, binding)).toEqual([])
+      }
+    }
+    expect(bindings.goTab3).toEqual([['Mod+3']])
+    // Control itself, not Mod: Cmd+Tab is the macOS app switcher.
+    expect(bindings.nextTab).toEqual([['Control+Tab']])
+    expect(bindings.previousTab).toEqual([['Control+Shift+Tab']])
+    expect(bindings.addToTab).toEqual([['Shift+T']])
+  })
+
+  it('keeps a rebound tab shortcut', () => {
+    const saved = { goTab3: [['Mod+Shift+3']] }
+    const bindings = resolveShortcuts(saved)
+    expect(bindings.goTab3).toEqual(saved.goTab3)
+    expect(overridesFor(bindings)).toEqual(saved)
   })
 })
