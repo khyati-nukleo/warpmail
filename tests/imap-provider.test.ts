@@ -1063,6 +1063,32 @@ describe('IMAP drafts and sending', () => {
     updatedAt: '2026-09-23T10:00:00.000Z',
     status: 'local' as const,
   }
+  it('treats mail in the Drafts folder as a draft even without the Draft flag', async () => {
+    // Superhuman saves Gmail drafts that IMAP lists in Drafts and All Mail with only \Seen.
+    server.capabilities.add('X-GM-EXT-1')
+    server.addMailbox('[Gmail]/All Mail', '\\All')
+    const asked = { emailId: '1', messageId: 'q@x', from: [alex], date: at(1), text: 'Q?' }
+    const unsent = {
+      emailId: '2',
+      messageId: 'd@x',
+      references: ['q@x'],
+      from: [me],
+      flags: ['\\Seen'],
+      date: at(2),
+      text: 'Not sent yet',
+    }
+    for (const path of ['INBOX', '[Gmail]/All Mail']) server.deliver(path, asked)
+    for (const path of ['Drafts', '[Gmail]/All Mail']) server.deliver(path, unsent)
+    const p = await connected()
+    await sync(p)
+    const [thread] = (await p.query(account, { view: 'inbox' })).items
+    const messages = await p.conversation(account, thread.id)
+    expect(messages.map((m) => [m.text?.trim(), !!m.keywords.$draft])).toEqual([
+      ['Q?', false],
+      ['Not sent yet', true],
+    ])
+    expect(thread.messages.map((m) => !!m.keywords.$draft).sort()).toEqual([false, true])
+  })
   it('appends drafts with the Draft flag and confirms them before returning an ID', async () => {
     const p = await connected()
     const id = await p.createDraft(account, {
