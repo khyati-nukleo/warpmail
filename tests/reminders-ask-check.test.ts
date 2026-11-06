@@ -24,3 +24,35 @@ describe('askCheck', () => {
   it('keeps text above a closing that is not plain', () =>
     expect(ownText('See attached.\n\nThanks in advance,\nKim')).toContain('Thanks in advance'))
 })
+
+describe('askCheck fixes', () => {
+  it.each([
+    ['Thanks!\nCan you send the invoice?', 'question'],
+    ["Merci !\nPouvez-vous m'envoyer la facture ?", 'question'],
+    ['Thanks!\nCan you send it', 'phrase'],
+    ['Pouvez vous confirmer', 'phrase'],
+    ['Peux tu regarder', 'phrase'],
+    ['Tenez moi au courant', 'phrase'],
+    ['Pouvez\u2010vous confirmer', 'phrase'],
+    ['Peux\u2011tu regarder', 'phrase'],
+    ['See below?\n\nThanks,\nKim', 'question'],
+  ])('asks: %j', (text, reason) => expect(askCheck(text)).toEqual({ asks: true, reason }))
+
+  it.each([
+    'Here is the doc: https://docs.example.com/d/abc?usp=sharing',
+    'Voir www.example.com/a?b=1',
+    'Le mar. 3 nov. 2026 à 10:00, Ada <ada@example.com> a\u00a0écrit :\n> Pouvez-vous ?',
+    "Fait.\n-----Message d'origine-----\nDe : Ada\nPouvez-vous ?",
+  ])('does not ask: %j', (text) => expect(askCheck(text).asks).toBe(false))
+
+  it('strips a plain closing and the name', () => {
+    expect(ownText('Here is the file.\n\nThanks,\nKim')).toBe('Here is the file.')
+    expect(ownText('Here is the file.\n\nMerci,\nKim')).toBe('Here is the file.')
+    expect(ownText('Here is the file.\n\nBest regards,\nKim')).toBe('Here is the file.')
+  })
+
+  it('cuts a wrapped attribution', () =>
+    expect(
+      ownText('Done.\nLe mar. 3 nov. 2026 à 10:00, Ada <ada@example.com> a écrit :\n> x'),
+    ).toBe('Done.'))
+})
