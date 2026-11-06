@@ -120,10 +120,7 @@ it('parses addresses and domains', () => {
   expect(parseRule('a@')).toBeUndefined()
 })
 it('reports problems line by line', () => {
-  const r = parseRuleLines(
-    'y@gmail.com\n\n@work.example\nhello\nY@gmail.com',
-    own,
-  )
+  const r = parseRuleLines('y@gmail.com\n\n@work.example\nhello\nY@gmail.com', own)
   expect(r.rules).toEqual(['y@gmail.com'])
   expect(r.problems.map((p) => p.line)).toEqual([3, 4])
 })
@@ -155,7 +152,9 @@ it('detects automated senders', () => {
   expect(isAutomatedMessage({ fromEmail: 'a@b.example', listId: '<list.b.example>' })).toBe(true)
   expect(isAutomatedMessage({ fromEmail: 'a@b.example', precedence: 'Bulk' })).toBe(true)
   expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'no' })).toBe(false)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'auto-generated' })).toBe(true)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'auto-generated' })).toBe(
+    true,
+  )
   expect(
     isAutomatedMessage({ fromEmail: 'a@b.example', unsubscribe: { url: 'x', oneClick: false } }),
   ).toBe(true)
