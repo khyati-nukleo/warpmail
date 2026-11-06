@@ -618,7 +618,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     found.sort((a, b) => (a.seq ?? Infinity) - (b.seq ?? Infinity) || (a.id < b.id ? -1 : 1))
     const thread = found[0]?.id ?? this.newThread(accountId)
     for (const { id: loser } of found.slice(1)) {
-      // Participants follow their messages, found through the messages' thread index.
+      // Participants (and, through triggers, `thread_participants`) follow their messages.
       this.run(
         `UPDATE participants SET thread_id = ? WHERE message_seq IN (
           SELECT seq FROM messages WHERE account_id = ? AND thread_id = ?)`,

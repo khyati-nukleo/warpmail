@@ -80,6 +80,12 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
+// Thread participants that differ from a count of the message participants: none when in step.
+const THREAD_PARTICIPANTS_OUT_OF_STEP = `SELECT count(*) AS n FROM (
+    SELECT account_id, thread_id, address, count(*) AS n FROM participants GROUP BY 1, 2, 3
+  ) a FULL JOIN thread_participants t USING (account_id, thread_id, address)
+  WHERE a.n IS NOT t.n OR t.domain IS NULL`
+
 describe('schema v4', () => {
   it('migrates a v3 index and backfills participants', async () => {
     const box = await inbox()
@@ -144,15 +150,18 @@ describe('schema v4', () => {
     ).toEqual([{ n: 0 }])
     expect(
       read<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'participants' ORDER BY name",
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+          AND tbl_name IN ('participants', 'thread_participants') ORDER BY name`,
       ).map((r) => r.name),
-    ).toEqual(['participants_address', 'participants_domain', 'participants_message'])
+    ).toEqual(['participants_message', 'thread_participants_address', 'thread_participants_domain'])
     expect(
-      read<{ name: string }>('PRAGMA index_info(participants_address)').map((r) => r.name),
+      read<{ name: string }>('PRAGMA index_info(thread_participants_address)').map((r) => r.name),
     ).toEqual(['account_id', 'address', 'thread_id'])
     expect(
-      read<{ name: string }>('PRAGMA index_info(participants_domain)').map((r) => r.name),
+      read<{ name: string }>('PRAGMA index_info(thread_participants_domain)').map((r) => r.name),
     ).toEqual(['account_id', 'domain', 'thread_id'])
+    expect(read(THREAD_PARTICIPANTS_OUT_OF_STEP)).toEqual([{ n: 0 }])
+    expect(read('SELECT count(*) AS n FROM thread_participants')).toEqual([{ n: 10 }])
     expect(read('SELECT from_email FROM messages ORDER BY uid')).toEqual([
       { from_email: null },
       { from_email: null },
@@ -327,7 +336,7 @@ describe('schema v4', () => {
     await index.upsertMessages('a', [message(box, 1)])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP TABLE participants;
+    db.exec(`DROP TABLE thread_participants; DROP TABLE participants;
       CREATE TABLE participants (account_id TEXT NOT NULL, message_seq INTEGER NOT NULL,
         address TEXT NOT NULL, domain TEXT NOT NULL, role TEXT NOT NULL)`)
     db.close()
@@ -337,6 +346,7 @@ describe('schema v4', () => {
     expect(read('SELECT count(*) AS n FROM participants WHERE thread_id IS NOT NULL')).toEqual([
       { n: 2 },
     ])
+    expect(read('SELECT count(*) AS n FROM thread_participants')).toEqual([{ n: 2 }])
     // A current file opens without migrating.
     new SqliteMetadataIndex(path, { onMigrate: () => migrating.push('again') }).close()
     expect(migrating).toEqual(['v4'])
@@ -377,6 +387,46 @@ describe('schema v4', () => {
       const page = await index.conversations('a', { mailboxIds: [box], split }, { limit: 10 })
       expect(page.total).toBe(1)
     }
+  })
+
+  it('keeps thread participants in step with every message change', async () => {
+    const [box, archive, gone] = (
+      await index.syncMailboxes('a', [folder('INBOX'), folder('Archive'), folder('Gone')])
+    ).map((b) => b.id)
+    const inStep = () => expect(read(THREAD_PARTICIPANTS_OUT_OF_STEP)).toEqual([{ n: 0 }])
+    const ids = await index.upsertMessages('a', [
+      message(box!, 1, { to: [{ name: '', email: 'ada@example.com' }] }),
+      message(box!, 2, { references: ['m1@example.com'] }),
+      message(archive!, 3, { from: [{ name: '', email: 'bo@other.example' }] }),
+      message(gone!, 4, { references: ['m3@example.com'] }),
+      message(box!, 5, { from: [{ name: '', email: 'cy@third.example' }] }),
+    ])
+    inStep()
+    // Ada's thread and Bo's merge.
+    await index.upsertMessages('a', [
+      message(box!, 6, { references: ['m2@example.com', 'm3@example.com'] }),
+    ])
+    inStep()
+    // One thread now, so one entry for Ada.
+    expect(
+      read("SELECT count(*) AS n FROM thread_participants WHERE address = 'ada@example.com'"),
+    ).toEqual([{ n: 1 }])
+    await index.removeUids('a', box!, [2])
+    inStep()
+    await index.removeMessages('a', [ids[4]!])
+    inStep()
+    await index.relocate('a', ids[0]!, { mailboxId: archive!, uidValidity: '1', uid: 9 })
+    inStep()
+    // A folder that disappears takes its messages with it.
+    await index.syncMailboxes('a', [folder('INBOX'), folder('Archive')])
+    inStep()
+    await index.resetMailbox('a', archive!, '2')
+    inStep()
+    expect(read('SELECT count(*) AS n FROM thread_participants')).toEqual([
+      read<{ n: number }>(
+        'SELECT count(*) AS n FROM (SELECT DISTINCT thread_id, address FROM participants)',
+      )[0],
+    ])
   })
 
   it('keeps at most 256 characters of List-Id and 64 of the other headers', async () => {

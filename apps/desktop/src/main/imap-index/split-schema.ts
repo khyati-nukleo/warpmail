@@ -55,10 +55,15 @@ export function registerSplitFunctions(db: DatabaseSync) {
   )
 }
 
-/** A file from a pre-release v4 build lacks `participants.thread_id`; v4 runs again for it. */
+/** A file from a pre-release v4 build lacks thread participants; v4 runs again for it. */
 export function needsV4Again(db: DatabaseSync) {
-  const columns = db.prepare('PRAGMA table_info(participants)').all() as { name: string }[]
-  return columns.length > 0 && !columns.some((c) => c.name === 'thread_id')
+  const columns = (table: string) =>
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name)
+  const participants = columns('participants')
+  return (
+    participants.length > 0 &&
+    (!participants.includes('thread_id') || !columns('thread_participants').length)
+  )
 }
 
 function parseAddresses(text: string): { email: string }[] {
@@ -83,6 +88,49 @@ interface Row {
   auto_submitted: string | null
 }
 
+/**
+ * Each address once per thread, with how many participant rows name it there, kept in step by
+ * triggers on `participants` (cascaded deletes included). Tabs read threads from its indexes,
+ * which end in `thread_id`: a high-volume sender's notifications are a few thousand threads
+ * but tens of thousands of participant rows. Filled after the backfill, so the bulk inserts
+ * don't run the triggers.
+ */
+const THREAD_PARTICIPANTS = `CREATE TABLE thread_participants (
+    account_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    address TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (account_id, thread_id, address)
+  ) WITHOUT ROWID;
+  INSERT INTO thread_participants (account_id, thread_id, address, domain, n)
+    SELECT account_id, thread_id, address, min(domain), count(*) FROM participants
+      GROUP BY account_id, thread_id, address;
+  CREATE INDEX thread_participants_address ON thread_participants (account_id, address, thread_id);
+  CREATE INDEX thread_participants_domain ON thread_participants (account_id, domain, thread_id);
+  CREATE TRIGGER participants_added AFTER INSERT ON participants BEGIN
+    INSERT INTO thread_participants (account_id, thread_id, address, domain, n)
+      VALUES (new.account_id, new.thread_id, new.address, new.domain, 1)
+      ON CONFLICT DO UPDATE SET n = n + 1;
+  END;
+  CREATE TRIGGER participants_removed AFTER DELETE ON participants BEGIN
+    UPDATE thread_participants SET n = n - 1
+      WHERE account_id = old.account_id AND thread_id = old.thread_id AND address = old.address;
+    DELETE FROM thread_participants
+      WHERE account_id = old.account_id AND thread_id = old.thread_id AND address = old.address
+        AND n <= 0;
+  END;
+  CREATE TRIGGER participants_moved AFTER UPDATE OF thread_id ON participants BEGIN
+    UPDATE thread_participants SET n = n - 1
+      WHERE account_id = old.account_id AND thread_id = old.thread_id AND address = old.address;
+    DELETE FROM thread_participants
+      WHERE account_id = old.account_id AND thread_id = old.thread_id AND address = old.address
+        AND n <= 0;
+    INSERT INTO thread_participants (account_id, thread_id, address, domain, n)
+      VALUES (new.account_id, new.thread_id, new.address, new.domain, 1)
+      ON CONFLICT DO UPDATE SET n = n + 1;
+  END;`
+
 /** Written to run again over a file that already has v4, like the sources migration. */
 export function migrateToV4(db: DatabaseSync) {
   const have = new Set(
@@ -97,10 +145,10 @@ export function migrateToV4(db: DatabaseSync) {
     ['automated', 'INTEGER NOT NULL DEFAULT 0'],
   ])
     if (!have.has(name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${type}`)
-  // Rebuilt whole each time: v4 owns the table, and a run over a v4 file starts again cleanly.
-  // `thread_id` follows the message's (see `assignThread`), so a tab reads threads from the
-  // participant index alone, never a table row per match.
-  db.exec(`DROP TABLE IF EXISTS participants;
+  // Rebuilt whole each time: v4 owns these tables, and a run over a v4 file starts again cleanly.
+  // `thread_id` follows the message's (see `assignThread`).
+  db.exec(`DROP TABLE IF EXISTS thread_participants;
+    DROP TABLE IF EXISTS participants;
     CREATE TABLE participants (
       account_id TEXT NOT NULL,
       message_seq INTEGER NOT NULL REFERENCES messages (seq) ON DELETE CASCADE,
@@ -144,10 +192,9 @@ export function migrateToV4(db: DatabaseSync) {
   // Built after the backfill so the bulk inserts don't maintain them row by row.
   // `messages_mailbox_person` lets Important and the tab counts read only the index: it holds
   // the thread, date and person test of every inbox row, and `seen` and `email_id` for unread
-  // counts. The participant indexes end in `thread_id`, so a rule's threads are read from them.
+  // counts.
   db.exec(`CREATE INDEX participants_message ON participants (message_seq);
-    CREATE INDEX participants_address ON participants (account_id, address, thread_id);
-    CREATE INDEX participants_domain ON participants (account_id, domain, thread_id);
+    ${THREAD_PARTICIPANTS}
     DROP INDEX IF EXISTS messages_mailbox_sender;
     DROP INDEX IF EXISTS messages_mailbox_person;
     CREATE INDEX messages_mailbox_person ON messages

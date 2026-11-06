@@ -58,9 +58,10 @@ export function splitFilter(
  * Threads with a participant matching the rules, or `null` without rules. Each list is one
  * parameter, so a statement's size doesn't grow with the rules. The CROSS JOINs make each rule
  * drive a lookup on its own key: without index statistics SQLite reads `p.account_id = ?` as
- * selective and would walk every participant of the account. The thread is the last column of
- * both participant indexes, so no table row is read per match (a heavy sender's 40k messages
- * cost one table lookup each before).
+ * selective and would walk every participant of the account. `thread_participants` holds each
+ * address once per thread and its indexes end in the thread, so a rule reads one index entry
+ * per thread: at 100k messages with 40% from one sender, that sender's tab page takes as long
+ * as the inbox's (16 ms), against 93 ms reading a table row per participant row.
  */
 function ruleThreads(
   scope: Extract<SplitScope, { kind: 'rules' }>,
@@ -70,7 +71,7 @@ function ruleThreads(
   const params: SQLInputValue[] = []
   if (scope.addresses.length) {
     selects.push(`SELECT p.thread_id FROM json_each(?) r
-      CROSS JOIN participants p ON p.account_id = ? AND p.address = r.value`)
+      CROSS JOIN thread_participants p ON p.account_id = ? AND p.address = r.value`)
     params.push(list(scope.addresses), accountId)
   }
   // Domain keys are label-reversed, so a domain is its own key and its subdomains are the key
@@ -79,9 +80,9 @@ function ruleThreads(
   if (scope.domains.length) {
     selects.push(
       `SELECT p.thread_id FROM json_each(?) r
-        CROSS JOIN participants p ON p.account_id = ? AND p.domain = r.value`,
+        CROSS JOIN thread_participants p ON p.account_id = ? AND p.domain = r.value`,
       `SELECT p.thread_id FROM json_each(?) r
-        CROSS JOIN participants p ON p.account_id = ? AND p.domain >= r.value || '.'
+        CROSS JOIN thread_participants p ON p.account_id = ? AND p.domain >= r.value || '.'
           AND p.domain < r.value || '/'`,
     )
     params.push(list(scope.domains), accountId, list(scope.domains), accountId)

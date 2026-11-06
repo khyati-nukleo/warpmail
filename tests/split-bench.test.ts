@@ -80,7 +80,8 @@ function v3Copy(directory: string, name: string) {
   const v3 = join(directory, 'v3-' + name)
   copyFileSync(join(directory, name), v3)
   const db = new DatabaseSync(v3)
-  db.exec(`DROP TABLE participants; DROP INDEX messages_mailbox_person;
+  db.exec(`DROP TABLE thread_participants; DROP TABLE participants;
+    DROP INDEX messages_mailbox_person;
     DROP INDEX messages_unchecked_headers;
     ALTER TABLE messages DROP COLUMN from_email;
     ALTER TABLE messages DROP COLUMN list_id;
