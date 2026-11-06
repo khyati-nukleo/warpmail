@@ -160,7 +160,15 @@ export const metadataQuery = {
   bodyStructure: true,
   internalDate: true,
   size: true,
-  headers: ['references', 'in-reply-to', 'list-unsubscribe', 'list-unsubscribe-post'],
+  headers: [
+    'references',
+    'in-reply-to',
+    'list-unsubscribe',
+    'list-unsubscribe-post',
+    'list-id',
+    'precedence',
+    'auto-submitted',
+  ],
 }
 
 export function toNewMessage(
@@ -194,6 +202,11 @@ export function toNewMessage(
     preview: '',
     bodyStructure: fetched.bodyStructure,
     unsubscribe: parseUnsubscribe(headers['list-unsubscribe'], headers['list-unsubscribe-post']),
+    automation: {
+      listId: headers['list-id'] || null,
+      precedence: headers['precedence'] || null,
+      autoSubmitted: headers['auto-submitted'] || null,
+    },
   }
 }
 

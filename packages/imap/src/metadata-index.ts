@@ -187,6 +187,8 @@ export interface NewMessage extends MessageLocation {
   /** The server's BODYSTRUCTURE, kept to find body parts and attachments later. */
   bodyStructure?: BodyPart
   unsubscribe?: { url: string; oneClick: boolean }
+  /** Present when List-Id, Precedence and Auto-Submitted were fetched for this message. */
+  automation?: { listId: string | null; precedence: string | null; autoSubmitted: string | null }
 }
 
 export interface IndexedMessage extends NewMessage {

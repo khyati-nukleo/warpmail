@@ -33,12 +33,12 @@ export type ProviderErrorCode =
   | (string & {})
 
 export class ProviderError extends Error {
-  constructor(
-    public code: ProviderErrorCode,
-    message: string,
-    public retryAfter?: number,
-  ) {
+  code: ProviderErrorCode
+  retryAfter?: number
+  constructor(code: ProviderErrorCode, message: string, retryAfter?: number) {
     super(message)
+    this.code = code
+    this.retryAfter = retryAfter
     this.name = 'ProviderError'
   }
 }

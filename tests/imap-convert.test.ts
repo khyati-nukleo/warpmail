@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { previewText } from '../packages/imap/src/convert'
+import { previewText, toNewMessage } from '../packages/imap/src/convert'
 
 describe('IMAP previews', () => {
   it('excludes armored encrypted content from previews and the metadata index', () => {
@@ -52,5 +52,33 @@ describe('IMAP previews', () => {
 
   it('strips complete tags after malformed angle brackets', () => {
     expect(previewText('Hello <<b>world</b>', true)).toBe('Hello < world')
+  })
+})
+
+describe('toNewMessage automation headers', () => {
+  const location = { mailboxId: 'm', uidValidity: '1' }
+  it('reads List-Id, Precedence and Auto-Submitted', () => {
+    const message = toNewMessage(
+      {
+        uid: 1,
+        headers:
+          'List-Id: <news.example.com>\r\nPrecedence:  bulk \r\nAuto-Submitted: auto-generated\r\n',
+      } as never,
+      location,
+    )
+    expect(message.automation).toEqual({
+      listId: '<news.example.com>',
+      precedence: 'bulk',
+      autoSubmitted: 'auto-generated',
+    })
+  })
+  it('uses null for missing headers', () => {
+    expect(
+      toNewMessage({ uid: 1, headers: 'References: <a@b>\r\n' } as never, location).automation,
+    ).toEqual({
+      listId: null,
+      precedence: null,
+      autoSubmitted: null,
+    })
   })
 })
