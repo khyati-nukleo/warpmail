@@ -18,22 +18,22 @@ import {
   settingsSchema,
 } from '@inlark/core'
 
-const own = ['me@work.example', 'me@gmail.com']
+const own = ['me@work.example', 'x@gmail.com']
 
 describe('split rules', () => {
   it('lists every address the user receives mail as, once', () => {
     const accounts = [
       { email: ' Me@Work.example ', aliases: [{ email: 'Team@work.example' }] },
-      { email: 'me@gmail.com' },
+      { email: 'x@gmail.com' },
       { email: 'me@work.example', aliases: [{ email: 'team@WORK.example' }] },
     ] as Account[]
-    expect(ownAddresses(accounts)).toEqual(['me@work.example', 'team@work.example', 'me@gmail.com'])
+    expect(ownAddresses(accounts)).toEqual(['me@work.example', 'team@work.example', 'x@gmail.com'])
   })
 
   it('parses addresses and domains', () => {
-    expect(parseRule('  Client.Person@Gmail.COM ')).toEqual({
+    expect(parseRule('  Y@Gmail.COM ')).toEqual({
       kind: 'address',
-      value: 'client.person@gmail.com',
+      value: 'y@gmail.com',
     })
     expect(parseRule('<k@client.example>')).toEqual({ kind: 'address', value: 'k@client.example' })
     expect(parseRule('@Client.Example.')).toEqual({
@@ -48,11 +48,8 @@ describe('split rules', () => {
     expect(parseRule('a@')).toBeUndefined()
   })
   it('reports problems line by line', () => {
-    const r = parseRuleLines(
-      'client.person@gmail.com\n\n@work.example\nhello\nCLIENT.PERSON@gmail.com',
-      own,
-    )
-    expect(r.rules).toEqual(['client.person@gmail.com'])
+    const r = parseRuleLines('y@gmail.com\n\n@work.example\nhello\nY@gmail.com', own)
+    expect(r.rules).toEqual(['y@gmail.com'])
     expect(r.problems.map((p) => p.line)).toEqual([3, 4])
   })
   it('refuses own addresses and domains but allows free-mail clients', () => {
@@ -60,34 +57,36 @@ describe('split rules', () => {
     expect(refusalReason(parseRule('ana@work.example')!, own)).toMatch(/own domain/)
     expect(refusalReason(parseRule('@eu.work.example')!, own)).toMatch(/own domain/)
     expect(refusalReason(parseRule('@gmail.com')!, own)).toMatch(/includes your own address/)
-    expect(refusalReason(parseRule('client.person@gmail.com')!, own)).toBeUndefined()
+    expect(refusalReason(parseRule('y@gmail.com')!, own)).toBeUndefined()
   })
   it('matches domains and subdomains only', () => {
-    const d = parseRule('@github.com')!
-    expect(ruleMatches(d, 'x@github.com')).toBe(true)
-    expect(ruleMatches(d, 'x@noreply.GitHub.com')).toBe(true)
-    expect(ruleMatches(d, 'x@notgithub.com')).toBe(false)
+    const d = parseRule('@tools.example')!
+    expect(ruleMatches(d, 'x@tools.example')).toBe(true)
+    expect(ruleMatches(d, 'x@noreply.Tools.example')).toBe(true)
+    expect(ruleMatches(d, 'x@nottools.example')).toBe(false)
     expect(domainKey('mail.Client.example')).toBe('example.client.mail')
   })
   it('detects automated senders', () => {
     for (const e of [
       'no-reply@asana.com',
-      'no_reply@x.com',
-      'do.not.reply@x.com',
-      'bounces+1@x.com',
-      'MAILER-DAEMON@x.com',
-      'postmaster@x.com',
+      'no_reply@x.example',
+      'do.not.reply@x.example',
+      'bounces+1@x.example',
+      'MAILER-DAEMON@x.example',
+      'postmaster@x.example',
     ])
       expect(isAutomatedAddress(e)).toBe(true)
-    expect(isAutomatedAddress('client.person@gmail.com')).toBe(false)
-    expect(isAutomatedMessage({ fromEmail: 'a@b.com', listId: '<list.b.com>' })).toBe(true)
-    expect(isAutomatedMessage({ fromEmail: 'a@b.com', precedence: 'Bulk' })).toBe(true)
-    expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'no' })).toBe(false)
-    expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'auto-generated' })).toBe(true)
+    expect(isAutomatedAddress('y@gmail.com')).toBe(false)
+    expect(isAutomatedMessage({ fromEmail: 'a@b.example', listId: '<list.b.example>' })).toBe(true)
+    expect(isAutomatedMessage({ fromEmail: 'a@b.example', precedence: 'Bulk' })).toBe(true)
+    expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'no' })).toBe(false)
+    expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'auto-generated' })).toBe(
+      true,
+    )
     expect(
-      isAutomatedMessage({ fromEmail: 'a@b.com', unsubscribe: { url: 'x', oneClick: false } }),
+      isAutomatedMessage({ fromEmail: 'a@b.example', unsubscribe: { url: 'x', oneClick: false } }),
     ).toBe(true)
-    expect(isAutomatedMessage({ fromEmail: 'a@b.com' })).toBe(false)
+    expect(isAutomatedMessage({ fromEmail: 'a@b.example' })).toBe(false)
   })
   it('resolves tabs from settings', () => {
     const settings = {
@@ -96,12 +95,12 @@ describe('split rules', () => {
         {
           id: 't1',
           name: 'Client A',
-          rules: ['Client.Person@gmail.com', '@work.example', '@Client.example'],
+          rules: ['Y@gmail.com', '@work.example', '@Client.example'],
         },
       ],
       important: {
-        always: [{ address: 'Alerts@X.com', words: [' Crash ', ''] }],
-        never: ['Bot@Y.com'],
+        always: [{ address: 'Alerts@X.example', words: [' Crash ', ''] }],
+        never: ['Bot@Y.example'],
       },
     }
     expect(resolveSplitScope(undefined, settings, own)).toBeUndefined()
@@ -109,13 +108,13 @@ describe('split rules', () => {
     expect(resolveSplitScope('gone', settings, own)).toBeNull()
     expect(resolveSplitScope('t1', settings, own)).toEqual({
       kind: 'rules',
-      addresses: ['client.person@gmail.com'],
+      addresses: ['y@gmail.com'],
       domains: ['example.client'],
     })
     expect(resolveSplitScope('important', settings, own)).toEqual({
       kind: 'important',
-      always: [{ address: 'alerts@x.com', words: ['crash'] }],
-      never: ['bot@y.com'],
+      always: [{ address: 'alerts@x.example', words: ['crash'] }],
+      never: ['bot@y.example'],
     })
   })
   it('sends each rule once, without ones a domain in the tab already covers', () => {
@@ -177,7 +176,7 @@ describe('split rules', () => {
     expect(querySchema.parse({ view: 'inbox', tab: 'important' }).tab).toBe('important')
     const parsed = settingsSchema.parse({
       ...defaultSettings,
-      splitTabs: [{ id: 't', name: 'A', rules: ['@a.com'] }],
+      splitTabs: [{ id: 't', name: 'A', rules: ['@a.example'] }],
       important: { always: [], never: [] },
     })
     expect(parsed.splitTabs).toHaveLength(1)

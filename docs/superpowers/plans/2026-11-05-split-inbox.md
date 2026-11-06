@@ -16,7 +16,7 @@
 - Every action works from keyboard and mouse (AGENTS.md "keyboard and mouse parity").
 - Never log subjects, addresses or bodies; add no network calls beyond IMAP header fetches; no telemetry.
 - Stay mergeable with upstream inlark: new logic in new modules; edits to `App.tsx`, `service.ts`, `provider.ts`, `sqlite-index.ts`, `Settings.tsx`, `Reader.tsx` stay small and local.
-- Matching is case-insensitive. A domain rule `@x.com` also covers subdomains (`a.x.com`).
+- Matching is case-insensitive. A domain rule `@x.example` also covers subdomains (`a.x.com`).
 - Tabs cover the inbox only (INBOX mailbox of IMAP accounts). Tabs are views; nothing is moved on the server.
 - Index schema becomes v4 (one-way, like v3; the existing "created by a newer version" guard covers older builds).
 - Shortcuts (all rebindable): Ctrl+1 Inbox, Ctrl+2 Important, Ctrl+3–Ctrl+9 user tabs in order, Ctrl+Tab next, Ctrl+Shift+Tab previous, Shift+T "Add sender to tab…".
@@ -55,7 +55,7 @@
 
 1. **A route or remembered location names a tab that no longer exists** (deleted, or replaced by an import): the app must show Inbox, not a blank list or an error. Pinned in Task 5 (`activeTabId`) and Task 4 (unknown id → empty page, never all mail).
 2. **A tab whose rules are all refused or empty** must show nothing and count 0, never fall back to everything. Pinned in Task 3 (empty `rules` scope) and Task 4.
-3. **Messy rule input** (`"  Client.Person@Gmail.COM "`, `"client.example."`, `"<k@client.example>"`, blank lines, `"hello"`): normalised or reported line by line, never silently dropped. Pinned in Task 1 (`parseRuleLines`).
+3. **Messy rule input** (`"  Y@Gmail.COM "`, `"client.example."`, `"<k@client.example>"`, blank lines, `"hello"`): normalised or reported line by line, never silently dropped. Pinned in Task 1 (`parseRuleLines`).
 4. **Messages with no From, or an address without `@`, during v4 backfill** must not abort the migration. Pinned in Task 2.
 5. **JMAP account in the account filter while a tab is active**: empty list with an explanatory note, not "account failed". Pinned in Task 4 (no `failedAccounts`) and Task 6 (note in empty state).
 
@@ -101,11 +101,11 @@ Refusal reasons (exact copy, `X` is the rule as written):
 - [ ] **Step 1: Write the failing tests** in `tests/split-rules.test.ts`:
 
 ```ts
-const own = ['me@work.example', 'me@gmail.com']
+const own = ['me@work.example', 'x@gmail.com']
 it('parses addresses and domains', () => {
-  expect(parseRule('  Client.Person@Gmail.COM ')).toEqual({
+  expect(parseRule('  Y@Gmail.COM ')).toEqual({
     kind: 'address',
-    value: 'client.person@gmail.com',
+    value: 'y@gmail.com',
   })
   expect(parseRule('<k@client.example>')).toEqual({ kind: 'address', value: 'k@client.example' })
   expect(parseRule('@Client.Example.')).toEqual({
@@ -121,10 +121,10 @@ it('parses addresses and domains', () => {
 })
 it('reports problems line by line', () => {
   const r = parseRuleLines(
-    'client.person@gmail.com\n\n@work.example\nhello\nCLIENT.PERSON@gmail.com',
+    'y@gmail.com\n\n@work.example\nhello\nY@gmail.com',
     own,
   )
-  expect(r.rules).toEqual(['client.person@gmail.com'])
+  expect(r.rules).toEqual(['y@gmail.com'])
   expect(r.problems.map((p) => p.line)).toEqual([3, 4])
 })
 it('refuses own addresses and domains but allows free-mail clients', () => {
@@ -132,34 +132,34 @@ it('refuses own addresses and domains but allows free-mail clients', () => {
   expect(refusalReason(parseRule('ana@work.example')!, own)).toMatch(/own domain/)
   expect(refusalReason(parseRule('@eu.work.example')!, own)).toMatch(/own domain/)
   expect(refusalReason(parseRule('@gmail.com')!, own)).toMatch(/includes your own address/)
-  expect(refusalReason(parseRule('client.person@gmail.com')!, own)).toBeUndefined()
+  expect(refusalReason(parseRule('y@gmail.com')!, own)).toBeUndefined()
 })
 it('matches domains and subdomains only', () => {
-  const d = parseRule('@github.com')!
-  expect(ruleMatches(d, 'x@github.com')).toBe(true)
-  expect(ruleMatches(d, 'x@noreply.GitHub.com')).toBe(true)
-  expect(ruleMatches(d, 'x@notgithub.com')).toBe(false)
+  const d = parseRule('@tools.example')!
+  expect(ruleMatches(d, 'x@tools.example')).toBe(true)
+  expect(ruleMatches(d, 'x@noreply.Tools.example')).toBe(true)
+  expect(ruleMatches(d, 'x@nottools.example')).toBe(false)
   expect(domainKey('mail.Client.example')).toBe('example.client.mail')
 })
 it('detects automated senders', () => {
   for (const e of [
     'no-reply@asana.com',
-    'no_reply@x.com',
-    'do.not.reply@x.com',
-    'bounces+1@x.com',
-    'MAILER-DAEMON@x.com',
-    'postmaster@x.com',
+    'no_reply@x.example',
+    'do.not.reply@x.example',
+    'bounces+1@x.example',
+    'MAILER-DAEMON@x.example',
+    'postmaster@x.example',
   ])
     expect(isAutomatedAddress(e)).toBe(true)
-  expect(isAutomatedAddress('client.person@gmail.com')).toBe(false)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.com', listId: '<list.b.com>' })).toBe(true)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.com', precedence: 'Bulk' })).toBe(true)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'no' })).toBe(false)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.com', autoSubmitted: 'auto-generated' })).toBe(true)
+  expect(isAutomatedAddress('y@gmail.com')).toBe(false)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example', listId: '<list.b.example>' })).toBe(true)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example', precedence: 'Bulk' })).toBe(true)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'no' })).toBe(false)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example', autoSubmitted: 'auto-generated' })).toBe(true)
   expect(
-    isAutomatedMessage({ fromEmail: 'a@b.com', unsubscribe: { url: 'x', oneClick: false } }),
+    isAutomatedMessage({ fromEmail: 'a@b.example', unsubscribe: { url: 'x', oneClick: false } }),
   ).toBe(true)
-  expect(isAutomatedMessage({ fromEmail: 'a@b.com' })).toBe(false)
+  expect(isAutomatedMessage({ fromEmail: 'a@b.example' })).toBe(false)
 })
 it('resolves tabs from settings', () => {
   const settings = {
@@ -168,12 +168,12 @@ it('resolves tabs from settings', () => {
       {
         id: 't1',
         name: 'Client A',
-        rules: ['Client.Person@gmail.com', '@work.example', '@Client.example'],
+        rules: ['Y@gmail.com', '@work.example', '@Client.example'],
       },
     ],
     important: {
-      always: [{ address: 'Alerts@X.com', words: [' Crash ', ''] }],
-      never: ['Bot@Y.com'],
+      always: [{ address: 'Alerts@X.example', words: [' Crash ', ''] }],
+      never: ['Bot@Y.example'],
     },
   }
   expect(resolveSplitScope(undefined, settings, own)).toBeUndefined()
@@ -181,20 +181,20 @@ it('resolves tabs from settings', () => {
   expect(resolveSplitScope('gone', settings, own)).toBeNull()
   expect(resolveSplitScope('t1', settings, own)).toEqual({
     kind: 'rules',
-    addresses: ['client.person@gmail.com'],
+    addresses: ['y@gmail.com'],
     domains: ['example.client'],
   })
   expect(resolveSplitScope('important', settings, own)).toEqual({
     kind: 'important',
-    always: [{ address: 'alerts@x.com', words: ['crash'] }],
-    never: ['bot@y.com'],
+    always: [{ address: 'alerts@x.example', words: ['crash'] }],
+    never: ['bot@y.example'],
   })
 })
 it('keeps the new settings and query fields through the schemas', () => {
   expect(querySchema.parse({ view: 'inbox', tab: 'important' }).tab).toBe('important')
   const parsed = settingsSchema.parse({
     ...defaultSettings,
-    splitTabs: [{ id: 't', name: 'A', rules: ['@a.com'] }],
+    splitTabs: [{ id: 't', name: 'A', rules: ['@a.example'] }],
     important: { always: [], never: [] },
     splitImportOffered: true,
   })
@@ -262,7 +262,7 @@ SQL shape (the implementer writes it; these are the decisions):
 - Keep the predicate in `WHERE` before `GROUP BY`, so `total`, keyset `after`, and `offset` paging work unchanged.
 
 - [ ] **Step 1: Write failing tests** (fixture: INBOX + Archive + Sent; threads built with `references`):
-  - `rules tab matches any participant on any message of the thread`: thread A inbox message from `julia@client.example`; thread B inbox message from a colleague with `cc: julia@mail.client.example`; thread C whose inbox message is from a work colleague but an archived message in the same thread is from `client.person@gmail.com`; thread D only archived (no inbox message) from the client person; thread E from `x@notclient.example`. Scope `{kind:'rules', addresses:['client.person@gmail.com'], domains:[domainKey('client.example')]}` → threads A, B, C; total 3.
+  - `rules tab matches any participant on any message of the thread`: thread A inbox message from `julia@client.example`; thread B inbox message from a colleague with `cc: julia@mail.client.example`; thread C whose inbox message is from a work colleague but an archived message in the same thread is from `y@gmail.com`; thread D only archived (no inbox message) from the client person; thread E from `x@notclient.example`. Scope `{kind:'rules', addresses:['y@gmail.com'], domains:[domainKey('client.example')]}` → threads A, B, C; total 3.
   - `Gmail duplicates count once`: the same email (same `emailId`) in INBOX and `[Gmail]/All Mail`, unseen; `tabCounts` unread = 1, conversations = 1.
   - `important leaves out automated mail and honours always and never`: inbox threads from a person, from `no-reply@asana.com`, from a sender with `unsubscribe`, from `alerts@crashlytics.com` subject "New crash in app" and another subject "Weekly digest", and from `colleague@work.example`; scope always `[{address:'alerts@crashlytics.com', words:['crash','failure']}]`, never `['colleague@work.example']` → only the person thread and the crash thread.
   - `important looks only at inbox messages`: a thread whose inbox message is automated but whose Sent message is from Khyati is not in Important.
@@ -386,7 +386,7 @@ TabRow behaviour:
 
 Behaviour:
 
-- `Modal` titled `New tab` or `Edit <name>`: name field, then a textarea "Addresses and domains, one per line" with placeholder `client.person@gmail.com\n@client.example`. Problems list under the textarea (`Line 3: …reason`). Below it, live: `Matches 12 conversations in your inbox` (debounced 300 ms; `Checking…` while loading; hidden when there are no valid rules).
+- `Modal` titled `New tab` or `Edit <name>`: name field, then a textarea "Addresses and domains, one per line" with placeholder `y@gmail.com\n@client.example`. Problems list under the textarea (`Line 3: …reason`). Below it, live: `Matches 12 conversations in your inbox` (debounced 300 ms; `Checking…` while loading; hidden when there are no valid rules).
 - Tab menu (right-click, the keyboard keys from Task 6, and Ctrl+K commands `Edit tab rules`, `Rename tab`, `Delete tab`, `Move tab left`, `Move tab right` for the active user tab): items Edit rules…, Rename…, Move left, Move right, Delete tab. Delete asks `Delete the tab “<name>”? Its rules are removed. No mail is moved or deleted.` and returns to Inbox if it was active. If `Dropdown` can't be opened programmatically, add optional `open`/`onOpenChange` props to `Dropdown` in `packages/ui/src/index.tsx` (pass-through to `Menu.Root`), nothing else.
 
 - [ ] **Step 1: Write failing tests** for `editorState`: duplicate name refused; `Inbox` refused; refused rule reported and `canSave` false while any problem exists; valid input yields normalised rules.

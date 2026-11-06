@@ -119,7 +119,7 @@ beforeEach(async () => {
     date: '2026-09-21T11:00:00Z',
   })
   await service.connect(connect('a', 'me@work.example'))
-  await service.connect(connect('b', 'me@gmail.com'))
+  await service.connect(connect('b', 'x@gmail.com'))
   await sync('a')
   await sync('b')
   await service.setSettings({ ...service.settings, splitTabs: [tab] })

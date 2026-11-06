@@ -193,7 +193,7 @@ describe('split tab model', () => {
   })
 
   describe('tab editor', () => {
-    const own = ['me@work.example', 'me@gmail.com']
+    const own = ['me@work.example', 'x@gmail.com']
     const tabs = [
       { id: 'a', name: 'Client', rules: ['@client.example'] },
       { id: 'b', name: 'GitHub', rules: ['notifications@github.com'] },
@@ -202,12 +202,12 @@ describe('split tab model', () => {
     it('accepts a new tab and normalises its rules', () => {
       const state = editorState(
         '  Partners ',
-        '  Someone@Gmail.COM \n\npartner.example.\n<x@other.example>\nsomeone@gmail.com',
+        '  Y@Gmail.COM \n\npartner.example.\n<x@other.example>\ny@gmail.com',
         own,
         tabs,
       )
       expect(state).toEqual({
-        rules: ['someone@gmail.com', '@partner.example', 'x@other.example'],
+        rules: ['y@gmail.com', '@partner.example', 'x@other.example'],
         problems: [],
         nameError: undefined,
         limitError: undefined,
@@ -328,7 +328,7 @@ describe('split tab model', () => {
 })
 
 describe('adding a sender to a tab', () => {
-  const own = ['me@work.example', 'me@gmail.com']
+  const own = ['me@work.example', 'x@gmail.com']
   const from = (email: string, receivedAt: string) => ({
     from: [{ name: email.split('@')[0], email }],
     receivedAt,
@@ -342,7 +342,7 @@ describe('adding a sender to a tab', () => {
       from('cleo@client.example', '2026-11-02T10:00:00Z'),
     ]
     expect(senderOf(messages, own)).toEqual({ name: 'ben', email: 'ben@partner.example' })
-    expect(senderOf([from('me@gmail.com', '2026-11-04T10:00:00Z')], own)).toBeUndefined()
+    expect(senderOf([from('x@gmail.com', '2026-11-04T10:00:00Z')], own)).toBeUndefined()
     expect(senderOf([{ from: [], receivedAt: '2026-11-04T10:00:00Z' }], own)).toBeUndefined()
     expect(senderOf([], own)).toBeUndefined()
   })
@@ -366,7 +366,7 @@ describe('adding a sender to a tab', () => {
       address: 'ana@client.example',
       domain: '@client.example',
     })
-    expect(senderRules('someone@gmail.com', own)).toEqual({ address: 'someone@gmail.com' })
+    expect(senderRules('y@gmail.com', own)).toEqual({ address: 'y@gmail.com' })
     // A domain holding one of the user's own addresses would match every conversation.
     expect(senderRules('it@sub.work.example', own).refusal).toMatch(/your own domain/)
     expect(senderRules('it@sub.work.example', own).address).toBeUndefined()

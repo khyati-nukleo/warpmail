@@ -419,10 +419,10 @@ describe('tab filter', () => {
       }),
       message(INBOX!, 30, from('colleague@work.example')),
       message(Archive!, 31, {
-        ...from('client.person@gmail.com'),
+        ...from('partner@elsewhere.example'),
         references: ['m30@example.com'],
       }),
-      message(Archive!, 40, from('client.person@gmail.com')),
+      message(Archive!, 40, from('partner@elsewhere.example')),
       message(INBOX!, 50, from('x@notclient.example')),
       // Its domain key sorts inside the range of `example.client`.
       message(INBOX!, 60, from('x@client-eu.example')),
@@ -430,7 +430,7 @@ describe('tab filter', () => {
     const page = await all(
       {
         kind: 'rules',
-        addresses: ['client.person@gmail.com'],
+        addresses: ['partner@elsewhere.example'],
         domains: [domainKey('client.example')],
       },
       INBOX!,
