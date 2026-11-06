@@ -90,6 +90,7 @@ export function ConversationList({
   onFocus,
   onSelect,
   onAction,
+  panel,
 }: {
   conversations: Conversation[]
   accounts: Account[]
@@ -112,6 +113,8 @@ export function ConversationList({
   onFocus: (key: string) => void
   onSelect: (key: string, range: boolean) => void
   onAction: (action: MailAction, conversation: Conversation) => void
+  /** Names the list after the inbox tab that controls it. */
+  panel?: { id: string; labelledBy: string }
 }) {
   const rowHeight = density === 'compact' ? 44 : 64
   const groupHeight = 36
@@ -250,6 +253,8 @@ export function ConversationList({
       tabIndex={0}
       role="grid"
       aria-label="Conversations"
+      id={panel?.id}
+      aria-labelledby={panel?.labelledBy}
       aria-activedescendant={focused ? 'mail-' + encodeURIComponent(focused) : undefined}
       aria-rowcount={total}
       aria-multiselectable="true"

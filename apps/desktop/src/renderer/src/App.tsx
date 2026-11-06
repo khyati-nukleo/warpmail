@@ -335,10 +335,10 @@ export function App() {
       accountId: accounts.some((a) => a.id === route.account) ? route.account : undefined,
       mailboxId: route.folder,
       text: route.q || undefined,
-      tab: split.visible && split.active !== 'inbox' ? split.active : undefined,
+      tab: split.tabParam,
       ...filters,
     }),
-    [view, route.account, route.folder, route.q, filters, accounts, split.visible, split.active],
+    [view, route.account, route.folder, route.q, filters, accounts, split.tabParam],
   )
   const queryId = JSON.stringify(query)
   useEffect(() => {
@@ -1198,8 +1198,10 @@ export function App() {
     try {
       const next = await api.settings({ ...settings, ...patch })
       queryClient.setQueryData<Bootstrap>(['bootstrap'], (old) => old && { ...old, settings: next })
+      return true
     } catch (e) {
       fail(e)
+      return false
     }
   }
   const commandTarget = view !== 'drafts' && (route.thread || selected.size || focused)
@@ -1423,7 +1425,7 @@ export function App() {
             icon: Inbox,
             keywords: 'unified switch account',
             checked: !account,
-            run: () => go({ view: 'inbox' }),
+            run: () => go({ view: 'inbox', tab: split.tabParam }),
           },
           ...accounts.map((a) => ({
             id: 'account-' + a.id,
@@ -1433,7 +1435,7 @@ export function App() {
             account: a,
             keywords: a.email + ' switch account',
             checked: account?.id === a.id,
-            run: () => go({ view: 'inbox', account: a.id }),
+            run: () => go({ view: 'inbox', account: a.id, tab: split.tabParam }),
           })),
         ]
       : []),
@@ -1771,7 +1773,7 @@ export function App() {
                       <div className="menu-label py-1.75 px-2.5 text-[11px] text-muted">
                         Mail accounts
                       </div>
-                      <MenuItem onClick={() => go({ view, q: route.q })}>
+                      <MenuItem onClick={() => go({ view, q: route.q, tab: split.tabParam })}>
                         <Inbox size={15} />
                         <span
                           className={cn(
@@ -1792,7 +1794,9 @@ export function App() {
                       {accounts.map((item) => (
                         <MenuItem
                           key={item.id}
-                          onClick={() => go({ view, q: route.q, account: item.id })}
+                          onClick={() =>
+                            go({ view, q: route.q, account: item.id, tab: split.tabParam })
+                          }
                         >
                           <AccountMark account={item} size={28} />
                           <span
@@ -2357,8 +2361,8 @@ export function App() {
                 <EmptyState icon={Mail} title="Loading mail">
                   <Spinner />
                 </EmptyState>
-              ) : split.empty && !hasFilters ? (
-                <TabEmptyState {...split.empty} />
+              ) : split.empty && !hasSearchFilters ? (
+                <TabEmptyState {...split.empty} unreadOnly={!!filters.unread} />
               ) : (
                 <EmptyState
                   {...emptyListState(view, {
@@ -2404,6 +2408,7 @@ export function App() {
                     { accountId: conversation.accountId, threadId: conversation.id },
                   ])
                 }
+                panel={split.panel}
               />
             )}
             <footer

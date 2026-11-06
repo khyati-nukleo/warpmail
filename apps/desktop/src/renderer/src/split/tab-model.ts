@@ -1,3 +1,4 @@
+import type { QueryClient, QueryKey } from '@tanstack/react-query'
 import type { Account, Settings, SplitTab } from '@inlark/core'
 
 export interface TabEntry {
@@ -76,15 +77,25 @@ export interface TabEmptyCopy {
   note?: string
 }
 
-export function tabEmptyCopy(entry: TabEntry, untabbed: string[]): TabEmptyCopy {
-  const copy: TabEmptyCopy = {
-    id: entry.id,
-    title: 'Nothing in ' + entry.name,
-    description:
-      entry.id === 'important'
-        ? 'Mail from people in your inbox shows here.'
-        : 'Conversations in your inbox from this tab’s people show here.',
-  }
+export function tabEmptyCopy(
+  entry: TabEntry,
+  untabbed: string[],
+  unreadOnly = false,
+): TabEmptyCopy {
+  const copy: TabEmptyCopy = unreadOnly
+    ? {
+        id: entry.id,
+        title: 'Nothing unread in ' + entry.name,
+        description: 'You’ve read everything here.',
+      }
+    : {
+        id: entry.id,
+        title: 'Nothing in ' + entry.name,
+        description:
+          entry.id === 'important'
+            ? 'Mail from people in your inbox shows here.'
+            : 'Conversations in your inbox from this tab’s people show here.',
+      }
   if (untabbed.length)
     copy.note =
       untabbed.join(' and ') +
@@ -92,4 +103,37 @@ export function tabEmptyCopy(entry: TabEntry, untabbed: string[]): TabEmptyCopy 
         ? ' aren’t included in tabs yet. Their mail is in Inbox.'
         : ' isn’t included in tabs yet. Its mail is in Inbox.')
   return copy
+}
+
+/** The DOM ids that tie each tab to the list it controls. */
+export const tabPanelId = 'inbox-tab-panel'
+export const tabElementId = (id: string) => 'inbox-tab-' + id
+
+/** Runs tasks one after another, so a later save never races an earlier one. */
+export function serialQueue() {
+  let last: Promise<unknown> = Promise.resolve()
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = last.then(task, task)
+    last = run.catch(() => {})
+    return run
+  }
+}
+
+/**
+ * Resolves once no query under `queryKey` is fetching. Waits a tick first so a fetch started
+ * in the same render (a new list, a refresh) is seen.
+ */
+export function whenIdle(client: QueryClient, queryKey: QueryKey): Promise<void> {
+  return new Promise((resolve) => {
+    let unsubscribe: (() => void) | undefined
+    const check = () => {
+      if (client.isFetching({ queryKey })) return false
+      unsubscribe?.()
+      resolve()
+      return true
+    }
+    setTimeout(() => {
+      if (!check()) unsubscribe = client.getQueryCache().subscribe(check)
+    })
+  })
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { QueryClient } from '../apps/desktop/node_modules/@tanstack/react-query'
 import type { Account, Settings, SplitTab } from '../packages/core/src'
 import {
   activeTabId,
@@ -6,10 +7,12 @@ import {
   dropIndex,
   moveTab,
   rovingTarget,
+  serialQueue,
   tabEmptyCopy,
   tabEntries,
   tabForShortcut,
   untabbedAccounts,
+  whenIdle,
 } from '../apps/desktop/src/renderer/src/split/tab-model'
 
 const tab = (id: string): SplitTab => ({ id, name: 'Tab ' + id, rules: [] })
@@ -111,5 +114,60 @@ describe('split tab model', () => {
     expect(tabEmptyCopy(user, ['Fastmail', 'Home']).note).toBe(
       'Fastmail and Home aren’t included in tabs yet. Their mail is in Inbox.',
     )
+  })
+
+  it('says when a tab has nothing unread', () => {
+    expect(tabEmptyCopy(entries[2], ['Fastmail'], true)).toEqual({
+      id: 'a',
+      title: 'Nothing unread in Tab a',
+      description: 'You’ve read everything here.',
+      note: 'Fastmail isn’t included in tabs yet. Its mail is in Inbox.',
+    })
+  })
+
+  it('runs queued saves one at a time, in order', async () => {
+    const queue = serialQueue()
+    const log: string[] = []
+    let release!: () => void
+    const first = queue(
+      () =>
+        new Promise<string>((resolve) => {
+          log.push('first started')
+          release = () => resolve('one')
+        }),
+    )
+    const second = queue(async () => {
+      log.push('second started')
+      return 'two'
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(log).toEqual(['first started'])
+    release()
+    expect(await first).toBe('one')
+    expect(await second).toBe('two')
+    expect(log).toEqual(['first started', 'second started'])
+    // A failed task doesn't stop the next one.
+    await expect(queue(() => Promise.reject(new Error('no')))).rejects.toThrow('no')
+    expect(await queue(async () => 'three')).toBe('three')
+  })
+
+  it('waits for the list to finish loading', async () => {
+    const client = new QueryClient()
+    let finish!: (value: number) => void
+    const page = client.fetchQuery({
+      queryKey: ['mail', { view: 'inbox' }],
+      queryFn: () => new Promise<number>((resolve) => (finish = resolve)),
+    })
+    let idle = false
+    const waiting = whenIdle(client, ['mail']).then(() => (idle = true))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(idle).toBe(false)
+    finish(1)
+    await page
+    await waiting
+    expect(idle).toBe(true)
+    // Resolves at once (after a tick) when nothing is loading.
+    await whenIdle(client, ['mail'])
   })
 })

@@ -1,7 +1,9 @@
-import { useIsFetching, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
+import { useRef, useState } from 'react'
 import { Inbox, UserRound } from '@inlark/ui/icons'
-import { friendlyError, type Account, type Settings, type SplitTab } from '@inlark/core'
+import type { Account, Bootstrap, Settings, SplitTab } from '@inlark/core'
 import { api } from '../api'
+import { queryClient } from '../cache'
 import type { Command } from '../CommandPalette'
 import type { RouteSearch } from '../main'
 import {
@@ -14,10 +16,13 @@ import {
   activeTabId,
   adjacentTab,
   moveTab,
-  tabEmptyCopy,
+  serialQueue,
+  tabElementId,
   tabEntries,
   tabForShortcut,
+  tabPanelId,
   untabbedAccounts,
+  whenIdle,
 } from './tab-model'
 
 /** The tab row's state, shortcuts and commands, kept out of App.tsx. */
@@ -27,7 +32,6 @@ export function useSplitInbox({
   route,
   go,
   inboxUnread,
-  notify,
   saveSettings,
 }: {
   settings: Settings
@@ -36,8 +40,10 @@ export function useSplitInbox({
   go: (next: RouteSearch) => void
   /** The sidebar's inbox unread count for the accounts in scope. */
   inboxUnread: number
+  /** For the tab editor and pickers that come next. */
   notify: (text: string, tone?: 'error' | 'info') => void
-  saveSettings: (patch: Partial<Settings>) => Promise<void>
+  /** Saves and shows any error itself; resolves to whether the save worked. */
+  saveSettings: (patch: Partial<Settings>) => Promise<boolean>
 }) {
   const keys = useShortcutText()
   const entries = tabEntries(settings)
@@ -49,12 +55,15 @@ export function useSplitInbox({
     [...(settings.splitTabs ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
     settings.important ?? null,
   ])
-  // Counts share the index worker with page loads, so they wait until the list has its mail.
-  const listLoading = useIsFetching({ queryKey: ['mail'] }) > 0
   const tabCounts = useQuery({
     queryKey: ['tabCounts', accountId, tabsKey],
-    queryFn: () => api.tabCounts(accountId),
-    enabled: visible && accounts.length > 0 && !listLoading,
+    queryFn: async ({ signal }) => {
+      // Counts share the index worker with page loads, so they wait until the list has its mail.
+      await whenIdle(queryClient, ['mail'])
+      signal.throwIfAborted()
+      return api.tabCounts(accountId)
+    },
+    enabled: visible && accounts.length > 0,
     staleTime: 10_000,
     // Edited tabs keep their old counts until the new ones arrive; another account doesn't.
     placeholderData: (previous, query) => (query?.queryKey[1] === accountId ? previous : undefined),
@@ -65,15 +74,34 @@ export function useSplitInbox({
     if (visible && !route.thread && id === active) return
     go({ view: 'inbox', account: route.account, tab: id === 'inbox' ? undefined : id })
   }
-  const saveTabs = async (tabs: SplitTab[]) => {
-    try {
-      await saveSettings({ splitTabs: tabs })
-    } catch (error) {
-      notify(friendlyError(error), 'error')
-    }
+  // Tab saves run one at a time, so a later one never races an earlier one.
+  const [queue] = useState(serialQueue)
+  const saveTabs = (tabs: SplitTab[]) => queue(() => saveSettings({ splitTabs: tabs }))
+
+  // While reorders save: the order last dropped, and the last one known to be saved.
+  const shownOrder = useRef<SplitTab[]>(undefined)
+  const savedOrder = useRef<SplitTab[]>([])
+  const showTabs = (tabs: SplitTab[]) =>
+    queryClient.setQueryData<Bootstrap>(
+      ['bootstrap'],
+      (old) => old && { ...old, settings: { ...old.settings, splitTabs: tabs } },
+    )
+  /** Shows the new order at once; saves run one at a time and a failed one puts it back. */
+  const reorder = (id: string, toIndex: number) => {
+    // The cache, not this render's settings, so a quick second drag builds on the first.
+    const before = queryClient.getQueryData<Bootstrap>(['bootstrap'])?.settings.splitTabs ?? []
+    const tabs = moveTab(before, id, toIndex)
+    if (!shownOrder.current) savedOrder.current = before
+    shownOrder.current = tabs
+    showTabs(tabs)
+    void saveTabs(tabs).then((saved) => {
+      if (saved) savedOrder.current = tabs
+      // A newer order is waiting to save; keep it on screen over this save's result.
+      if (shownOrder.current !== tabs) return showTabs(shownOrder.current!)
+      shownOrder.current = undefined
+      if (!saved) showTabs(savedOrder.current)
+    })
   }
-  const reorder = (id: string, toIndex: number) =>
-    void saveTabs(moveTab(settings.splitTabs ?? [], id, toIndex))
   // The tab menu and the new-tab box come with the tab editor.
   const openMenu = (_id: string, _anchor: HTMLElement) => {}
   const add = () => {}
@@ -111,13 +139,12 @@ export function useSplitInbox({
     run: () => select(entry.id),
   }))
 
-  const activeEntry = entries.find((entry) => entry.id === active)!
   const empty =
     visible && active !== 'inbox'
-      ? tabEmptyCopy(
-          activeEntry,
-          untabbedAccounts(accounts, accountId).map((a) => a.name),
-        )
+      ? {
+          entry: entries.find((entry) => entry.id === active)!,
+          untabbed: untabbedAccounts(accounts, accountId).map((a) => a.name),
+        }
       : undefined
 
   return {
@@ -129,8 +156,12 @@ export function useSplitInbox({
     saveTabs,
     shortcutHandlers,
     commands,
-    /** What an empty list says in Important or a user tab. */
+    /** The `tab` route and query parameter for the list on screen, if any. */
+    tabParam: visible && active !== 'inbox' ? active : undefined,
+    /** For `TabEmptyState` when Important or a user tab is empty. */
     empty,
+    /** Ties the conversation list to the active tab while the row shows. */
+    panel: visible ? { id: tabPanelId, labelledBy: tabElementId(active) } : undefined,
     /** Props for `TabRow`. */
     row: {
       entries,

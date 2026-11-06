@@ -1,7 +1,14 @@
 import { cn, EmptyState, IconButton } from '@inlark/ui'
 import { Inbox, Plus, UserRound } from '@inlark/ui/icons'
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { dropIndex, rovingTarget, type TabEmptyCopy, type TabEntry } from './tab-model'
+import {
+  dropIndex,
+  rovingTarget,
+  tabElementId,
+  tabEmptyCopy,
+  tabPanelId,
+  type TabEntry,
+} from './tab-model'
 
 const dragType = 'application/x-warpmail-tab'
 
@@ -103,7 +110,9 @@ export function TabRow({
               }}
               type="button"
               role="tab"
+              id={tabElementId(entry.id)}
               aria-selected={chosen}
+              aria-controls={tabPanelId}
               tabIndex={entry.id === tabStop ? 0 : -1}
               className={cn(
                 'tab relative inline-flex items-center gap-1.5 h-7.5 py-0 px-2.75 shrink-0 rounded-sm',
@@ -184,10 +193,20 @@ export function TabRow({
 }
 
 /** The empty list in Important or a user tab. */
-export function TabEmptyState({ id, title, description, note }: TabEmptyCopy) {
+export function TabEmptyState({
+  entry,
+  untabbed,
+  unreadOnly,
+}: {
+  entry: TabEntry
+  /** Accounts in scope that tabs leave out. */
+  untabbed: string[]
+  unreadOnly: boolean
+}) {
+  const { title, description, note } = tabEmptyCopy(entry, untabbed, unreadOnly)
   return (
     <EmptyState
-      icon={id === 'important' ? UserRound : Inbox}
+      icon={entry.id === 'important' ? UserRound : Inbox}
       title={title}
       description={description}
     >
