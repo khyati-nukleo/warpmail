@@ -107,6 +107,8 @@ import {
   useShortcuts,
 } from './shortcuts'
 import { emptyListState } from './empty-states'
+import { TabEmptyState, TabRow } from './split/TabRow'
+import { useSplitInbox } from './split/useSplitInbox'
 import { AccountMark } from './AccountMark'
 import { lockVault, useEncryption } from './encryption-ui'
 import { useUnlock } from './encryption-actions'
@@ -316,6 +318,15 @@ export function App() {
         },
       ),
   })
+  const split = useSplitInbox({
+    settings,
+    accounts,
+    route,
+    go: (next) => go(next),
+    inboxUnread: account ? mailboxCounts.byAccount[account.id] || 0 : mailboxCounts.unread,
+    notify,
+    saveSettings: (patch) => savePreferences(patch),
+  })
   const currentFolder = boxes.data?.find((b) => b.id === route.folder)
   const query: MailQuery = useMemo(
     () => ({
@@ -324,9 +335,10 @@ export function App() {
       accountId: accounts.some((a) => a.id === route.account) ? route.account : undefined,
       mailboxId: route.folder,
       text: route.q || undefined,
+      tab: split.visible && split.active !== 'inbox' ? split.active : undefined,
       ...filters,
     }),
-    [view, route.account, route.folder, route.q, filters, accounts],
+    [view, route.account, route.folder, route.q, filters, accounts, split.visible, split.active],
   )
   const queryId = JSON.stringify(query)
   useEffect(() => {
@@ -469,7 +481,7 @@ export function App() {
           .map((c) => ({ accountId: c.accountId, threadId: c.id }))
   const refresh = async () => {
     await Promise.all(
-      ['mail', 'thread', 'mailboxes', 'drafts', 'submissions'].map((key) =>
+      ['mail', 'thread', 'mailboxes', 'drafts', 'submissions', 'tabCounts'].map((key) =>
         queryClient.invalidateQueries({ queryKey: [key] }),
       ),
     )
@@ -1170,6 +1182,7 @@ export function App() {
       goSpam: { run: () => go({ view: 'junk' }) },
       goTrash: { run: () => go({ view: 'trash' }) },
       goAll: { run: () => go({ view: 'all' }) },
+      ...split.shortcutHandlers,
     },
     !blocked,
   )
@@ -1400,6 +1413,7 @@ export function App() {
       keywords: 'go open view',
       run: () => go({ view: 'all' }),
     },
+    ...split.commands,
     ...(accounts.length > 1
       ? [
           {
@@ -1859,6 +1873,7 @@ export function App() {
                 )}
               </div>
             </div>
+            {split.visible && <TabRow {...split.row} />}
             {searchOpen && (
               <form
                 className={cn(
@@ -2342,6 +2357,8 @@ export function App() {
                 <EmptyState icon={Mail} title="Loading mail">
                   <Spinner />
                 </EmptyState>
+              ) : split.empty && !hasFilters ? (
+                <TabEmptyState {...split.empty} />
               ) : (
                 <EmptyState
                   {...emptyListState(view, {
