@@ -56,13 +56,17 @@ Every recipient sees **the same email with the same To and Cc lines**, so reply-
 
 **Khyati's Sent folder keeps one clean copy, with no image.** Gmail saves its own copy of each email sent through it. The app replaces those with a single clean copy afterwards.
 
-**Test first.** Before the rest is built, a small test against a real Gmail account checks that:
+**Send test: passed on 2026-11-06.** The test sent one email from the work account (Google Workspace) to two Gmail accounts, one on To and one on Cc. Every copy had identical headers and was addressed to one recipient only. Results:
 
-- Gmail ends up with exactly one Sent copy;
-- the conversation doesn't split, for Khyati and for Gmail and Outlook recipients;
-- replies thread normally.
+- Gmail accepted both copies and kept the app's `Message-ID`.
+- **Gmail merged the two copies into one Sent copy: the first one, carrying the first recipient's image.** That's why the app must replace it. Otherwise, viewing Sent in Gmail would count as the first recipient opening it.
+- Deleting that copy for good and filing one clean copy worked. Gmail kept the clean copy, with no image, exactly one copy in All Mail, and To and Cc intact.
+- Each recipient got the email once, with everyone on To and Cc.
+- A reply-all landed in the same conversation for Khyati (same Gmail thread ID as the clean Sent copy) and for the other recipient.
 
-**If Gmail won't cooperate, use the fallback** (roadmap call, 2026-11-03):
+The per-recipient design goes ahead, and the fallback isn't needed. **Not covered by the test:** Outlook recipients, Bcc recipients, and a Workspace account as the recipient. The risk is low, since each recipient's mailbox only ever receives one copy. The builder checks Outlook and Bcc once sending is built.
+
+**The fallback, kept for the record** (roadmap call, 2026-11-03), in case another provider won't cooperate:
 
 - one image per email, shown as "opened by someone";
 - per-person status only for emails with a single recipient.
@@ -143,7 +147,7 @@ Builder-level calls by Claude (can be overridden):
 
 **Order:**
 
-1. **The send test** (the one-copy-per-recipient spike) against a real Gmail account. Stop and report if Gmail won't cooperate.
+1. ~~The send test~~: passed on 2026-11-06 (see "One copy per recipient"). The test script lives outside the repo, in Khyati's private folder, because its results contain real addresses.
 2. The Worker.
 3. Sending.
 4. Collecting and the statuses.
@@ -155,7 +159,11 @@ Builder-level calls by Claude (can be overridden):
 - the SMTP envelope is addressed to that one recipient;
 - the HTML part carries that recipient's image.
 
-Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. The "Sending…" and "Sent" states from the speed work must stay accurate.
+Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Do this straight after the last copy is sent, because Gmail's merged Sent copy carries the first recipient's image until it's replaced. How the send test did it, which worked:
+
+- Find the copies in All Mail with `X-GM-RAW "rfc822msgid:<id>"` and move them to Trash. Deleting from Sent only removes the Sent label.
+- Delete them from Trash for good. Find them there with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
+- `APPEND` the clean copy to Sent with `\Seen`. Gmail accepts it even though the deleted copies had the same `Message-ID`. Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. The "Sending…" and "Sent" states from the speed work must stay accurate.
 
 **The Worker:**
 

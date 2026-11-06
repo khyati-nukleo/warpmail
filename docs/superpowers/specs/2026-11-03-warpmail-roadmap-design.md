@@ -52,10 +52,10 @@ Protocols today: JMAP, IMAP and SMTP with passwords only. **No Google or Microso
 | 0   | Speed and reliability on Gmail over IMAP           | Done (see "Speed work" below)         |
 | 1   | Connect Google accounts (app password)             | Done: connected and working           |
 | 1b  | Optional Google sign-in (Gmail API mode)           | Documented below, not started         |
-| 2   | Split inbox per project                            | Designed; build session ready         |
-| 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; build after split inbox     |
+| 2   | Split inbox per project                            | Done: merged (PR #3)                  |
+| 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; ready to build              |
 | 4   | Draft improvement (AI)                             | Designed; build when API key is ready |
-| 5   | Read status, per recipient                         | Designed; send test comes first       |
+| 5   | Read status, per recipient                         | Designed; send test passed, ready     |
 | 6   | Undo send                                          | Not started                           |
 | 7   | Snippets (reusable text)                           | Not started                           |
 | 8   | Snooze                                             | Not started                           |
@@ -248,7 +248,7 @@ Follow-up: the app's background process still freezes for 1–5 s now and then (
 
 **Colleagues too (2026-11-05):** emails to Khyati's own company are tracked like any other, with the composer switch to turn it off.
 
-**Full design:** [2026-11-05-read-status-design.md](2026-11-05-read-status-design.md). Sending one copy per recipient is tested against Gmail first; encrypted emails are never tracked; the Worker stores no IP addresses and deletes records after 90 days.
+**Full design:** [2026-11-05-read-status-design.md](2026-11-05-read-status-design.md). Sending one copy per recipient passed its Gmail send test on 2026-11-06, so per-person status goes ahead without the fallback; encrypted emails are never tracked; the Worker stores no IP addresses and deletes records after 90 days.
 
 ### 6–16. Later features
 
