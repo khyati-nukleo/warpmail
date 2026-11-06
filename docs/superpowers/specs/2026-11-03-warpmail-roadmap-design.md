@@ -47,26 +47,26 @@ Protocols today: JMAP, IMAP and SMTP with passwords only. **No Google or Microso
 
 ## Roadmap and status
 
-| #   | Feature                                            | Status                                 |
-| --- | -------------------------------------------------- | -------------------------------------- |
-| 0   | Speed and reliability on Gmail over IMAP           | Done (see "Speed work" below)          |
-| 1   | Connect Google accounts (app password)             | Done: connected and working            |
-| 1b  | Optional Google sign-in (Gmail API mode)           | Documented below, not started          |
-| 2   | Split inbox per project                            | Designed; build session ready          |
-| 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; build after split inbox      |
-| 4   | Draft improvement (AI)                             | Button agreed, AI service chosen later |
-| 5   | Read status, per recipient                         | Direction agreed, Cloudflare Worker    |
-| 6   | Undo send                                          | Not started                            |
-| 7   | Snippets (reusable text)                           | Not started                            |
-| 8   | Snooze                                             | Not started                            |
-| 9   | Scheduled send                                     | Not started                            |
-| 10  | Gmail labels                                       | Not started                            |
-| 11  | AI summaries                                       | Not started                            |
-| 12  | Calendar                                           | Not started                            |
-| 13  | Contact side panel                                 | Not started                            |
-| 14  | Team thread sharing and comments                   | Not started                            |
-| 15  | Outlook / Microsoft sign-in                        | Not started                            |
-| 16  | Mobile app                                         | Not started                            |
+| #   | Feature                                            | Status                                |
+| --- | -------------------------------------------------- | ------------------------------------- |
+| 0   | Speed and reliability on Gmail over IMAP           | Done (see "Speed work" below)         |
+| 1   | Connect Google accounts (app password)             | Done: connected and working           |
+| 1b  | Optional Google sign-in (Gmail API mode)           | Documented below, not started         |
+| 2   | Split inbox per project                            | Designed; build session ready         |
+| 3   | Follow-up nudges + "you forgot to reply" reminders | Designed; build after split inbox     |
+| 4   | Draft improvement (AI)                             | Designed; build when API key is ready |
+| 5   | Read status, per recipient                         | Direction agreed, Cloudflare Worker   |
+| 6   | Undo send                                          | Not started                           |
+| 7   | Snippets (reusable text)                           | Not started                           |
+| 8   | Snooze                                             | Not started                           |
+| 9   | Scheduled send                                     | Not started                           |
+| 10  | Gmail labels                                       | Not started                           |
+| 11  | AI summaries                                       | Not started                           |
+| 12  | Calendar                                           | Not started                           |
+| 13  | Contact side panel                                 | Not started                           |
+| 14  | Team thread sharing and comments                   | Not started                           |
+| 15  | Outlook / Microsoft sign-in                        | Not started                           |
+| 16  | Mobile app                                         | Not started                           |
 
 Items 1–5 are Khyati's order. Items 6–16 are my proposed order (cheapest and most self-contained first, biggest last); Khyati can reorder. The original "11 missing features" list grouped some of these together; they are split here so each can be tracked.
 
@@ -215,7 +215,11 @@ Follow-up: the app's background process still freezes for 1–5 s now and then (
 
 **My call:** build the button against a swappable AI provider, so the service can be chosen or changed without touching the button. Options to weigh when choosing: a paid API (Claude or Gemini paid tier: content isn't used for training, but it still leaves the computer), or a model running on Khyati's own computer (fully private, weaker writing). Add the Warpmail MCP server later as a second way in through Khyati's Claude subscription.
 
-**Open for the design pass:** what "improve" means to Khyati (grammar, tone, shorter, more formal), whether drafts are in English, French or both, and how Khyati reviews the suggestion before accepting it.
+**What "improve" means (2026-11-05):** one Improve button polishes the draft (grammar, wording, clarity) while keeping Khyati's tone and length. A small menu next to it offers one-click styles: shorter, more formal, friendlier. Drafts are written in **English**.
+
+**Review (2026-11-05):** the improved text appears as a preview with the changes highlighted. Enter accepts, Escape keeps the original, and another style can be tried from the preview. Nothing changes until Khyati accepts.
+
+**AI service (2026-11-05):** Anthropic's Claude API with Khyati's own key; only Khyati's draft text is sent (not the quoted email, signature or recipients). **Full design:** [2026-11-05-improve-draft-design.md](2026-11-05-improve-draft-design.md). Build once Khyati has the key.
 
 ### 5. Read status, per recipient
 
