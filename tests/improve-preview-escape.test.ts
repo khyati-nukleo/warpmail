@@ -102,6 +102,28 @@ describe('Improve preview keys inside the composer dialog', () => {
     await press(document.querySelector('[role="region"]')!, 'Enter')
     expect(shown.improve.accept).toHaveBeenCalledTimes(1)
   })
+
+  it('accepts on Enter even after Tab moved focus to a style, never starting another improve', async () => {
+    const { improve } = await render(preview)
+    const shorter = [...document.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Shorter'),
+    )!
+    shorter.focus()
+    await press(shorter, 'Enter')
+    expect(improve.accept).toHaveBeenCalledTimes(1)
+    expect(improve.start).not.toHaveBeenCalled()
+  })
+
+  it('keeps the original on Enter when “Keep original” has focus', async () => {
+    const { improve } = await render(preview)
+    const keep = [...document.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Keep original'),
+    )!
+    keep.focus()
+    await press(keep, 'Enter')
+    expect(improve.keep).toHaveBeenCalledTimes(1)
+    expect(improve.accept).not.toHaveBeenCalled()
+  })
 })
 
 describe('Improve preview focus', () => {

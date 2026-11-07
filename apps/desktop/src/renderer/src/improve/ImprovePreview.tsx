@@ -55,9 +55,13 @@ export function ImprovePreview({ improve }: { improve: Improve }) {
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
-    // Enter on a focused button presses that button.
-    if (event.key === 'Enter' && event.target !== event.currentTarget) return
-    const action = previewKeyAction(session.phase, event.key)
+    // Enter accepts (or retries) wherever focus is in the preview, so a style that Tab reached
+    // never starts another improve. On a focused "Keep original" it keeps, as that button says.
+    const onKeep =
+      event.key === 'Enter' &&
+      event.target instanceof Element &&
+      event.target.closest('[data-improve-keep]') !== null
+    const action = onKeep ? 'keep' : previewKeyAction(session.phase, event.key)
     if (!action) return
     // Stops the composer dialog, which closes on Escape, from ever seeing the key.
     event.preventDefault()
@@ -167,7 +171,7 @@ export function ImprovePreview({ improve }: { improve: Improve }) {
             <Button variant="primary" onClick={accept}>
               Accept<span className={hint}>Enter</span>
             </Button>
-            <Button variant="ghost" onClick={keep}>
+            <Button variant="ghost" onClick={keep} data-improve-keep="">
               Keep original<span className={hint}>Esc</span>
             </Button>
           </>
@@ -177,7 +181,7 @@ export function ImprovePreview({ improve }: { improve: Improve }) {
             <Button variant="primary" onClick={retry}>
               Try again<span className={hint}>Enter</span>
             </Button>
-            <Button variant="ghost" onClick={keep}>
+            <Button variant="ghost" onClick={keep} data-improve-keep="">
               Keep original<span className={hint}>Esc</span>
             </Button>
           </>
