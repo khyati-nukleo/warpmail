@@ -21,6 +21,7 @@ import {
   LockKeyhole,
   Inbox,
   Sparkles,
+  Eye,
 } from '@inlark/ui/icons'
 import { Button, Dropdown, EmptyState, MenuItem, Modal, Select, Switch } from '@inlark/ui'
 import {
@@ -34,6 +35,7 @@ import { api } from './api'
 import { queryClient, purgeAccountCache } from './cache'
 import { AccountAvatarPicker } from './AccountAvatarPicker'
 import { SignatureSettings } from './SignatureSettings'
+import { ReadStatusSettings } from './read-status/ReadStatusSettings' // Read status
 import { AccountSetup, type SetupMode } from './AccountSetup'
 import { FolderMappingsDialog } from './FolderMappings'
 import { AliasesDialog } from './Aliases'
@@ -259,6 +261,7 @@ export function SettingsPanel({
             {[
               ['general', 'General', SlidersHorizontal],
               ['inbox', 'Inbox', Inbox],
+              ['readStatus', 'Read status', Eye], // Read status
               ['accounts', 'Accounts', Mail],
               ['signatures', 'Signatures', PenLine],
               ['ai', 'AI', Sparkles],
@@ -535,6 +538,8 @@ export function SettingsPanel({
               </>
             )}
             {tab === 'inbox' && <InboxSettings bootstrap={bootstrap} notify={notify} />}
+            {/* Read status */}
+            {tab === 'readStatus' && <ReadStatusSettings bootstrap={bootstrap} notify={notify} />}
             {tab === 'accounts' &&
               (setup ? (
                 <AccountSetup
