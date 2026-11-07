@@ -1816,7 +1816,12 @@ export class MailService {
     // Read status: a quoted Worker image never goes out again, tracked or not.
     const base = workerBase(this.settings.readStatus?.workerUrl)
     const content = base ? { ...draft, html: stripPixels(draft.html, base) } : draft
-    const tracking = this.trackingFor(content, account, provider)
+    // Decided once: the same answer chooses protected MIME and rules out tracking.
+    const encrypted =
+      (draft.encryption && draft.encryption !== 'none') ||
+      this.encryption.identity(draft.accountId, draft.identityId)?.enabled
+    const protection = !encrypted ? 'none' : draft.encryption === 'encrypt' ? 'encrypt' : 'sign'
+    const tracking = this.trackingFor(content, account, provider, base, protection)
     this.busyDrafts.add(draft.id)
     const journal: Journal = {
       draftId: draft.id,
@@ -1859,11 +1864,9 @@ export class MailService {
             'This draft changed in another client. Save a separate copy before sending.',
           )
       }
-      const protectedMime =
-        (draft.encryption && draft.encryption !== 'none') ||
-        this.encryption.identity(draft.accountId, draft.identityId)?.enabled
-          ? await this.protectedMime(content, journal.messageId!)
-          : undefined
+      const protectedMime = encrypted
+        ? await this.protectedMime(content, journal.messageId!)
+        : undefined
       uploaded = protectedMime ? content : await this.uploadDraft(content)
       const outgoing = await provider.prepareSubmission(
         account,
@@ -1957,18 +1960,20 @@ export class MailService {
     }
   }
   /** Read status: the tracked Message-ID and images, or undefined for an untracked send. */
-  private trackingFor(draft: Draft, account: Account, provider: MailProvider) {
+  private trackingFor(
+    draft: Draft,
+    account: Account,
+    provider: MailProvider,
+    base: string | undefined,
+    protection: 'none' | 'encrypt' | 'sign',
+  ) {
     const settings = this.settings.readStatus
-    const base = workerBase(settings?.workerUrl)
     const password = this.readStatusSecret.get()
-    const encrypted =
-      (draft.encryption && draft.encryption !== 'none') ||
-      this.encryption.identity(draft.accountId, draft.identityId)?.enabled
     const block = trackingBlock({
       settings,
       passwordSet: !!password,
       draft,
-      protection: !encrypted ? 'none' : draft.encryption === 'encrypt' ? 'encrypt' : 'sign',
+      protection,
       perCopySending: !!provider.submitCopies && provider.capabilities.sentCopy === 'client',
       ownAddresses: ownAddresses(this.accounts),
     })
@@ -2183,6 +2188,7 @@ export class MailService {
               rejected: draft
                 ? this.rejectedAddresses(draft, j)
                 : (j.rejected || []).map((r) => ({ name: '', email: r.email })),
+              ...(j.tracked ? { unconfirmed: j.unconfirmed ?? [] } : {}),
             },
           ]
         if (j.state === 'sent' && copy && !this.finishing.has(j.draftId))
@@ -2226,13 +2232,16 @@ export class MailService {
     await this.finishing.get(id)
     if (journal?.state !== 'partial' || journal.dismissed || !draft)
       throw new Error('There are no refused recipients to recover for this message.')
+    const refused = new Set(
+      this.rejectedAddresses(draft, journal).map((a) => a.email.toLowerCase()),
+    )
+    // A tracked partial may have only unconfirmed copies: its record must stay.
+    if (!refused.size)
+      throw new Error('There are no refused recipients to recover for this message.')
     this.requireProtectedDraft(draft)
     if (this.busyDrafts.has(id)) throw new Error('Wait for this draft to finish saving.')
     this.busyDrafts.add(id)
     try {
-      const refused = new Set(
-        this.rejectedAddresses(draft, journal).map((a) => a.email.toLowerCase()),
-      )
       const only = (list: Address[]) => list.filter((a) => refused.has(a.email.toLowerCase()))
       const recovery = this.copyDraft(draft, {
         to: only(draft.to),

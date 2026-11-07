@@ -264,11 +264,32 @@ describe('Read status: tracked sending', () => {
       unconfirmed: [sam],
       rejected: [{ email: kim, reason: reasons.notSent }],
     })
+    await service.sendsSettled()
+    expect(await service.submissions()).toMatchObject([
+      { draftId, state: 'partial', rejected: [{ email: kim }], unconfirmed: [sam] },
+    ])
     const recovery = await service.recoverRejected(draftId)
     expect(recipientsOf(recovery)).toEqual([kim])
-    await service.sendsSettled()
     expect(server.box(SENT).messages).toHaveLength(1)
     expect(text(server.box(SENT).messages[0].raw)).not.toContain('read.example.com')
+  })
+  it('a partial with nothing refused offers no recovery and keeps its record', async () => {
+    plan = ['accepted', 'accepted', 'uncertain']
+    const result = await service.send(draft)
+    expect(result.status).toBe('partial')
+    expect(result.message).toContain("Delivery to 1 isn't confirmed.")
+    await service.sendsSettled()
+    const before = await localDraft()
+    await expect(service.recoverRejected(draftId)).rejects.toThrow(
+      'There are no refused recipients to recover for this message.',
+    )
+    expect((await journal()).dismissed).toBeUndefined()
+    expect(await localDraft()).toEqual(before)
+    expect(before).toMatchObject({ status: 'sent', text: 'Hello' })
+    expect(await service.drafts()).toHaveLength(1)
+    expect(await service.submissions()).toMatchObject([
+      { draftId, state: 'partial', rejected: [], unconfirmed: [kim] },
+    ])
   })
   it('a first copy that may have arrived leaves the whole send unconfirmed, never resent', async () => {
     plan = ['uncertain']
@@ -362,15 +383,28 @@ describe('Read status: sends that are never tracked', () => {
     expect(submitCopies).not.toHaveBeenCalled()
     expect(await untrackedReasons()).toEqual(['protected'])
   })
+  const quoted =
+    '<p>Hello</p><blockquote><img src="https://read.example.com/p/OLDOLDOLDOLDOLDOLDOLDO.gif"></blockquote>'
   it('quoted Worker images are stripped from every send', async () => {
     await setReadStatus(false)
-    const quoted =
-      '<p>Hello</p><blockquote><img src="https://read.example.com/p/OLDOLDOLDOLDOLDOLDOLDO.gif"></blockquote>'
     await service.send({ ...draft, html: quoted })
     expect(submit).toHaveBeenCalledTimes(1)
     const mime = text(submit.mock.calls[0][2])
     expect(mime).not.toContain('OLDOLD')
     expect(mime).toContain('Hello')
+  })
+  it('quoted Worker images are stripped from every copy of a tracked send', async () => {
+    expect((await service.send({ ...draft, html: quoted })).status).toBe('sent')
+    expect(submit).not.toHaveBeenCalled()
+    const copies = submitCopies.mock.calls[0][2]
+    expect(copies).toHaveLength(3)
+    for (const copy of copies) {
+      expect(text(copy.mime)).not.toContain('OLDOLD')
+      expect((await parseMime(copy.mime)).html).toContain('read.example.com/p/')
+    }
+    await service.sendsSettled()
+    expect(server.box(SENT).messages).toHaveLength(1)
+    expect(text(server.box(SENT).messages[0].raw)).not.toContain('read.example.com')
   })
 })
 

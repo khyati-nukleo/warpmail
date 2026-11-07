@@ -625,6 +625,7 @@ export interface SubmissionSummary {
   state: 'sent' | 'partial' | 'uncertain'
   sentCopy?: 'pending' | 'uncertain' | 'failed'
   rejected?: Address[]
+  unconfirmed?: string[] // Read status: copies that may have arrived; never recovered.
   error?: string
 }
 export interface Bootstrap {
