@@ -614,6 +614,110 @@ describe('Read status: tracked sending', () => {
       expect(server.box(SENT).messages).toHaveLength(2)
     })
   })
+  describe('a Sent copy that keeps failing', () => {
+    const failing = () =>
+      vi
+        .spyOn(ImapProvider.prototype, 'fileSentCopy')
+        .mockRejectedValue(new ProviderError('filing', 'The server did not accept the Sent copy.'))
+    /** Moves only the clock (timers stay real) to this many minutes after the send. */
+    const at = async (minutes: number) => {
+      const sentAt = Date.parse((await journal()).at)
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(sentAt + minutes * 60_000)
+    }
+    it('is retried after 1, 5, 15 and 60 minutes, then once per start', async () => {
+      const filing = failing()
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      expect(filing).toHaveBeenCalledTimes(1)
+      // Minutes after the send at which a refresh runs, and the attempts expected by then.
+      const schedule: [number, number][] = [
+        [0.5, 1],
+        [1.1, 2], // 1 min after the first failure
+        [3, 2],
+        [6, 2],
+        [6.2, 3], // 5 min after the second
+        [20, 3],
+        [21.3, 4], // 15 min after the third
+        [60, 4],
+        [80, 4],
+        [81.4, 5], // 60 min after the fourth
+        [200, 5],
+        [2000, 5],
+      ]
+      for (const [minutes, attempts] of schedule) {
+        await at(minutes)
+        await service.refresh()
+        expect(filing, `after ${minutes} min`).toHaveBeenCalledTimes(attempts)
+      }
+      expect(await journal()).toMatchObject({ sentCopy: 'failed', sentCopyFailures: 5 })
+      // Each start gets one look, and only one.
+      for (const restart of [1, 2]) {
+        await stop(service)
+        await start()
+        await connected()
+        await vi.waitFor(() => expect(filing).toHaveBeenCalledTimes(5 + restart))
+        await at(3000 + restart)
+        await service.refresh()
+        expect(filing).toHaveBeenCalledTimes(5 + restart)
+      }
+      // The MIME stays for the next look, and nothing was ever sent again.
+      expect((await journal()).mime).toBe(true)
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+      expect(submit).not.toHaveBeenCalled()
+    })
+    it('a restart keeps the schedule it was on', async () => {
+      const filing = failing()
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      await at(1.1)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(2)
+      await stop(service)
+      await start()
+      await connected()
+      // The start's own look, which fails a third time: next try 15 minutes later.
+      await vi.waitFor(() => expect(filing).toHaveBeenCalledTimes(3))
+      await at(10)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(3)
+    })
+    it("says that Gmail's copy still has the image after the first failure", async () => {
+      failing()
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      const [summary] = await service.submissions()
+      expect(summary).toMatchObject({ state: 'sent', sentCopy: 'failed' })
+      expect(summary.error).toContain(
+        "Gmail's Sent copy still has the read status image, so opening it in Gmail may count as an open. It will be retried.",
+      )
+    })
+    it('an owed clean copy keeps its MIME and stays owed on the same schedule', async () => {
+      const filing = vi.spyOn(ImapProvider.prototype, 'fileSentCopy')
+      // The first attempt moves Gmail's copy to Trash and drops; after that it fails for good.
+      submitCopies.mockImplementationOnce(async (...args) => {
+        const outcomes = await fakeCopies(...args)
+        server.hooks.set('APPEND:before', () => {
+          throw new ProviderError('network', 'Connection closed.')
+        })
+        return outcomes
+      })
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      expect(await journal()).toMatchObject({ cleanOwed: true })
+      filing.mockRejectedValue(new ProviderError('filing', "Gmail didn't keep the Sent copy."))
+      await service.refresh() // the drop isn't counted: tried again at the next refresh
+      expect(filing).toHaveBeenCalledTimes(2)
+      await at(0.5)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(2)
+      await at(1.2)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(3)
+      expect(await journal()).toMatchObject({ cleanOwed: true, mime: true, sentCopyFailures: 2 })
+      expect((await journal()).sentCopyError).not.toContain('still has the read status image')
+    })
+  })
   it('a journal write that fails before the first copy is a plain not-sent', async () => {
     const write = store.write.bind(store)
     vi.spyOn(store, 'write').mockImplementation((name, data, version) => {

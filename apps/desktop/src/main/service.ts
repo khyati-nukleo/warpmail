@@ -173,6 +173,9 @@ type Journal = {
   cleanUid?: number
   /** When to look once more for a merged copy Gmail filed after the clean one. */
   sweepAt?: string
+  /** Filing attempts in a row that failed for good, and when the next one may run. */
+  sentCopyFailures?: number
+  sentCopyRetryAt?: string
 }
 /** Drafts are saved to the server only after this long without an edit; local saves are instant. */
 const draftIdleMs = 10_000
@@ -184,6 +187,10 @@ const draftSaveWaitMs = 60_000
 const unconfirmedLookMs = 60 * 60_000
 /** Read status: Gmail may file its merged copy late; looked for once this long after filing. */
 const sweepDelayMs = 60_000
+/** Read status: waits after each failed filing of a tracked Sent copy; then once per start. */
+const sentCopyRetryMs = [1, 5, 15, 60].map((minutes) => minutes * 60_000)
+const imageCopyKept =
+  "Gmail's Sent copy still has the read status image, so opening it in Gmail may count as an open. It will be retried."
 /** Settles when `promise` does or after `ms`, whichever comes first. Never rejects. */
 const settledWithin = (promise: Promise<unknown>, ms: number) => {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -396,7 +403,8 @@ export class MailService {
       }
       if (journal.sentCopy === 'appending') journal.sentCopy = 'uncertain'
       // Read status
-      if (journal.tracked && journal.state === 'uncertain') this.lookOnStart.add(journal.draftId)
+      if (journal.tracked && (journal.state === 'uncertain' || journal.sentCopyFailures))
+        this.lookOnStart.add(journal.draftId)
     }
     await this.persistDrafts()
     await this.persistJournal()
@@ -2135,6 +2143,7 @@ export class MailService {
       await this.persistJournal()
       try {
         const result = await provider.fileSentCopy(account, message)
+        journal.sentCopyFailures = journal.sentCopyRetryAt = undefined
         if (result === 'absent') {
           // Nothing to replace yet; looked for again on the next retry and before a dismiss.
           journal.sentCopy = 'pending'
@@ -2156,6 +2165,7 @@ export class MailService {
             ? 'uncertain'
             : 'failed'
         journal.sentCopyError = friendlyError(error)
+        if (journal.tracked && isProviderError(error, 'filing')) this.backOffSentCopy(journal)
         this.log('sent-copy-failed', journal.sentCopy)
         await this.persistJournal()
       }
@@ -2194,6 +2204,24 @@ export class MailService {
         ['pending', 'appending', 'uncertain', 'failed'].includes(journal.sentCopy || ''))
     )
   }
+  /**
+   * Read status: a tracked filing that failed for good (not a dropped connection) is tried again
+   * after 1, 5, 15 and 60 minutes, then once per start. An owed clean copy stays owed.
+   */
+  private backOffSentCopy(journal: Journal) {
+    const failures = (journal.sentCopyFailures ?? 0) + 1
+    const wait = sentCopyRetryMs[failures - 1]
+    journal.sentCopyFailures = failures
+    journal.sentCopyRetryAt = wait ? new Date(Date.now() + wait).toISOString() : undefined
+    // Nothing was moved yet, so the server's own copy, image included, is still in Sent.
+    if (!journal.cleanOwed) journal.sentCopyError += ' ' + imageCopyKept
+  }
+  /** Read status: whether the periodic retry may file this journal now (see `backOffSentCopy`). */
+  private sentCopyDue(journal: Journal) {
+    if (!journal.tracked || !journal.sentCopyFailures) return true
+    if (!journal.sentCopyRetryAt) return false
+    return Date.now() >= Date.parse(journal.sentCopyRetryAt)
+  }
   /** Read status: replaces the server's copy of an unconfirmed tracked send in the background. */
   private fileUnconfirmedCopy(journal: Journal) {
     const id = journal.draftId
@@ -2211,16 +2239,22 @@ export class MailService {
     for (const journal of this.journals.values())
       if (accountIds.has(journal.accountId) && !this.finishing.has(journal.draftId)) {
         const accepted = ['sent', 'partial'].includes(journal.state)
+        // Read status: one look after each start, whatever the back-off below says.
+        const startLook = this.lookOnStart.delete(journal.draftId)
         // Read status: an unconfirmed tracked send may have left Gmail's copy with an image. It
         // is looked for while recent and once after each start, not every minute forever; a
         // clean copy owed (Gmail's copies may be in Trash) is filed whenever, even if dismissed.
         const unconfirmed =
           journal.tracked &&
           journal.state === 'uncertain' &&
-          (this.lookOnStart.delete(journal.draftId) ||
+          (startLook ||
             journal.cleanOwed ||
             Date.now() - Date.parse(journal.at) < unconfirmedLookMs)
-        if ((accepted || unconfirmed) && (!journal.dismissed || this.sentCopyOwed(journal)))
+        if (
+          (accepted || unconfirmed) &&
+          (!journal.dismissed || this.sentCopyOwed(journal)) &&
+          (startLook || this.sentCopyDue(journal))
+        )
           await this.fileSentCopy(journal)
         // Even a dismissed send must not leave its old draft behind to be sent again.
         if (accepted || (journal.state === 'uncertain' && journal.dismissed))
