@@ -22,14 +22,17 @@ export function ComposerCommandMenu({
   actions,
   canEdit,
   canSend,
+  canSave,
   enabled,
 }: {
   improve: Improve
   actions: ComposerActions
   /** Matches the composer shortcuts that change the draft. */
   canEdit: boolean
-  /** Matches the send and save-and-close shortcuts. */
+  /** Matches the send shortcut. */
   canSend: boolean
+  /** Matches the save-and-close shortcut. */
+  canSave: boolean
   enabled: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -103,7 +106,7 @@ export function ComposerCommandMenu({
       true,
       keys('expandComposer'),
     ),
-    action('save-close', 'Save and close draft', X, actions.saveClose, canSend, keys('saveClose')),
+    action('save-close', 'Save and close draft', X, actions.saveClose, canSave, keys('saveClose')),
     action('discard', 'Discard draft', Trash2, actions.discard, canEdit, keys('discardDraft')),
   ]
   return <CommandPalette open={open} onClose={() => setOpen(false)} commands={commands} />

@@ -408,6 +408,8 @@ export function Composer({
       })
   }
   const send = async () => {
+    // The preview shows other text than the draft would send; accept or keep it first.
+    if (improveOpen) return
     if (draft.status === 'uncertain') {
       if (sending || changingFrom || account.status !== 'connected') return
       // Checking delivery sends nothing and changes nothing, so it needs no save or review.
@@ -536,7 +538,7 @@ export function Composer({
     send: {
       ignoreInputs: ignoreInputsForCommand,
       run: () => void send(),
-      enabled: !linkOpen && !discardOpen && !sending && !changingFrom,
+      enabled: !linkOpen && !discardOpen && !sending && !changingFrom && !improveOpen,
     },
     attachFiles: {
       run: () => void attachFiles(),
@@ -984,7 +986,7 @@ export function Composer({
             <Button
               variant="primary"
               onClick={() => void send()}
-              disabled={sending || changingFrom || account.status !== 'connected'}
+              disabled={sending || changingFrom || improveOpen || account.status !== 'connected'}
             >
               {sending ? (
                 <Spinner size={14} />
@@ -1030,7 +1032,8 @@ export function Composer({
         improve={improve}
         enabled={!linkOpen && !discardOpen}
         canEdit={canEdit}
-        canSend={!linkOpen && !discardOpen && !sending && !changingFrom}
+        canSend={!linkOpen && !discardOpen && !sending && !changingFrom && !improveOpen}
+        canSave={!linkOpen && !discardOpen && !sending && !changingFrom}
         actions={{
           send: () => void send(),
           attachFiles: () => void attachFiles(),
