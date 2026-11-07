@@ -247,6 +247,10 @@ export class ImapProvider implements MailProvider {
   // Reminders: a full pass has run since this connection; inbox-only passes set lastSync too.
   private connection = 0
   private fullSince = -1
+  /** When that full pass started: the index has every change made before then. */
+  private fullStart = 0
+  /** A return waits for the next full pass, which then announces itself. */
+  private held = false
   private lastFull = new Map<string, number>()
   private uidLists = new Map<string, number[]>()
   private searches = new Map<string, { ids: string[]; incomplete: boolean; at: number }>()
@@ -622,7 +626,8 @@ export class ImapProvider implements MailProvider {
     return boxes.filter((b) => !b.noSelect).sort((a, b) => rank(a) - rank(b))
   }
   private async syncPass(scope: 'inbox' | 'all') {
-    const connection = this.connection // Reminders
+    const connection = this.connection, // Reminders
+      startedAt = Date.now()
     const boxes = await this.run(async (port) => this.refreshFolders(port), true)
     let changed = false
     for (const box of this.ordered(boxes)) {
@@ -631,9 +636,10 @@ export class ImapProvider implements MailProvider {
       changed = (await this.run((port) => this.syncMailbox(port, box), true)) || changed
     }
     this.lastSync = Date.now()
-    // Reminders: the first full pass announces itself, so held-back returns run.
-    const ready = scope === 'all' && connection === this.connection && this.fullSince !== connection
-    if (ready) this.fullSince = connection
+    // Reminders: the first full pass, and one a return waits for, announce themselves.
+    const full = scope === 'all' && connection === this.connection
+    const ready = full && (this.fullSince !== connection || this.held)
+    if (full) [this.fullSince, this.fullStart, this.held] = [connection, startedAt, false]
     if (changed || ready) this.emit({ type: 'changed', accountId: this.accountId })
     await this.emitProgress()
   }
@@ -1031,9 +1037,18 @@ export class ImapProvider implements MailProvider {
     )
   }
   // Reminders
-  /** Whether a full pass has run since connecting, so the index is current enough to act on. */
-  readyForReminders(): boolean {
-    return this.fullSince === this.connection
+  /**
+   * Whether the index has every change made up to `dueMs`: a full pass since connecting that
+   * started then or later. A connection that came back on its own may have missed changes, and
+   * label folders sync only on full passes.
+   */
+  readyForReminders(dueMs: number): boolean {
+    return this.fullSince === this.connection && dueMs <= this.fullStart
+  }
+  /** A return waits on a full pass: run one soon, and announce it even with nothing new. */
+  awaitFullSync() {
+    this.held = true
+    this.requestSync('all')
   }
   /** After sleep: mail may have changed meanwhile, so wait for a full pass again. */
   resumed() {

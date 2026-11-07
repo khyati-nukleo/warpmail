@@ -317,16 +317,22 @@ export class ReminderEngine {
       const derived = await this.derived(id)
       // In the background: the inbox never waits for bodies to be read.
       if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)
-      // Showing reminders from an index left from last time is fine; moving mail on it is not.
-      // The provider announces its first full sync, which recomputes.
-      if (target.provider.readyForReminders?.() === false) continue
-      for (const { reminder, inInbox } of derived)
-        if (reminder.kind === 'followUp' && !inInbox && reminder.dueMs <= now)
-          waiting.push({
-            accountId: id,
-            threadId: reminder.threadId,
-            key: [id, reminder.threadId, reminder.messageId].join('|'),
-          })
+      // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
+      // full sync that started after it came due, which announces itself and recomputes.
+      let held = false
+      for (const { reminder, inInbox } of derived) {
+        if (reminder.kind !== 'followUp' || inInbox || reminder.dueMs > now) continue
+        if (target.provider.readyForReminders?.(reminder.dueMs) === false) {
+          held = true
+          continue
+        }
+        waiting.push({
+          accountId: id,
+          threadId: reminder.threadId,
+          key: [id, reminder.threadId, reminder.messageId].join('|'),
+        })
+      }
+      if (held) target.provider.awaitFullSync?.()
     }
     if (waiting.length && !this.disposed) await this.returnDue(waiting)
     await this.arm()

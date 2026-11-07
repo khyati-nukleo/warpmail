@@ -889,36 +889,69 @@ describe('IMAP read-ahead', () => {
     const p = await connected()
     const events: string[] = []
     p.subscribe((e) => void events.push(e.type))
-    expect(p.readyForReminders()).toBe(false)
+    const due = Date.now() - 60_000
+    expect(p.readyForReminders(due)).toBe(false)
     await (p as any).syncPass('inbox')
-    expect(p.readyForReminders()).toBe(false)
+    expect(p.readyForReminders(due)).toBe(false)
     await sync(p)
-    expect(p.readyForReminders()).toBe(true)
+    expect(p.readyForReminders(due)).toBe(true)
     // Announced even with nothing new, so held-back returns run.
     expect(events).toContain('changed')
     await p.connect()
-    expect(p.readyForReminders()).toBe(false)
+    expect(p.readyForReminders(due)).toBe(false)
     await sync(p)
-    expect(p.readyForReminders()).toBe(true)
+    expect(p.readyForReminders(due)).toBe(true)
+  })
+  it('is ready only for what came due before the last full pass started', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      const p = await connected()
+      await sync(p)
+      expect(p.readyForReminders(start)).toBe(true)
+      // Due after that pass began: the index may miss a change made since.
+      vi.setSystemTime(start + 10 * 60_000)
+      const due = start + 5 * 60_000
+      expect(p.readyForReminders(due)).toBe(false)
+      // An inbox pass sees none of the other folders, nor the label folders.
+      await (p as any).syncPass('inbox')
+      expect(p.readyForReminders(due)).toBe(false)
+      // A held return asks for a full pass, and that pass announces itself with nothing new.
+      const events: string[] = []
+      p.subscribe((e) => void events.push(e.type))
+      p.awaitFullSync()
+      expect((p as any).pending).toBe('all')
+      await sync(p)
+      expect(p.readyForReminders(due)).toBe(true)
+      expect(events).toContain('changed')
+      // Nothing held: the next quiet full pass stays quiet.
+      events.length = 0
+      await sync(p)
+      expect(events).not.toContain('changed')
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('is not ready for reminders after the command connection drops, until a full pass', async () => {
     const p = await connected()
     await sync(p)
-    expect(p.readyForReminders()).toBe(true)
+    const due = Date.now() - 60_000
+    expect(p.readyForReminders(due)).toBe(true)
     for (const port of server.ports.filter((port) => port.purpose === 'command')) port.drop()
-    expect(p.readyForReminders()).toBe(false)
+    expect(p.readyForReminders(due)).toBe(false)
     await sync(p)
-    expect(p.readyForReminders()).toBe(true)
+    expect(p.readyForReminders(due)).toBe(true)
   })
   it('is not ready for reminders after waking from sleep, until a full pass', async () => {
     const p = await connected()
     await sync(p)
+    const due = Date.now() - 60_000
     p.resumed()
-    expect(p.readyForReminders()).toBe(false)
+    expect(p.readyForReminders(due)).toBe(false)
     // It asks for one.
     expect((p as any).pending).toBe('all')
     await sync(p)
-    expect(p.readyForReminders()).toBe(true)
+    expect(p.readyForReminders(due)).toBe(true)
   })
   it('reads message bodies in the background without counting as the user’s own open', async () => {
     for (let i = 1; i <= 3; i++)

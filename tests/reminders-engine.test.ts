@@ -269,11 +269,15 @@ describe('ReminderEngine', () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
     let ready = false
     h.provider.readyForReminders = vi.fn(() => ready)
+    h.provider.awaitFullSync = vi.fn()
     h.engine.start()
     await settle()
     // Shown from the index as it was, but nothing moves on it.
     expect(await h.engine.due('a1')).toHaveLength(1)
     expect(h.returned).not.toHaveBeenCalled()
+    // Asked about its own due time; the provider runs a full sync and announces it.
+    expect(h.provider.readyForReminders).toHaveBeenCalledWith(addWorkingDays(receivedMs, 3))
+    expect(h.provider.awaitFullSync).toHaveBeenCalledTimes(1)
     ready = true
     h.engine.invalidate('a1')
     await settle()

@@ -673,10 +673,13 @@ export interface MailProvider {
   /** Asks for a sync soon, such as when an email just filed isn't indexed yet. */
   requestSync?(scope: 'inbox' | 'all'): void
   /**
-   * False until a full sync has run since connecting: until then the index may predate a reply
-   * or a dismissal made elsewhere, and returning to the inbox would act on it. Omitted: ready.
+   * Whether a full sync since connecting started at or after `dueMs`: before one, the index may
+   * predate a reply or a dismissal made elsewhere, and returning to the inbox would act on it.
+   * Omitted: ready.
    */
-  readyForReminders?(): boolean
+  readyForReminders?(dueMs: number): boolean
+  /** A return waits on a full sync: run one soon, and announce it even with nothing new. */
+  awaitFullSync?(): void
   /** The computer woke from sleep: the index may predate what changed meanwhile. */
   resumed?(): void
 }
