@@ -1170,6 +1170,58 @@ describe('IMAP reading', () => {
       vi.useRealTimers()
     }
   })
+  it('counts a thread that partly moved as returned, with its undo in the toast', async () => {
+    const day = 86_400_000
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * day).toISOString(),
+      text: 'Can you confirm?',
+    })
+    server.deliver('Archive', {
+      messageId: 'note@x',
+      references: ['ask@x'],
+      subject: 'Re: Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 9 * day).toISOString(),
+      text: 'Adding Sam.',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [
+      { messageId: 'ask@x', asks: true },
+      { messageId: 'note@x', asks: false },
+    ])
+    // The server refuses one of the two moves.
+    const update = provider().update.bind(provider())
+    vi.spyOn(provider(), 'update').mockImplementation(async (account, changes, destroy, state) => {
+      const [first, ...rest] = Object.keys(changes)
+      const done = await update(account, { [first!]: changes[first!]! }, destroy, state)
+      return {
+        updated: done.updated,
+        failures: [...done.failures, ...rest.map((id) => id + ': the server refused the move')],
+      }
+    })
+    const emit = vi.spyOn(service as any, 'emit')
+    ;(service as any).reminders.invalidate(accountId)
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'remindersReturned' })),
+    )
+    expect(server.box('INBOX').messages).toHaveLength(1)
+    const toast = emit.mock.calls
+      .map((c) => c[0] as any)
+      .find((e) => e.type === 'remindersReturned')
+    expect(toast).toMatchObject({ count: 1, undoId: expect.any(String) })
+    expect(await store.read<string[]>('reminders-returned', [])).toHaveLength(1)
+    await vi.waitFor(() => expect(server.boxes.get('Warpmail/Returned')?.messages).toHaveLength(1))
+    expect(server.box('Warpmail/Returned').messages[0]!.input.messageId).toBe('ask@x')
+    // The toast's undo puts back what moved.
+    await service.undo(toast.undoId)
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(server.box('Archive').messages).toHaveLength(2)
+  })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {
       messageId: 'waiting@x',

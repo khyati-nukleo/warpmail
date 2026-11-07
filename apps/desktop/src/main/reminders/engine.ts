@@ -26,7 +26,7 @@ export interface ReminderEngineDeps {
   provider(accountId: string): MailProvider | undefined
   /**
    * Moves these threads' archived mail back to the inbox, with one undo for all of them.
-   * `moved` lists the threads that moved; failed ones and ones with nothing to move are left out.
+   * `moved` lists the threads with mail moved, even partly; ones with nothing moved are left out.
    */
   returnToInbox(targets: ReturnTarget[]): Promise<{ moved: ReturnTarget[]; undoId?: string }>
   emit(event: AppEvent): void

@@ -1210,8 +1210,9 @@ export class MailService {
     this.guard(target.accountId, () => this.reminders.restore(target))
   /**
    * Moves each thread's archived mail back to its account's inbox, with one undo for all.
-   * One move per thread: each account's inbox differs. `moved` lists the threads that moved;
-   * one that failed or had nothing in the archive folder stays out, so it is tried again later.
+   * One move per thread: each account's inbox differs. `moved` lists the threads with mail
+   * moved, even when part of it failed: they are back in the inbox, and the undo covers what moved.
+   * One with nothing moved stays out, so it is tried again later.
    */
   private async returnToInbox(targets: MutationTarget[]) {
     const moved: MutationTarget[] = [],
@@ -1231,7 +1232,7 @@ export class MailService {
           if (result.changed) undo.push(...(this.undos.get(result.undoId) || []))
           this.undos.delete(result.undoId)
         }
-        if (!result.failures.length && result.changed) moved.push(target)
+        if (result.changed) moved.push(target)
       } catch {
         // Disconnected: tried again on a later pass.
       }
