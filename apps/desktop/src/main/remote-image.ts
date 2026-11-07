@@ -6,6 +6,7 @@ type FetchResource = typeof publicFetch
 export async function remoteImageData(
   value: string,
   fetchResource: FetchResource = publicFetch,
+  blocked?: (url: string) => boolean, // Read status: checked before every request
 ): Promise<string | null> {
   try {
     let url = new URL(value)
@@ -14,7 +15,8 @@ export async function remoteImageData(
         !['http:', 'https:'].includes(url.protocol) ||
         url.username ||
         url.password ||
-        (url.port && !['80', '443'].includes(url.port))
+        (url.port && !['80', '443'].includes(url.port)) ||
+        blocked?.(url.toString())
       )
         return null
       const response = await fetchResource(url.toString(), { userAgent: 'Mozilla/5.0' })

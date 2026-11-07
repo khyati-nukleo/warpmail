@@ -442,3 +442,10 @@ describe('Read status: settling copies', () => {
     ).toEqual([copy(alex, 'accepted'), copy(sam, 'uncertain'), copy(kim, 'notSent', closed)])
   })
 })
+
+describe('Read status: the app never loads the Worker', () => {
+  it('refuses an image from the Worker even with remote images on', async () => {
+    await service.setSettings({ ...service.settings, remoteImages: true })
+    expect(await service.remoteImage(`${base}/p/AbCdEfGhIjKlMnOpQrStUv.gif`)).toBeNull()
+  })
+})

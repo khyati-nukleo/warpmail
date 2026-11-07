@@ -52,6 +52,7 @@ import {
   // Read status
   isAutomatedAddress,
   ownAddresses,
+  isWorkerImage,
   pixelUrl,
   stripPixels,
   trackingBlock,
@@ -2385,7 +2386,10 @@ export class MailService {
   }
   remoteImage = async (value: string, userInitiated = false): Promise<string | null> =>
     this.settings.remoteImages || (userInitiated && this.encryption.vault.unlocked)
-      ? remoteImageData(value)
+      ? remoteImageData(value, undefined, (url) =>
+          // Read status: never load the Worker's images, or opening mail would count as an open.
+          isWorkerImage(url, workerBase(this.settings.readStatus?.workerUrl)),
+        )
       : null
   senderAvatar = async (email: string): Promise<string | null> => {
     if (!this.settings.remoteImages) return null

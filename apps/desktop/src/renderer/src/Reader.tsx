@@ -39,6 +39,8 @@ import { Button, IconButton, Dropdown, MenuItem, Spinner } from '@inlark/ui'
 import {
   friendlyError,
   isDraft,
+  isWorkerImage, // Read status
+  workerBase,
   plainTextHtml,
   type Account,
   type Message,
@@ -192,6 +194,7 @@ const sharedStyles =
 export function EmailBody({
   message,
   remoteImages,
+  workerUrl, // Read status
   loading = false,
   onLinkHover,
   onMailto,
@@ -200,6 +203,7 @@ export function EmailBody({
 }: {
   message: Message
   remoteImages: boolean
+  workerUrl?: string
   /** The message body is still being fetched; show its shape instead of the preview. */
   loading?: boolean
   onLinkHover?: (href: string | null) => void
@@ -294,7 +298,8 @@ export function EmailBody({
           image.style.display === 'none' ||
           image.style.visibility === 'hidden' ||
           (image.style.width === '1px' && image.style.height === '1px') ||
-          (image.getAttribute('width') === '1' && image.getAttribute('height') === '1')
+          (image.getAttribute('width') === '1' && image.getAttribute('height') === '1') ||
+          isWorkerImage(original, workerBase(workerUrl)) // Read status: the Worker's own image
         ) {
           image.remove()
           return
@@ -365,7 +370,7 @@ export function EmailBody({
     return () => {
       active = false
     }
-  }, [message.id, message.html, message.text, effectiveRemoteImages, theme, loading])
+  }, [message.id, message.html, message.text, effectiveRemoteImages, workerUrl, theme, loading])
   useEffect(() => {
     if (!source || frameReady || renderIssue) return
     const timeout = window.setTimeout(() => {
@@ -1139,6 +1144,7 @@ export function Reader({
                       <EmailBody
                         message={message}
                         remoteImages={settings.remoteImages}
+                        workerUrl={settings.readStatus?.workerUrl}
                         loading={loading && !message.html && !message.text}
                         onLinkHover={setLink}
                         onMailto={onMailto}
