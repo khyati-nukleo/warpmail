@@ -28,6 +28,9 @@ import {
   type ProviderEvent,
   type ProviderPage,
   type SubmissionOutcome,
+  type SubmissionTracking,
+  addPixel,
+  trackedRecipients,
 } from '@inlark/core'
 import {
   attachmentsOf,
@@ -1647,7 +1650,13 @@ export class ImapProvider implements MailProvider {
 
   // Drafts and sending
 
-  private async compose(account: Account, draft: Draft, messageId: string, keepBcc: boolean) {
+  private async compose(
+    account: Account,
+    draft: Draft,
+    messageId: string,
+    keepBcc: boolean,
+    override: { html?: string; date?: Date } = {}, // Read status
+  ) {
     const sender = this.sender(account, draft.identityId)
     return composeMime({
       from: { name: sender.name, email: sender.email },
@@ -1655,12 +1664,12 @@ export class ImapProvider implements MailProvider {
       cc: draft.cc,
       bcc: draft.bcc,
       subject: draft.subject,
-      html: draft.html,
+      html: override.html ?? draft.html,
       text: draft.text,
       messageId,
       inReplyTo: draft.inReplyTo,
       references: draft.references,
-      date: new Date(),
+      date: override.date ?? new Date(),
       attachments: await Promise.all(
         draft.attachments.map(async (a) => ({
           name: a.name,
@@ -1722,12 +1731,28 @@ export class ImapProvider implements MailProvider {
     draft: Draft,
     messageId: string,
     precomposed?: Uint8Array,
+    tracking?: SubmissionTracking,
   ): Promise<OutgoingMessage> {
     const recipients = [...new Set([...draft.to, ...draft.cc, ...draft.bcc].map((a) => a.email))]
     // Bcc recipients are only in the envelope, never in the transmitted headers.
-    const mime = precomposed ?? (await this.compose(account, draft, messageId, false))
     // Bounces go to the address the message is from, as recipients would expect.
     const from = this.sender(account, draft.identityId).email
+    if (tracking && !precomposed) {
+      // Read status: copies share one date so their headers are identical.
+      const date = new Date()
+      const mime = await this.compose(account, draft, messageId, true, { date })
+      const copies = []
+      for (const recipient of trackedRecipients(draft)) {
+        const src = tracking.imageFor(recipient)
+        const html = src ? addPixel(draft.html, src) : draft.html
+        copies.push({
+          recipient,
+          mime: await this.compose(account, draft, messageId, false, { html, date }),
+        })
+      }
+      return { messageId, mime, copies, envelope: { from, to: recipients } }
+    }
+    const mime = precomposed ?? (await this.compose(account, draft, messageId, false))
     return { messageId, mime, envelope: { from, to: recipients } }
   }
   async submit(_account: Account, message: OutgoingMessage): Promise<SubmissionOutcome> {

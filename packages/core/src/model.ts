@@ -454,6 +454,19 @@ export interface OutgoingMessage {
   /** Complete MIME without Bcc headers, for providers that transmit it themselves (SMTP). */
   mime?: Uint8Array
   envelope: { from: string; to: string[] }
+  // Read status: one copy per tracked recipient, each carrying only that recipient's image.
+  copies?: OutgoingCopy[]
+  /** The Sent copy must replace what the server filed itself, because the copies were not it. */
+  replaceServerCopies?: boolean
+}
+// Read status
+export interface OutgoingCopy {
+  recipient: string
+  mime: Uint8Array
+}
+export interface SubmissionTracking {
+  /** The image URL for this recipient, or undefined for a copy without an image. */
+  imageFor(recipient: string): string | undefined
 }
 export interface SubmissionOutcome {
   accepted: string[]
@@ -546,6 +559,7 @@ export interface MailProvider {
     draft: Draft,
     messageId: string,
     mime?: Uint8Array,
+    tracking?: SubmissionTracking, // Read status
   ): Promise<OutgoingMessage>
   /**
    * Sends a prepared message once. Throws `submissionRejected` when nothing was accepted,
