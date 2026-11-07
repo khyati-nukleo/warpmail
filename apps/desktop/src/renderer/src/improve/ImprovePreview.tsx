@@ -8,17 +8,48 @@ import type { Improve } from './useImprove'
 
 const hint = 'text-[11px] opacity-60 ml-2.5'
 
+const typesText = (element: Element): boolean =>
+  element.matches('input, textarea, select') || (element as HTMLElement).isContentEditable
+
+/**
+ * Whether the preview may take focus from `active`. Always from nothing or the hidden editor.
+ * When it opens, also from the button or menu item that opened it, and from the command menu
+ * (another dialog, which closes as the preview opens). Never from a field Khyati is typing in,
+ * so a later result can't catch an Enter meant for To or Subject.
+ */
+export function previewTakesFocus(
+  active: Element | null,
+  region: Element,
+  opening: boolean,
+): boolean {
+  if (!active || active === active.ownerDocument.body) return true
+  if (region.contains(active)) return false
+  if (active.closest('.compose-editor')) return true
+  if (!opening) return false
+  if (!typesText(active)) return true
+  const dialog = active.closest('[role="dialog"], [role="alertdialog"]')
+  return !!dialog && !dialog.contains(region)
+}
+
 /** Shown in place of the message while Improve is waiting, previewing or has failed. */
 export function ImprovePreview({ improve }: { improve: Improve }) {
   const { session, start, accept, keep, retry } = improve
   const region = useRef<HTMLDivElement>(null)
   const phase = session.phase
   const id = session.phase === 'closed' ? undefined : session.id
+  const opened = useRef(false)
   // Focus comes here when the preview opens, and again whenever the button that had it goes away
   // (for example “Try again”), so Escape keeps reaching this handler and not the composer's.
   useEffect(() => {
     const element = region.current
-    if (element && !element.contains(document.activeElement)) element.focus({ preventScroll: true })
+    if (phase === 'closed' || !element) {
+      opened.current = false
+      return
+    }
+    const opening = !opened.current
+    opened.current = true
+    if (previewTakesFocus(document.activeElement, element, opening))
+      element.focus({ preventScroll: true })
   }, [phase, id])
   if (session.phase === 'closed') return null
 
