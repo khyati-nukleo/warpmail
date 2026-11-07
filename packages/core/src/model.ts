@@ -457,8 +457,11 @@ export interface OutgoingMessage {
   envelope: { from: string; to: string[] }
   // Read status: one copy per tracked recipient, each carrying only that recipient's image.
   copies?: OutgoingCopy[]
-  /** The Sent copy must replace what the server filed itself, because the copies were not it. */
-  replaceServerCopies?: boolean
+  /**
+   * The Sent copy must replace what the server filed itself, because the copies were not it.
+   * `ifPresent`: delivery is unconfirmed, so the clean copy is filed only if the server filed one.
+   */
+  replaceServerCopies?: boolean | 'ifPresent'
 }
 // Read status
 export interface OutgoingCopy {
@@ -583,10 +586,11 @@ export interface MailProvider {
   submissionExists(account: Account, message: OutgoingMessage): Promise<boolean>
   /**
    * Files a Sent copy for providers that do not do so themselves. Returns `server` when a copy
-   * with the same Message-ID already exists. Throws `filingUncertain` when an append may have
+   * with the same Message-ID already exists, and `absent` when `replaceServerCopies` is
+   * `ifPresent` and the server has no copy. Throws `filingUncertain` when an append may have
    * completed without confirmation.
    */
-  fileSentCopy?(account: Account, message: OutgoingMessage): Promise<'filed' | 'server'>
+  fileSentCopy?(account: Account, message: OutgoingMessage): Promise<'filed' | 'server' | 'absent'>
   folderMappings?(account: Account): Promise<FolderMappingReview>
   setFolderMappings?(account: Account, mappings: FolderMappings): Promise<FolderMappingReview>
   subscribe(listener: (event: ProviderEvent) => void): () => void

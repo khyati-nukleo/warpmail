@@ -332,6 +332,83 @@ describe('Read status: tracked sending', () => {
     expect((await service.send(draft)).status).toBe('uncertain')
     expect(submitCopies).toHaveBeenCalledTimes(1)
   })
+  describe('an unconfirmed tracked send', () => {
+    const one = { ...draft, cc: [], bcc: [] }
+    /** The reply to DATA is lost, but Gmail accepted the copy and filed its merged Sent copy. */
+    const lostReply = async (_s: unknown, _f: string, copies: Copies, progress?: Progress) => {
+      await progress!(copies[0].recipient)
+      await gmailFiles(copies[0])
+      return [{ recipient: alex, result: 'uncertain' as const, reason: reasons.uncertain }]
+    }
+    const expectOneCleanSentCopy = () => {
+      const sent = server.box(SENT).messages
+      expect(sent).toHaveLength(1)
+      expect(text(sent[0].raw)).not.toContain('read.example.com')
+      expect(
+        server.box(ALL).messages.filter((m) => text(m.raw).includes('read.example.com')),
+      ).toHaveLength(0)
+    }
+    it("replaces Gmail's merged copy right away and stays unconfirmed", async () => {
+      submitCopies.mockImplementationOnce(lostReply)
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      expectOneCleanSentCopy()
+      expect(await journal()).toMatchObject({
+        state: 'uncertain',
+        unconfirmed: [alex],
+        sentCopy: 'filed',
+      })
+      expect((await localDraft())?.status).toBe('uncertain')
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+      expect(submit).not.toHaveBeenCalled()
+    })
+    it('files nothing when the server has no copy', async () => {
+      plan = ['uncertain']
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      expect(server.box(SENT).messages).toHaveLength(0)
+      expect(server.box(ALL).messages).toHaveLength(0)
+      expect(await journal()).toMatchObject({ state: 'uncertain', sentCopy: 'pending' })
+    })
+    it('replaces the merged copy after a crash mid-send, once reconnected', async () => {
+      let reached!: () => void
+      const during = new Promise<void>((resolve) => (reached = resolve))
+      submitCopies.mockImplementationOnce(async (_s, _f, copies, progress) => {
+        await progress!(alex)
+        await gmailFiles(copies[0])
+        reached()
+        // The app dies during DATA.
+        return new Promise<CopyOutcome[]>(() => {})
+      })
+      void service.send(one)
+      await during
+      const crashed = service
+      await start()
+      await stop(crashed)
+      await connected()
+      await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+      expectOneCleanSentCopy()
+      expect((await journal()).state).toBe('uncertain')
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+      expect(submit).not.toHaveBeenCalled()
+    })
+    it('looks again before a dismiss marks it done', async () => {
+      plan = ['uncertain']
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      expect((await journal()).sentCopy).toBe('pending')
+      // Gmail's merged copy turns up later.
+      await gmailFiles(submitCopies.mock.calls[0][2][0])
+      await service.dismissSubmission(draftId)
+      expectOneCleanSentCopy()
+      expect(await journal()).toMatchObject({
+        state: 'uncertain',
+        dismissed: true,
+        sentCopy: 'filed',
+      })
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+    })
+  })
   it('a journal write that fails before the first copy is a plain not-sent', async () => {
     const write = store.write.bind(store)
     vi.spyOn(store, 'write').mockImplementation((name, data, version) => {

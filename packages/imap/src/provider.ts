@@ -1798,7 +1798,10 @@ export class ImapProvider implements MailProvider {
   async submissionExists(): Promise<boolean> {
     return false
   }
-  async fileSentCopy(_account: Account, message: OutgoingMessage): Promise<'filed' | 'server'> {
+  async fileSentCopy(
+    _account: Account,
+    message: OutgoingMessage,
+  ): Promise<'filed' | 'server' | 'absent'> {
     const sent = await this.roleBox('sent')
     if (!sent)
       throw new ProviderError(
@@ -1818,8 +1821,12 @@ export class ImapProvider implements MailProvider {
       }
       const find = (port: ImapPort, id: string, uidNext: number) =>
         this.withMessageId(port, id, uidNext)
-      if (!(await this.run((port) => hasServerCopy(port, boxes, message.messageId, find))))
+      const present = () => this.run((port) => hasServerCopy(port, boxes, message.messageId, find))
+      if (!(await present())) {
         await sleep(this.timing.sentCopyGraceMs)
+        // Unconfirmed delivery: only a copy the server filed shows it was accepted.
+        if (message.replaceServerCopies === 'ifPresent' && !(await present())) return 'absent'
+      }
       await this.run((port) => replaceSentCopy(port, boxes, message.messageId, mime, find))
       this.requestSync('all')
       return 'filed'

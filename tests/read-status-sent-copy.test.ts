@@ -226,6 +226,40 @@ describe('Read status: the Sent copy of a tracked email', () => {
     expect(server.commands).toContain('UID EXPUNGE')
     expect(withId('Trash')).toHaveLength(0)
   })
+  it("'ifPresent' replaces a server copy that exists with one clean copy", async () => {
+    gmailServer()
+    server.deliver(ALL, serverCopy)
+    server.deliver(SENT, serverCopy)
+    const p = await connected()
+    const unconfirmed = { ...message, replaceServerCopies: 'ifPresent' as const }
+    expect(await p.fileSentCopy(account, unconfirmed)).toBe('filed')
+    expectOneCleanCopy(SENT)
+    expect(withId(ALL)).toHaveLength(1)
+    expect(withId(TRASH)).toHaveLength(0)
+  })
+  it("'ifPresent' files nothing when the server has no copy, even after the grace period", async () => {
+    gmailServer()
+    const p = await connected()
+    const unconfirmed = { ...message, replaceServerCopies: 'ifPresent' as const }
+    expect(await p.fileSentCopy(account, unconfirmed)).toBe('absent')
+    expect(server.commands).not.toContain('APPEND')
+    expect(server.commands).not.toContain('MOVE')
+    expect(server.box(SENT).messages).toHaveLength(0)
+    expect(server.box(ALL).messages).toHaveLength(0)
+  })
+  it("'ifPresent' finds a late server copy after the grace period", async () => {
+    gmailServer()
+    const p = await connected()
+    server.hooks.set('SEARCH:before', () =>
+      server.hooks.set('SELECT:before', () => {
+        server.deliver(ALL, serverCopy)
+        server.deliver(SENT, serverCopy)
+      }),
+    )
+    const unconfirmed = { ...message, replaceServerCopies: 'ifPresent' as const }
+    expect(await p.fileSentCopy(account, unconfirmed)).toBe('filed')
+    expectOneCleanCopy(SENT)
+  })
   it("without replaceServerCopies it keeps today's behaviour", async () => {
     server.deliver('Sent', serverCopy)
     const p = await connected()

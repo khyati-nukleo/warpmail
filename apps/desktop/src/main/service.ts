@@ -1968,6 +1968,8 @@ export class MailService {
         errorKind: ambiguous ? undefined : errorKind(error),
       })
       await this.persistDrafts()
+      // Read status: Gmail may have filed a recipient's copy, image included; replace it if so.
+      if (ambiguous && journal.tracked && journal.sentCopy) this.fileUnconfirmedCopy(journal)
       if (ambiguous)
         return {
           status: 'uncertain',
@@ -2106,11 +2108,23 @@ export class MailService {
     try {
       const { provider, account } = this.provider(journal.accountId)
       if (!provider.fileSentCopy) return
-      const message = outgoing?.mime ? outgoing : await this.outgoingMessage(journal)
+      const prepared = outgoing?.mime ? outgoing : await this.outgoingMessage(journal)
+      // Read status: an unconfirmed tracked send is never shown as sent, only cleaned up.
+      const message =
+        journal.tracked && journal.state === 'uncertain'
+          ? { ...prepared, replaceServerCopies: 'ifPresent' as const }
+          : prepared
       journal.sentCopy = 'appending'
       await this.persistJournal()
       try {
-        journal.sentCopy = await provider.fileSentCopy(account, message)
+        const result = await provider.fileSentCopy(account, message)
+        if (result === 'absent') {
+          // Nothing to replace yet; looked for again on the next retry and before a dismiss.
+          journal.sentCopy = 'pending'
+          await this.persistJournal()
+          return
+        }
+        journal.sentCopy = result
         journal.sentCopyError = undefined
         await this.persistJournal()
         await this.removeMime(journal.draftId)
@@ -2129,6 +2143,16 @@ export class MailService {
       this.filing.delete(journal.draftId)
     }
   }
+  /** Read status: replaces the server's copy of an unconfirmed tracked send in the background. */
+  private fileUnconfirmedCopy(journal: Journal) {
+    const id = journal.draftId
+    const filing = this.fileSentCopy(journal).finally(() => {
+      this.finishing.delete(id)
+      this.emit({ type: 'submissions', submissions: this.summaries() })
+      this.emit({ type: 'changed', accountId: journal.accountId })
+    })
+    this.finishing.set(id, filing)
+  }
   private async retrySentCopies(connectionId: string) {
     const accountIds = new Set(
       this.accounts.filter((a) => a.connectionId === connectionId).map((a) => a.id),
@@ -2136,7 +2160,9 @@ export class MailService {
     for (const journal of this.journals.values())
       if (accountIds.has(journal.accountId) && !this.finishing.has(journal.draftId)) {
         const accepted = ['sent', 'partial'].includes(journal.state)
-        if (accepted && !journal.dismissed) await this.fileSentCopy(journal)
+        // Read status: an unconfirmed tracked send may have left Gmail's copy with an image.
+        const unconfirmed = journal.tracked && journal.state === 'uncertain'
+        if ((accepted || unconfirmed) && !journal.dismissed) await this.fileSentCopy(journal)
         // Even a dismissed send must not leave its old draft behind to be sent again.
         if (accepted || (journal.state === 'uncertain' && journal.dismissed))
           await this.removeReplacedDraft(journal)
@@ -2303,6 +2329,8 @@ export class MailService {
     if (!journal) return
     const draft = this.localDrafts.get(id)
     if (draft && ['partial', 'uncertain'].includes(journal.state)) this.requireProtectedDraft(draft)
+    // Read status: one last look for Gmail's copy with an image before it is no longer retried.
+    if (journal.tracked && journal.state === 'uncertain') await this.fileSentCopy(journal)
     journal.dismissed = true
     if (journal.sentCopy && journal.sentCopy !== 'filed' && journal.sentCopy !== 'server')
       journal.sentCopy = 'dismissed'
