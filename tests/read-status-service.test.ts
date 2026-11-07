@@ -833,6 +833,43 @@ describe('Read status: testing the Worker', () => {
   })
 })
 
+describe('Read status: a previous Worker address', () => {
+  const old = 'https://old.example.com'
+  const moved = async () => {
+    await service.setSettings({
+      ...service.settings,
+      readStatus: { enabled: true, workerUrl: old },
+    })
+    await setReadStatus(true)
+    expect(service.settings.readStatus?.previousWorkerUrls).toEqual([old])
+    expect((await store.read<any>('settings', {})).readStatus.previousWorkerUrls).toEqual([old])
+  }
+  it('its images are still never loaded, also through a redirect', async () => {
+    await moved()
+    await service.setSettings({ ...service.settings, remoteImages: true })
+    vi.mocked(publicFetch).mockClear()
+    expect(await service.remoteImage(`${old}/p/AbCdEfGhIjKlMnOpQrStUv.gif`)).toBeNull()
+    expect(publicFetch).not.toHaveBeenCalled()
+    vi.mocked(publicFetch).mockResolvedValueOnce({
+      status: 302,
+      type: '',
+      bytes: Buffer.alloc(0),
+      location: `${old}/p/AbCdEfGhIjKlMnOpQrStUv.gif`,
+    } as Awaited<ReturnType<typeof publicFetch>>)
+    expect(await service.remoteImage('https://images.example.net/logo.png')).toBeNull()
+    expect(publicFetch).toHaveBeenCalledTimes(1)
+  })
+  it('its images are stripped from outgoing mail', async () => {
+    await moved()
+    await setReadStatus(false)
+    const quoted = `<p>Hello</p><blockquote><img src="${old}/p/OLDOLDOLDOLDOLDOLDOLDO.gif"></blockquote>`
+    await service.send({ ...draft, html: quoted })
+    const mime = text(submit.mock.calls[0][2])
+    expect(mime).not.toContain('OLDOLD')
+    expect(mime).toContain('Hello')
+  })
+})
+
 describe('Read status: the app never loads the Worker', () => {
   it('refuses an image from the Worker even with remote images on', async () => {
     await service.setSettings({ ...service.settings, remoteImages: true })

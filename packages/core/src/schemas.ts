@@ -237,7 +237,11 @@ export const settingsSchema = z.object({
     .optional(),
   // Read status
   readStatus: z
-    .object({ enabled: z.boolean(), workerUrl: z.string().max(2048).optional() })
+    .object({
+      enabled: z.boolean(),
+      workerUrl: z.string().max(2048).optional(),
+      previousWorkerUrls: z.array(z.string().max(2048)).max(10).optional(),
+    })
     .optional(),
 })
 export const ipcSchemas = {

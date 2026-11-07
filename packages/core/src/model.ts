@@ -268,6 +268,8 @@ export interface Settings {
 export interface ReadStatusSettings {
   enabled: boolean
   workerUrl?: string
+  /** Earlier Worker addresses, newest first (at most 10): their images stay blocked. */
+  previousWorkerUrls?: string[]
 }
 export const defaultSettings: Settings = {
   theme: 'dark',

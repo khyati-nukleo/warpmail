@@ -54,9 +54,11 @@ import {
   ownAddresses,
   isWorkerImage,
   pixelUrl,
+  rememberWorkerUrl,
   stripPixels,
   trackingBlock,
   workerBase,
+  workerHosts,
   type ReadStatusInfo,
   type ReadStatusLookup,
   type ReadStatusRequest,
@@ -1847,9 +1849,10 @@ export class MailService {
     if (existing && existing.state !== 'rejected') return this.reconcile(draft.id)
     draft = sendDraftSchema.parse(await this.saveDraft(draft))
     const { provider, account } = this.provider(draft.accountId)
-    // Read status: a quoted Worker image never goes out again, tracked or not.
+    // Read status: a quoted Worker image (current or previous address) never goes out again.
     const base = workerBase(this.settings.readStatus?.workerUrl)
-    const content = base ? { ...draft, html: stripPixels(draft.html, base) } : draft
+    const hosts = workerHosts(this.settings.readStatus)
+    const content = hosts.length ? { ...draft, html: stripPixels(draft.html, hosts) } : draft
     // Decided once: the same answer chooses protected MIME and rules out tracking.
     const encrypted =
       (draft.encryption && draft.encryption !== 'none') ||
@@ -2172,7 +2175,7 @@ export class MailService {
       // An unconfirmed tracked send is never shown as sent, only cleaned up.
       replaceServerCopies: journal.state === 'uncertain' ? 'ifPresent' : true,
       replacement: {
-        hosts: this.workerHosts(),
+        hosts: workerHosts(this.settings.readStatus),
         owed: !!journal.cleanOwed,
         owe: async () => {
           journal.cleanOwed = true
@@ -2181,11 +2184,6 @@ export class MailService {
         confirmed: (uid) => (journal.cleanUid = uid),
       },
     }
-  }
-  /** Read status: the Worker hosts whose images mark a recipient's copy. */
-  private workerHosts(): string[] {
-    const base = workerBase(this.settings.readStatus?.workerUrl)
-    return base ? [base] : []
   }
   /** Read status: a tracked send whose clean Sent copy is still to be filed, so its MIME stays. */
   private sentCopyOwed(journal: Journal) {
@@ -2245,7 +2243,7 @@ export class MailService {
         await provider.sweepSentCopies?.(account, {
           messageId: journal.messageId!,
           envelope: journal.envelope || { from: '', to: [] },
-          replacement: { hosts: this.workerHosts(), uid: journal.cleanUid },
+          replacement: { hosts: workerHosts(this.settings.readStatus), uid: journal.cleanUid },
         })
       }
       journal.sweepAt = undefined
@@ -2508,7 +2506,7 @@ export class MailService {
     this.settings.remoteImages || (userInitiated && this.encryption.vault.unlocked)
       ? remoteImageData(value, undefined, (url) =>
           // Read status: never load the Worker's images, or opening mail would count as an open.
-          isWorkerImage(url, workerBase(this.settings.readStatus?.workerUrl)),
+          isWorkerImage(url, workerHosts(this.settings.readStatus)),
         )
       : null
   senderAvatar = async (email: string): Promise<string | null> => {
@@ -2545,7 +2543,10 @@ export class MailService {
     if (url.protocol === 'mailto:') this.emit({ type: 'mailto', url: value })
     else await shell.openExternal(url.toString())
   }
-  setSettings = async (settings: Settings) => {
+  setSettings = async (input: Settings) => {
+    // Read status: a changed Worker address is remembered, so its images stay blocked.
+    const readStatus = rememberWorkerUrl(this.settings.readStatus, input.readStatus)
+    const settings: Settings = readStatus ? { ...input, readStatus } : input
     await this.store.write('settings', settings)
     if (!settings.remoteImages) this.senderAvatars.clear()
     if (this.settings.autoCopyAuth === false && settings.autoCopyAuth !== false) {

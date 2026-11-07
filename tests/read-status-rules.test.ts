@@ -4,10 +4,12 @@ import {
   isWorkerImage,
   pixelUrl,
   readStatusLimits,
+  rememberWorkerUrl,
   stripPixels,
   trackedRecipients,
   trackingBlock,
   workerBase,
+  workerHosts,
 } from '../packages/core/src'
 
 const base = 'https://read.example.com'
@@ -108,6 +110,56 @@ describe('pixels', () => {
       '<img src="https://cdn.example.com/a.png">'
     expect(stripPixels(html, base)).toBe('<p>a</p><img src="https://cdn.example.com/a.png">')
     expect(stripPixels(html, undefined)).toBe(html)
+  })
+})
+
+describe('previous Worker addresses', () => {
+  const old = 'https://old.example.com'
+  it('workerHosts lists the current address and every previous one, once each', () => {
+    expect(workerHosts(undefined)).toEqual([])
+    expect(
+      workerHosts({
+        enabled: false,
+        workerUrl: base,
+        previousWorkerUrls: [old, base, 'not a url', 'https://older.example.com'],
+      }),
+    ).toEqual([base, old, 'https://older.example.com'])
+    expect(workerHosts({ enabled: true, previousWorkerUrls: [old] })).toEqual([old])
+  })
+  it('images on any of them are found and stripped', () => {
+    const hosts = [base, old]
+    expect(isWorkerImage('https://old.example.com/p/x.gif', hosts)).toBe(true)
+    expect(isWorkerImage('https://cdn.example.com/a.png', hosts)).toBe(false)
+    const html = `<p>a</p><img src="${old}/p/x.gif"><img src="${base}/p/y.gif">`
+    expect(stripPixels(html, hosts)).toBe('<p>a</p>')
+    expect(stripPixels(html, [])).toBe(html)
+  })
+  it('a changed address is remembered, newest first, at most 10, without duplicates', () => {
+    const at = (n: number) => `https://w${n}.example.com`
+    expect(rememberWorkerUrl({ enabled: true, workerUrl: base }, { enabled: true })).toEqual({
+      enabled: true,
+      previousWorkerUrls: [base],
+    })
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: old, previousWorkerUrls: [base] },
+        { enabled: true, workerUrl: base },
+      ),
+    ).toEqual({ enabled: true, workerUrl: base, previousWorkerUrls: [old] })
+    const many = Array.from({ length: 10 }, (_, i) => at(i))
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: old, previousWorkerUrls: many },
+        { enabled: true, workerUrl: base },
+      )?.previousWorkerUrls,
+    ).toEqual([old, ...many.slice(0, 9)])
+    // Unchanged: kept as it is; what the renderer sends for the list is not trusted.
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: base, previousWorkerUrls: [old] },
+        { enabled: false, workerUrl: base, previousWorkerUrls: [] },
+      ),
+    ).toEqual({ enabled: false, workerUrl: base, previousWorkerUrls: [old] })
   })
 })
 

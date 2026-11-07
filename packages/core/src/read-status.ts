@@ -54,11 +54,41 @@ export function workerBase(url?: string): string | undefined {
   return parsed.origin
 }
 
+/** Previous Worker addresses kept, so their images stay blocked and stripped. */
+const previousWorkerLimit = 10
+
+/** The current Worker's origin and every previous one, once each: none of their images load. */
+export function workerHosts(settings?: ReadStatusSettings): string[] {
+  const bases = [settings?.workerUrl, ...(settings?.previousWorkerUrls ?? [])].map(workerBase)
+  return [...new Set(bases.filter((b): b is string => !!b))]
+}
+
+/**
+ * The settings to save: when the Worker address changes, the old one joins the previous
+ * addresses (newest first, at most 10). The list itself is only ever kept from `saved`.
+ */
+export function rememberWorkerUrl(
+  saved: ReadStatusSettings | undefined,
+  next: ReadStatusSettings | undefined,
+): ReadStatusSettings | undefined {
+  if (!next) return next
+  const current = workerBase(next.workerUrl)
+  const old = workerBase(saved?.workerUrl)
+  const previous = [...(old && old !== current ? [old] : []), ...(saved?.previousWorkerUrls ?? [])]
+    .map(workerBase)
+    .filter((b): b is string => !!b && b !== current)
+  const kept = [...new Set(previous)].slice(0, previousWorkerLimit)
+  const { previousWorkerUrls: _ignored, ...rest } = next
+  return kept.length ? { ...rest, previousWorkerUrls: kept } : rest
+}
+
 export function pixelUrl(base: string, code: string): string {
   return `${base}/p/${code}.gif`
 }
 
-export function isWorkerImage(src: string, base?: string): boolean {
+/** Whether `src` is served by the Worker at `base` (or by any of several). */
+export function isWorkerImage(src: string, base?: string | string[]): boolean {
+  if (Array.isArray(base)) return base.some((b) => isWorkerImage(src, b))
   if (!base) return false
   // Same host on any http(s) scheme or port (the Worker also answers on http and alternate ports);
   // case and trailing dots are ignored, so `host.` is the same server.
@@ -130,7 +160,8 @@ function readImg(html: string, start: number): { end: number; sources: string[] 
  * Fails safe: an image tag that cannot be parsed, or that mentions the Worker's host anywhere
  * (even in another attribute), is removed too.
  */
-export function stripPixels(html: string, base?: string): string {
+export function stripPixels(html: string, base?: string | string[]): string {
+  if (Array.isArray(base)) return base.reduce((out, b) => stripPixels(out, b), html)
   if (!base) return html
   let host: string
   try {
