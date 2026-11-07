@@ -396,6 +396,29 @@ describe('Read status: the Sent copy of a tracked email', () => {
       expectReplaced()
       expect(appends()).toBe(2)
     })
+    it('deletes for good only the copies in Trash whose Message-ID is exactly this one', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const lookalike = { ...serverCopy, messageId: 'x' + id, html: '<p>Someone else</p>' }
+      const kept = server.deliver(TRASH, lookalike)
+      const p = await connected()
+      // A real HEADER search matches substrings, so it may also return the look-alike in Trash.
+      const port = server.commandPorts.at(-1)!
+      const [select, search] = [port.select.bind(port), port.search.bind(port)]
+      let path = ''
+      port.select = async (box) => {
+        path = box
+        return select(box)
+      }
+      port.search = async (criteria) =>
+        criteria.header && path === TRASH
+          ? [...new Set([...(await search(criteria)), kept])]
+          : search(criteria)
+      expect(await p.fileSentCopy(account, journal().attempt(true))).toBe('filed')
+      expectOneCleanCopy(SENT)
+      expect(server.box(TRASH).messages.map((m) => m.input.messageId)).toEqual(['x' + id])
+    })
     it('keeps a clean copy already in Sent and only removes the copies with an image', async () => {
       gmailServer()
       server.deliver(ALL, serverCopy)

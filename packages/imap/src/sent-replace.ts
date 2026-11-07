@@ -243,14 +243,18 @@ async function fileConfirmed(
   throw new ProviderError('filing', "Gmail didn't keep the Sent copy. It will be filed again.")
 }
 
-/** Deletes this Message-ID's copies in Trash for good. Gmail's search can skip Trash. */
+/**
+ * Deletes this Message-ID's copies in Trash for good. Gmail's search can skip Trash, and a
+ * header search matches substrings, so only copies whose parsed Message-ID is exact go.
+ */
 async function deleteTrashed(
   port: ImapPort,
   trash: string,
   messageId: string,
   find: FindMessageId,
 ) {
-  const trashed = await find(port, messageId, (await port.select(trash)).uidNext)
+  const found = await find(port, messageId, (await port.select(trash)).uidNext)
+  const trashed = (await parsedCopies(port, found, messageId)).map((c) => c.uid)
   if (trashed.length && port.capabilities.has('UIDPLUS')) await port.expunge(trashed)
 }
 
