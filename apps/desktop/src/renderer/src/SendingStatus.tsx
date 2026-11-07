@@ -35,9 +35,15 @@ function describe(s: SubmissionSummary): { state: string; detail: string; tone: 
   if (s.state === 'partial')
     return {
       state: 'Partially sent' + (s.sentCopy ? ' · ' + copyState[s.sentCopy] : ''),
-      detail: s.rejected?.length
-        ? 'Not delivered to ' + who(s.rejected) + '. Everyone else received it.'
-        : 'Some recipients refused the message. Everyone else received it.',
+      detail: s.unconfirmed?.length
+        ? // Read status: a copy may have arrived, so it is never offered for recovery.
+          (s.rejected?.length ? 'Not delivered to ' + who(s.rejected) + '. ' : '') +
+          'Delivery to ' +
+          s.unconfirmed.join(', ') +
+          ' isn’t confirmed. Check with them before sending again. Everyone else received it.'
+        : s.rejected?.length
+          ? 'Not delivered to ' + who(s.rejected) + '. Everyone else received it.'
+          : 'Some recipients refused the message. Everyone else received it.',
       tone: 'attention',
     }
   return {

@@ -60,6 +60,8 @@ import { emailBodyHtml, emailSanitizeOptions } from './email-html'
 import { markPaperCards, needsPaper, paperClass } from './email-paper'
 import { offersAction } from './view-actions'
 import { SecuritySummary, WithheldBody, withheld } from './MessageSecurity'
+import { ReadStatusPanel } from './read-status/ReadStatusPanel' // Read status
+import { useReadStatus } from './read-status/useReadStatus'
 
 const formatAddress = (a: { name: string; email: string }) =>
   a.name ? a.name + ' <' + a.email + '>' : a.email
@@ -739,6 +741,7 @@ export function Reader({
   // Unsent drafts sit below the conversation they would continue, never among what was said.
   const history = messages.filter((m) => !isDraft(m))
   const drafts = messages.filter(isDraft)
+  const readStatus = useReadStatus(account.id, history, history) // Read status
   const last = history.at(-1)
   const initiallyExpanded = () =>
     new Set(
@@ -1202,6 +1205,11 @@ export function Reader({
                           })}
                         </div>
                       )}
+                      {/* Read status */}
+                      <ReadStatusPanel
+                        statuses={readStatus.get(message.id)}
+                        recipients={[...message.to, ...message.cc, ...message.bcc]}
+                      />
                       {draft && (
                         <div className="draft-message-actions flex gap-1.5 mt-4">
                           <Button onClick={() => onEditDraft(message)}>
