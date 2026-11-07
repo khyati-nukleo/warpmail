@@ -28,6 +28,7 @@ import {
   type ProviderEvent,
   type ProviderPage,
   type SubmissionOutcome,
+  type CopyOutcome, // Read status
   type SubmissionTracking,
   addPixel,
   trackedRecipients,
@@ -59,7 +60,7 @@ import type {
 } from './metadata-index'
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
-import { submitSmtp, verifySmtp, type SmtpSettings } from './smtp'
+import { submitSmtp, submitSmtpCopies, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
 
 export interface ImapProviderOptions {
@@ -83,6 +84,7 @@ export interface ImapProviderOptions {
       envelope: OutgoingMessage['envelope'],
       mime: Uint8Array,
     ) => Promise<SubmissionOutcome>
+    submitCopies?: typeof submitSmtpCopies // Read status
   }
   inspect?: typeof inspectCertificate
   /** Tests only: trust an extra certificate authority. */
@@ -1774,6 +1776,21 @@ export class ImapProvider implements MailProvider {
       this.smtpSettings(),
       message.envelope,
       message.mime,
+    )
+  }
+  // Read status
+  async submitCopies(
+    _account: Account,
+    message: OutgoingMessage,
+    progress: (recipient: string, previous?: CopyOutcome) => Promise<void>,
+  ): Promise<CopyOutcome[]> {
+    if (!message.copies?.length)
+      throw new ProviderError('submission', 'The copies were not prepared.')
+    return (this.options.smtp?.submitCopies || submitSmtpCopies)(
+      this.smtpSettings(),
+      message.envelope.from,
+      message.copies,
+      progress,
     )
   }
   /** SMTP gives no later proof of submission; only the recorded acceptance counts. */

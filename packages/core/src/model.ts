@@ -464,6 +464,12 @@ export interface OutgoingCopy {
   recipient: string
   mime: Uint8Array
 }
+/** What became of one recipient's copy: `uncertain` may have arrived; `notSent` never left the device. */
+export interface CopyOutcome {
+  recipient: string
+  result: 'accepted' | 'rejected' | 'uncertain' | 'notSent'
+  reason?: string
+}
 export interface SubmissionTracking {
   /** The image URL for this recipient, or undefined for a copy without an image. */
   imageFor(recipient: string): string | undefined
@@ -566,6 +572,12 @@ export interface MailProvider {
    * `submissionUncertain` when the outcome is unknown, and other codes when sending never began.
    */
   submit(account: Account, message: OutgoingMessage, identityId: string): Promise<SubmissionOutcome>
+  // Read status: sends `message.copies` in order, awaiting `progress` before each; never retries a copy.
+  submitCopies?(
+    account: Account,
+    message: OutgoingMessage,
+    progress: (recipient: string, previous?: CopyOutcome) => Promise<void>,
+  ): Promise<CopyOutcome[]>
   /** Whether the server proves this message was submitted. A Sent copy alone is not proof. */
   submissionExists(account: Account, message: OutgoingMessage): Promise<boolean>
   /**
