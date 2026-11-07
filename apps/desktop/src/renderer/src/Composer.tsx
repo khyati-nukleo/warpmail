@@ -52,6 +52,7 @@ import { SignatureParagraph, hasDraftContent, replaceSignature } from './compose
 import { serverSaves } from './draft-sync'
 import { useImprove } from './improve/useImprove'
 import { encryptionUndecided } from './improve/improve-session'
+import { markForeignSignatures } from './improve/foreign-signature'
 import { ImproveControls, ImproveNotice } from './improve/ImproveControls'
 import { ImprovePreview } from './improve/ImprovePreview'
 import { ComposerCommandMenu } from './improve/ComposerCommandMenu'
@@ -242,6 +243,8 @@ export function Composer({
       return next
     })
   const form = useForm({ defaultValues: { subject: initial.subject } })
+  // Read once: a signature from another mail app becomes one block, so Improve never sends it.
+  const [openingHtml] = useState(() => markForeignSignatures(initial.html))
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -255,7 +258,7 @@ export function Composer({
       SignatureParagraph,
     ],
     content:
-      initial.html ||
+      openingHtml ||
       '<p>' +
         initial.text
           .replace(/&/g, '&amp;')
