@@ -146,6 +146,7 @@ export interface Message {
   inReplyTo?: string[]
   references?: string[]
   unsubscribe?: { url: string; oneClick: boolean }
+  autoReply?: boolean // Read status: carries Auto-Submitted other than `no`
   security?: MailSecurity
   /** Revision of ciphertext, never a decrypted-body fingerprint. */
   protectedRevision?: string

@@ -159,6 +159,12 @@ export function isAutomatedAddress(email: string): boolean {
   return /^(noreply|donotreply|bounce)/.test(local.replace(/[.\-_]/g, ''))
 }
 
+/** True when an `Auto-Submitted` header value is present and is not `no`. */
+export function isAutoSubmitted(value?: string | null): boolean {
+  const auto = value?.trim().toLowerCase()
+  return !!auto && auto !== 'no'
+}
+
 export function isAutomatedMessage(m: {
   fromEmail?: string
   unsubscribe?: unknown
@@ -171,8 +177,7 @@ export function isAutomatedMessage(m: {
   if (m.listId?.trim()) return true
   const precedence = m.precedence?.trim().toLowerCase()
   if (precedence === 'bulk' || precedence === 'list' || precedence === 'junk') return true
-  const auto = m.autoSubmitted?.trim().toLowerCase()
-  return !!auto && auto !== 'no'
+  return isAutoSubmitted(m.autoSubmitted)
 }
 
 export function ruleMatches(rule: SplitRule, email: string): boolean {

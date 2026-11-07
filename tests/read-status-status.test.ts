@@ -72,6 +72,25 @@ describe('replyTimes', () => {
     ])
     expect([...m]).toEqual([['bob@example.com', iso(200)]])
   })
+
+  // Read status: only a person's reply counts.
+  const bob = [{ name: '', email: 'bob@example.com' }]
+  it('ignores an automatic reply', () => {
+    const m = replyTimes({ receivedAt: iso(100) }, [
+      { from: bob, receivedAt: iso(200), autoReply: true },
+    ])
+    expect([...m]).toEqual([])
+    expect(recipientStatus('bob@example.com', [a(1)], m.get('bob@example.com')).state).toBe('apple')
+    expect(recipientStatus('bob@example.com', [], m.get('bob@example.com')).state).toBe('none')
+  })
+  it('counts a person reply, also after an automatic one', () => {
+    const m = replyTimes({ receivedAt: iso(100) }, [
+      { from: bob, receivedAt: iso(200), autoReply: true },
+      { from: bob, receivedAt: iso(300), autoReply: false },
+      { from: bob, receivedAt: iso(400) },
+    ])
+    expect([...m]).toEqual([['bob@example.com', iso(300)]])
+  })
 })
 
 describe('conversationOpened', () => {

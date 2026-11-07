@@ -253,14 +253,15 @@ export function recipientStatus(
   return status
 }
 
-/** Lowercase sender email to the earliest time they wrote after the sent email. */
+/** Lowercase sender email to the earliest time a person wrote after the sent email; automatic replies are skipped. */
 export function replyTimes(
   sent: { receivedAt: string },
-  later: { from: Address[]; receivedAt: string }[],
+  later: { from: Address[]; receivedAt: string; autoReply?: boolean }[],
 ): Map<string, string> {
   const sentAt = Date.parse(sent.receivedAt)
   const out = new Map<string, string>()
   for (const message of later) {
+    if (message.autoReply === true) continue
     const at = Date.parse(message.receivedAt)
     if (!(at > sentAt)) continue
     for (const from of message.from) {
