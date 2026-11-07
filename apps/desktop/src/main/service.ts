@@ -65,6 +65,7 @@ import {
   type CopyOutcome,
   type SubmissionOutcome,
   type SubmissionTracking,
+  tabApplies, // Reminders
 } from '@inlark/core'
 import { JmapProvider } from '@inlark/jmap'
 import { publicFetch } from './public-fetch'
@@ -90,6 +91,7 @@ import { ReadStatusSecret } from './read-status/secret'
 import { ReadStatusCollector } from './read-status/collector'
 import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
+import { ReminderEngine } from './reminders/engine' // Reminders
 
 export type Connection = {
   id: string
@@ -312,6 +314,8 @@ export class MailService {
   private protectedLoaded = new Set<string>()
   private protectionTransition = false
   private draftWrites: Promise<unknown> = Promise.resolve()
+  // Reminders
+  private reminders: ReminderEngine
   constructor(
     private store: JsonStore,
     private emit: (event: AppEvent) => void,
@@ -328,6 +332,31 @@ export class MailService {
       () => this.emit({ type: 'readStatus' }),
       { fetch: options.readStatusFetch },
     )
+    // Reminders
+    this.reminders = new ReminderEngine({
+      accounts: () => this.accounts,
+      settings: () => this.settings,
+      provider: (accountId) => {
+        const account = this.accounts.find((a) => a.id === accountId)
+        return account && this.providers.get(account.connectionId)
+      },
+      returnToInbox: async (accountId, threadId) => {
+        const { provider, account } = this.provider(accountId)
+        const inbox = (await provider.mailboxes(account)).find((b) => b.role === 'inbox')
+        if (!inbox) return undefined
+        const result = await this.mutate({
+          targets: [{ accountId, threadId }],
+          action: 'move',
+          mailboxId: inbox.id,
+          fromRoles: ['archive'],
+        })
+        if (result.failures.length && !result.changed) throw new Error(result.failures[0])
+        return result.changed ? result.undoId : undefined
+      },
+      emit: (event) => this.emit(event),
+      store: this.store,
+      log: (event) => this.log(event),
+    })
     this.encryption = new EncryptionService(store, options.crypto, (accountId, email) =>
       this.guard(
         accountId,
@@ -408,7 +437,9 @@ export class MailService {
     }
     await this.persistDrafts()
     await this.persistJournal()
-    void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id)))
+    void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id))).then(
+      () => this.reminders.start(), // Reminders: catch up once the accounts are connected
+    )
     this.timer = setInterval(() => void this.refresh(), 60_000)
     this.collector.start() // Read status
   }
@@ -801,6 +832,7 @@ export class MailService {
         this.status(id, event.state, event.message)
         return
       }
+      this.reminders.invalidate(event.accountId) // Reminders
       this.emit({ type: 'changed', accountId: event.accountId })
       // Historical indexing adds older mail; only live changes may produce notifications.
       if (!event.historical) void this.refreshConnection(id)
@@ -1050,13 +1082,26 @@ export class MailService {
       return { items: [], total: 0, failedAccounts: [] }
     const sent = tab && 'split' in tab ? { ...query, split: tab.split } : query
     const settled = await Promise.allSettled(
-      accounts.map(async (a) => ({
-        accountId: a.id,
-        position: cursor?.[a.id] || 0,
-        page: await this.guard(a.id, (p, account) =>
-          p.query(account, sent, cursor?.[a.id] || 0, 50),
-        ),
-      })),
+      accounts.map(async (a) => {
+        // Reminders: due ones lift their conversations in the inbox and its tabs.
+        const reminders =
+          tabApplies(query) && isImap(a)
+            ? (await this.reminders.due(a.id)).map((r) => ({
+                threadId: r.threadId,
+                kind: r.kind,
+                dueAt: new Date(r.dueMs).toISOString(),
+                messageId: r.messageId,
+              }))
+            : []
+        const asked = reminders.length ? { ...sent, reminders } : sent
+        return {
+          accountId: a.id,
+          position: cursor?.[a.id] || 0,
+          page: await this.guard(a.id, (p, account) =>
+            p.query(account, asked, cursor?.[a.id] || 0, 50),
+          ),
+        }
+      }),
     )
     const pages = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []))
     if (!pages.length)
@@ -1128,10 +1173,18 @@ export class MailService {
         await this.exclusive(accountId, async () => {
           const { provider, account } = this.provider(accountId)
           const boxes = await provider.mailboxes(account)
-          const messages = await provider.conversationMetadata(
+          let messages = await provider.conversationMetadata(
             account,
             input.targets.filter((t) => t.accountId === accountId).map((t) => t.threadId),
           )
+          // Reminders: only the locations in these roles take part.
+          if (input.fromRoles) {
+            const roles = new Set(input.fromRoles)
+            const from = new Set(boxes.filter((b) => b.role && roles.has(b.role)).map((b) => b.id))
+            messages = messages.filter((m) =>
+              Object.keys(m.mailboxIds).some((id) => m.mailboxIds[id] && from.has(id)),
+            )
+          }
           const expectedState = provider.getStateToken(account)
           const plan = planMutation(messages, boxes, input.action, input.mailboxId, {
             exclusiveMailboxes: provider.capabilities.exclusiveMailboxes,
@@ -2591,6 +2644,7 @@ export class MailService {
       JSON.stringify(this.settings.readStatus) !== JSON.stringify(settings.readStatus)
     this.settings = settings
     if (readStatusChanged) void this.collector.collectNow() // Read status
+    this.reminders.invalidate() // Reminders
     return settings
   }
   // Read status
@@ -2905,6 +2959,7 @@ export class MailService {
   }
   dispose() {
     this.disposed = true
+    this.reminders.dispose() // Reminders
     void this.encryption.lock()
     if (this.timer) clearInterval(this.timer)
     this.collector.stop() // Read status

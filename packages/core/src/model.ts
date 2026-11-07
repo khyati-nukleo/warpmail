@@ -1,4 +1,4 @@
-import type { ReminderKind, ReminderSettings, ReminderSnooze } from './reminders'
+import type { ReminderFacts, ReminderKind, ReminderSettings, ReminderSnooze } from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -307,6 +307,9 @@ export interface MutationInput {
   targets: MutationTarget[]
   action: MailAction
   mailboxId?: string
+  // Reminders
+  /** Only locations in mailboxes of these roles take part (main process only, not over IPC). */
+  fromRoles?: string[]
 }
 export interface MutationResult {
   changed: number
@@ -625,6 +628,23 @@ export interface MailProvider {
   setFolderMappings?(account: Account, mappings: FolderMappings): Promise<FolderMappingReview>
   subscribe(listener: (event: ProviderEvent) => void): () => void
   dispose(): void
+  // Reminders
+  /** Per recent thread, what reminders are worked out from. Omitted by providers without an index. */
+  reminderFacts?(
+    account: Account,
+    query: {
+      important: Extract<SplitScope, { kind: 'important' }>
+      sinceMs: number
+      threadIds?: string[]
+    },
+  ): Promise<ReminderFacts[]>
+  /** Sent mail since `sinceMs` whose ask-check isn't stored yet, newest first. */
+  askChecksNeeded?(
+    account: Account,
+    sinceMs: number,
+    limit: number,
+  ): Promise<{ id: string; messageId: string }[]>
+  setAskChecks?(account: Account, rows: { messageId: string; asks: boolean }[]): Promise<void>
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }
@@ -639,6 +659,8 @@ export type AppEvent =
   // Improve draft
   | { type: 'improve'; id: string; text: string }
   | { type: 'readStatus' } // Read status
+  // Reminders
+  | { type: 'remindersReturned'; count: number; undoId?: string }
 export type UpdateStatus =
   | { phase: 'idle' }
   | { phase: 'downloading'; version: string; percent: number }

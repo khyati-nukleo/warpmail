@@ -32,6 +32,8 @@ import {
   type SubmissionTracking,
   addPixel,
   trackedRecipients,
+  type ReminderFacts,
+  type ReminderLabel,
 } from '@inlark/core'
 import {
   attachmentsOf,
@@ -51,6 +53,7 @@ import {
 import { inspectCertificate } from './certificate'
 import { isInbox, reviewFolders, rolesByPath } from './folders'
 import { ImapFlowPort } from './imapflow-port'
+import { isWarpmailFolder, labelPath } from './labels'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -1006,6 +1009,57 @@ export class ImapProvider implements MailProvider {
       Date.now() - suggestionDays * 86_400_000,
       term,
     )
+  }
+  // Reminders
+  /**
+   * Counted mail is every selectable folder but Drafts, Trash, Junk and the Warpmail label
+   * folders; Drafts still goes along, since Gmail lists drafts in All Mail too.
+   */
+  async reminderFacts(
+    _account: Account,
+    query: {
+      important: Extract<SplitScope, { kind: 'important' }>
+      sinceMs: number
+      threadIds?: string[]
+    },
+  ): Promise<ReminderFacts[]> {
+    const boxes = (await this.index.listMailboxes(this.accountId)).filter((b) => !b.noSelect)
+    const roles = rolesByPath(this.review(boxes))
+    const inbox = boxes.find((b) => isInbox(b.path))
+    if (!inbox) return []
+    const labelIds: Partial<Record<ReminderLabel, string>> = {}
+    for (const label of ['noReminder', 'followUp'] as const) {
+      const box = boxes.find((b) => b.path === labelPath(label, b.delimiter))
+      if (box) labelIds[label] = box.id
+    }
+    const mailboxIds = boxes
+      .filter(
+        (b) =>
+          !['drafts', 'trash', 'junk'].includes(roles.get(b.path) || '') &&
+          !isWarpmailFolder(b.path, b.delimiter),
+      )
+      .map((b) => b.id)
+    return this.index.reminderFacts(this.accountId, {
+      inboxId: inbox.id,
+      mailboxIds,
+      labelIds,
+      important: query.important,
+      sinceMs: query.sinceMs,
+      threadIds: query.threadIds,
+      draftsId: boxes.find((b) => roles.get(b.path) === 'drafts')?.id,
+    })
+  }
+  async askChecksNeeded(
+    _account: Account,
+    sinceMs: number,
+    limit: number,
+  ): Promise<{ id: string; messageId: string }[]> {
+    const sent = await this.roleBox('sent')
+    if (!sent || sent.noSelect) return []
+    return this.index.askChecksNeeded(this.accountId, sent.id, sinceMs, limit)
+  }
+  setAskChecks(_account: Account, rows: { messageId: string; asks: boolean }[]): Promise<void> {
+    return this.index.setAskChecks(this.accountId, rows)
   }
   async query(
     account: Account,

@@ -802,4 +802,46 @@ describe('IMAP reading', () => {
     expect(source).toHaveBeenCalledTimes(1)
     expect(opened!.text).toContain('Big report.')
   })
+  // Reminders
+  it('moves only the locations in the given roles', async () => {
+    const sent = {
+      emailId: 'e1',
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: '2026-09-20T10:00:00Z',
+      text: 'Can you confirm?',
+    }
+    server.deliver('Sent', sent)
+    server.deliver('Archive', sent)
+    await (provider() as any).syncPass('all')
+    const { id } = (await service.query({ view: 'sent' })).items[0]!
+    const inbox = (await service.mailboxes(accountId)).find((b) => b.role === 'inbox')!
+    const result = await service.mutate({
+      targets: [{ accountId, threadId: id }],
+      action: 'move',
+      mailboxId: inbox.id,
+      fromRoles: ['archive'],
+    })
+    expect(result.changed).toBe(1)
+    expect(server.box('Sent').messages).toHaveLength(1)
+    expect(server.box('Archive').messages).toHaveLength(0)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+  })
+  it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
+    server.deliver('INBOX', {
+      messageId: 'waiting@x',
+      subject: 'Question',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(Date.now() - 5 * 86_400_000).toISOString(),
+      text: 'Can you send the file?',
+    })
+    await (provider() as any).syncPass('all')
+    const [inbox] = (await service.query({ view: 'inbox' })).items
+    expect(inbox!.reminder).toMatchObject({ kind: 'reply', messageId: 'waiting@x' })
+    const [all] = (await service.query({ view: 'all' })).items
+    expect(all!.reminder).toBeUndefined()
+  })
 })
