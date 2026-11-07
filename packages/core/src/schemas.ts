@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { DesktopMailAPI } from './model'
 import { aiModels, type AiModel } from './improve'
+import { undoSendChoices } from './undo-send' // Undo send
 
 const id = z.string().min(1).max(2048)
 const address = z.object({ name: z.string().max(1000), email: z.string().max(320) })
@@ -226,6 +227,9 @@ export const settingsSchema = z.object({
   signatures: z.record(z.string(), z.string().max(100_000)),
   htmlSignatures: z.record(z.string(), z.boolean()).optional(),
   afterArchive: z.enum(['next', 'previous', 'list']).optional(),
+  // Undo send
+  undoSendSeconds: z.union(undoSendChoices.map((n) => z.literal(n))).optional(),
+  undoSendOnQuit: z.enum(['send', 'draft']).optional(),
   shortcuts: z
     .record(z.string().max(64), z.array(z.array(z.string().min(1).max(64)).min(1).max(4)).max(16))
     .optional(),
@@ -352,6 +356,10 @@ export const ipcSchemas = {
   deleteServerDraft: z.tuple([id, id]),
   send: z.tuple([sendDraftSchema]),
   reconcile: z.tuple([z.string().uuid()]),
+  // Undo send
+  sendWithUndo: z.tuple([sendDraftSchema]),
+  undoSend: z.tuple([z.string().uuid()]),
+  heldSends: z.tuple([]),
   submissions: z.tuple([]),
   retrySentCopy: z.tuple([z.string().uuid()]),
   recoverRejected: z.tuple([z.string().uuid()]),
