@@ -70,10 +70,16 @@ export function isWorkerImage(src: string, base?: string): boolean {
   }
 }
 
+/**
+ * Puts the image right after the opening `<body>` tag (or first, without one): Gmail clips
+ * long HTML, so an image at the end of a long thread would never be fetched.
+ */
 export function addPixel(html: string, src: string): string {
   const img = `<img src="${src}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">`
-  const at = html.toLowerCase().lastIndexOf('</body>')
-  return at < 0 ? html + img : html.slice(0, at) + img + html.slice(at)
+  const body = /<body(?:\s[^>]*)?>/i.exec(html)
+  if (!body) return img + html
+  const at = body.index + body[0].length
+  return html.slice(0, at) + img + html.slice(at)
 }
 
 const space = /[\s]/

@@ -54,12 +54,19 @@ describe('pixels', () => {
   it('builds the pixel url', () => {
     expect(pixelUrl(base, 'abc')).toBe('https://read.example.com/p/abc.gif')
   })
-  it('adds the pixel before the last body end, or appends', () => {
+  it('adds the pixel right after the opening body tag, or prepends', () => {
     const src = pixelUrl(base, 'abc')
-    const out = addPixel('<html><body><p>Hi</p></BODY></html>', src)
-    expect(out).toMatch(/<img src="[^"]+abc\.gif"[^>]*><\/BODY><\/html>$/)
-    expect(out.indexOf('<img')).toBeGreaterThan(out.indexOf('<p>Hi</p>'))
-    expect(addPixel('<p>Hi</p>', src)).toMatch(/^<p>Hi<\/p><img src=/)
+    const out = addPixel(
+      '<html><head></head><BODY class="x" style="margin:0"><p>Hi</p></BODY></html>',
+      src,
+    )
+    expect(out).toMatch(
+      /^<html><head><\/head><BODY class="x" style="margin:0"><img src="[^"]+abc\.gif"[^>]*><p>Hi<\/p><\/BODY><\/html>$/,
+    )
+    expect(addPixel('<body><p>Hi</p></body>', src)).toMatch(/^<body><img src=[^>]+><p>Hi<\/p>/)
+    expect(addPixel('<p>Hi</p>', src)).toMatch(/^<img src="[^"]+abc\.gif"[^>]*><p>Hi<\/p>$/)
+    // Not fooled by tags that only start with "body".
+    expect(addPixel('<bodyx><p>Hi</p>', src)).toMatch(/^<img src=/)
   })
   it('recognises worker images', () => {
     expect(isWorkerImage('https://READ.example.com/p/x.gif', base)).toBe(true)
