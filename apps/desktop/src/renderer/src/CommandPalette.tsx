@@ -59,7 +59,8 @@ export function CommandPalette({
 }: {
   open: boolean
   onClose: () => void
-  onSearch: (text: string) => void
+  /** Leave out where there is no mail to search, e.g. in the composer. */
+  onSearch?: (text: string) => void
   commands: Command[]
 }) {
   const [value, setValue] = useState(''),
@@ -82,7 +83,7 @@ export function CommandPalette({
     : commands
   const options: Command[] = [
     ...matched,
-    ...(query
+    ...(query && onSearch
       ? [
           {
             id: 'search',
@@ -129,7 +130,7 @@ export function CommandPalette({
         <Search size={18} />
         <input
           autoFocus
-          placeholder="Type a command or search your mail…"
+          placeholder={onSearch ? 'Type a command or search your mail…' : 'Type a command…'}
           value={value}
           aria-label="Search commands or mail"
           role="combobox"
