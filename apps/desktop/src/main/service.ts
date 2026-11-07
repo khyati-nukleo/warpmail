@@ -172,6 +172,8 @@ const interruptedSend = 'Sending was interrupted before the message left. Review
 const closedWhileSending = 'The app closed during sending. Check delivery before retrying.'
 /** How long send waits for a draft save already in progress before asking to retry. */
 const draftSaveWaitMs = 60_000
+/** Read status: how long the periodic retry keeps looking for an unconfirmed send's server copy. */
+const unconfirmedLookMs = 60 * 60_000
 /** Settles when `promise` does or after `ms`, whichever comes first. Never rejects. */
 const settledWithin = (promise: Promise<unknown>, ms: number) => {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -269,6 +271,8 @@ export class MailService {
   private draftSyncs = new Map<string, Promise<Draft>>()
   private refreshing = new Set<string>()
   private filing = new Set<string>()
+  /** Read status: unconfirmed tracked sends looked for once after this start, however old. */
+  private lookOnStart = new Set<string>()
   /** Accepted sends still filing their Sent copy and tidying up drafts in the background. */
   private finishing = new Map<string, Promise<void>>()
   /** Drafts a send has claimed, from the moment it is called. */
@@ -381,6 +385,8 @@ export class MailService {
           })
       }
       if (journal.sentCopy === 'appending') journal.sentCopy = 'uncertain'
+      // Read status
+      if (journal.tracked && journal.state === 'uncertain') this.lookOnStart.add(journal.draftId)
     }
     await this.persistDrafts()
     await this.persistJournal()
@@ -2160,8 +2166,13 @@ export class MailService {
     for (const journal of this.journals.values())
       if (accountIds.has(journal.accountId) && !this.finishing.has(journal.draftId)) {
         const accepted = ['sent', 'partial'].includes(journal.state)
-        // Read status: an unconfirmed tracked send may have left Gmail's copy with an image.
-        const unconfirmed = journal.tracked && journal.state === 'uncertain'
+        // Read status: an unconfirmed tracked send may have left Gmail's copy with an image. It
+        // is looked for while recent and once after each start, not every minute forever.
+        const unconfirmed =
+          journal.tracked &&
+          journal.state === 'uncertain' &&
+          (this.lookOnStart.delete(journal.draftId) ||
+            Date.now() - Date.parse(journal.at) < unconfirmedLookMs)
         if ((accepted || unconfirmed) && !journal.dismissed) await this.fileSentCopy(journal)
         // Even a dismissed send must not leave its old draft behind to be sent again.
         if (accepted || (journal.state === 'uncertain' && journal.dismissed))

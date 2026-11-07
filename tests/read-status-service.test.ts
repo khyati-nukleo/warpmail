@@ -194,6 +194,7 @@ afterEach(async () => {
   await Promise.allSettled(closing)
   closing = []
   vi.restoreAllMocks()
+  vi.useRealTimers()
   await new Promise((r) => setTimeout(r, 20))
   await rm(directory, { recursive: true, force: true, maxRetries: 5 })
 })
@@ -391,6 +392,52 @@ describe('Read status: tracked sending', () => {
       expect((await journal()).state).toBe('uncertain')
       expect(submitCopies).toHaveBeenCalledTimes(1)
       expect(submit).not.toHaveBeenCalled()
+    })
+    /** Only the clock moves: timers stay real, so the IMAP fake and the store keep working. */
+    const later = async (minutes: number) => {
+      const at = Date.parse((await journal()).at)
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(at + minutes * 60_000)
+    }
+    it('the periodic retry looks again for an hour, then stops', async () => {
+      plan = ['uncertain']
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      const filing = vi.spyOn(ImapProvider.prototype, 'fileSentCopy')
+      await later(30)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(1)
+      expect((await journal()).sentCopy).toBe('pending')
+      await later(61)
+      await service.refresh()
+      expect(filing).toHaveBeenCalledTimes(1)
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+      expect(submit).not.toHaveBeenCalled()
+    })
+    it('a restart still looks once, however old the send', async () => {
+      plan = ['uncertain']
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      await gmailFiles(submitCopies.mock.calls[0][2][0])
+      await stop(service)
+      await later(61)
+      await start()
+      await connected()
+      await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+      expectOneCleanSentCopy()
+      expect((await journal()).state).toBe('uncertain')
+    })
+    it('a sent tracked journal still files after an hour', async () => {
+      vi.spyOn(ImapProvider.prototype, 'fileSentCopy').mockRejectedValueOnce(
+        new ProviderError('filing', 'The server did not accept the Sent copy.'),
+      )
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      expect((await journal()).sentCopy).toBe('failed')
+      await later(61)
+      await service.refresh()
+      expect((await journal()).sentCopy).toBe('filed')
+      expectOneCleanSentCopy()
     })
     it('looks again before a dismiss marks it done', async () => {
       plan = ['uncertain']
