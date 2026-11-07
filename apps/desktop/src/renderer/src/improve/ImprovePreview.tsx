@@ -104,6 +104,7 @@ export function ImprovePreview({ improve }: { improve: Improve }) {
             </Button>
           )
         })}
+        <span className="ml-1 text-[11px] text-muted">Space tries a style · Enter accepts</span>
       </div>
 
       {session.phase === 'waiting' && (
@@ -131,6 +132,12 @@ export function ImprovePreview({ improve }: { improve: Improve }) {
                 </p>
               ))}
             </div>
+          )}
+          {improve.flattens && (
+            <p className="flex items-center gap-1.5 mt-0 mb-3 text-[12px] text-muted">
+              <AlertCircle size={13} className="shrink-0" />
+              Lists inside lists will become one level when you accept.
+            </p>
           )}
           <div className="compose-improve-diff whitespace-pre-wrap text-[15px] leading-[1.8] text-foreground">
             {session.diff.map((part, index) =>

@@ -4,7 +4,7 @@ import type { Editor } from '@tiptap/react'
 import { improveErrorMessages, type ImproveResult, type ImproveStyle } from '@inlark/core'
 import { api } from '../api'
 import type { Protection } from '../ComposerProtection'
-import { splitDraft } from './draft-split'
+import { flattensFormatting, splitDraft } from './draft-split'
 import {
   improveAvailability,
   improveReducer,
@@ -41,6 +41,8 @@ export function useImprove({
   const [session, dispatch] = useReducer(improveReducer, { phase: 'closed' })
   // The line shown under the toolbar after Improve was asked for but couldn't run.
   const [notice, setNotice] = useState<ImproveUnavailableReason>()
+  // Accepting would bring a list inside a list back one level deep; the preview says so.
+  const [flattens, setFlattens] = useState(false)
   // The request main is still working on, so it can be cancelled.
   const pending = useRef<string | undefined>(undefined)
   const open = session.phase !== 'closed'
@@ -65,7 +67,7 @@ export function useImprove({
 
   const start = (style: ImproveStyle) => {
     if (!editor) return
-    const { text } = splitDraft(editor.getJSON())
+    const { text, own } = splitDraft(editor.getJSON())
     const check = improveAvailability({
       protection,
       hasKey,
@@ -81,6 +83,7 @@ export function useImprove({
     // Main cancels the previous request when this one starts; the session ignores its events.
     const id = crypto.randomUUID()
     pending.current = id
+    setFlattens(flattensFormatting(own))
     dispatch({ type: 'start', id, style, original: text })
     void api
       .improveDraft({ id, text, style })
@@ -151,7 +154,7 @@ export function useImprove({
     return () => cancelAnimationFrame(frame)
   }, [open, editor])
 
-  return { session, availability, hasKey, notice, start, accept, keep, retry }
+  return { session, availability, hasKey, notice, flattens, start, accept, keep, retry }
 }
 
 export type Improve = ReturnType<typeof useImprove>

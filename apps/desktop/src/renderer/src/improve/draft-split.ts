@@ -140,12 +140,11 @@ interface Range extends Run {
   end: number
 }
 
-const keptMarks = new Set(['bold', 'italic', 'link'])
-
+/** Every mark the text had (bold, italic, underline, strikethrough, code, links) goes back. */
 function markedRuns(nodes: JSONContent[]): Run[] {
   const runs: Run[] = []
   const visit = (node: JSONContent) => {
-    const marks = (node.marks || []).filter((mark) => keptMarks.has(mark.type))
+    const marks = node.marks || []
     if (node.text && marks.length) runs.push({ text: node.text, marks })
     node.content?.forEach(visit)
   }
@@ -226,4 +225,16 @@ export function ownRange(doc: DocumentLike): { from: number; to: number } | unde
   const { start, end } = boundaries(nodes.map((node) => node.json))
   if (start >= end) return undefined
   return { from: nodes[start].from, to: nodes[end - 1].to }
+}
+
+/**
+ * Whether accepting would lose structure the plain text can't carry: a list inside a list comes
+ * back one level deep. Improve still works; the preview says so first.
+ */
+export function flattensFormatting(own: JSONContent[]): boolean {
+  const lists = new Set(['bulletList', 'orderedList'])
+  const nested = (node: JSONContent, inList: boolean): boolean =>
+    (inList && lists.has(node.type || '')) ||
+    (node.content || []).some((child) => nested(child, inList || lists.has(node.type || '')))
+  return own.some((node) => nested(node, false))
 }

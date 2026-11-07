@@ -4,6 +4,7 @@ import { Editor, type JSONContent } from '../apps/desktop/node_modules/@tiptap/r
 import StarterKit from '../apps/desktop/node_modules/@tiptap/starter-kit'
 import { SignatureParagraph } from '../apps/desktop/src/renderer/src/composer-document'
 import {
+  flattensFormatting,
   joinDraft,
   ownRange,
   ownTextContent,
@@ -152,6 +153,52 @@ describe('draft splitting', () => {
     expect(joined.content!.slice(-split.rest.length)).toEqual(split.rest)
     expect(joined.content![0]).toEqual(split.before[0])
     expect(joined.content![1]).toEqual(p('Hello there.'))
+  })
+
+  it('keeps underline, strikethrough and code through accept too', () => {
+    const own: JSONContent[] = [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'Run ' },
+          { type: 'text', text: 'npm test', marks: [{ type: 'code' }] },
+          { type: 'text', text: ' before ' },
+          { type: 'text', text: 'Friday', marks: [{ type: 'underline' }] },
+          { type: 'text', text: ', not ' },
+          { type: 'text', text: 'Monday', marks: [{ type: 'strike' }] },
+        ],
+      },
+    ]
+    const [kept] = ownTextContent('Please run npm test before Friday, not Monday.', own)
+    expect(kept.content).toContainEqual({
+      type: 'text',
+      text: 'npm test',
+      marks: [{ type: 'code' }],
+    })
+    expect(kept.content).toContainEqual({
+      type: 'text',
+      text: 'Friday',
+      marks: [{ type: 'underline' }],
+    })
+    expect(kept.content).toContainEqual({
+      type: 'text',
+      text: 'Monday',
+      marks: [{ type: 'strike' }],
+    })
+  })
+
+  it('tells when accepting would flatten a nested list', () => {
+    const item = (text: string, ...more: JSONContent[]): JSONContent => ({
+      type: 'listItem',
+      content: [p(text), ...more],
+    })
+    const flat: JSONContent = { type: 'bulletList', content: [item('one'), item('two')] }
+    const nested: JSONContent = {
+      type: 'bulletList',
+      content: [item('one', { type: 'bulletList', content: [item('inner')] }), item('two')],
+    }
+    expect(flattensFormatting([p('Plan:'), flat])).toBe(false)
+    expect(flattensFormatting([p('Plan:'), nested])).toBe(true)
   })
 
   it('re-applies marks whose text survives', () => {
