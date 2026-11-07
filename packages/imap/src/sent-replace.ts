@@ -9,9 +9,8 @@ import type { ImapPort } from './port'
  */
 
 /**
- * flagged `\All` and `\Trash`: any other folder there is a label, and removing from it only
- * flagged `\\All` and `\\Trash`: any other folder there is a label, and removing from it only
- * removes the label.
+ * Where the copies live; on Gmail, All Mail and Trash are the folders flagged `\All` and
+ * `\Trash`, and every other folder is a label, so removing a message from it only removes the label.
  */
 export interface SentCopyBoxes {
   sent: string
