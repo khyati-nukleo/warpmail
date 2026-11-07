@@ -72,6 +72,11 @@ const methods = [
   'testAiKey',
   'improveDraft',
   'cancelImprove',
+  // Read status
+  'readStatus',
+  'readStatusInfo',
+  'setReadStatusPassword',
+  'testReadStatus',
 ] as const satisfies readonly (keyof DesktopMailAPI)[]
 // Fails to compile when an API method is missing from the allowlist above.
 type Missing = Exclude<keyof DesktopMailAPI, 'onEvent' | (typeof methods)[number]>

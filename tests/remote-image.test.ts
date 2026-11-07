@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { isWorkerImage } from '../packages/core/src'
 import { remoteImageData } from '../apps/desktop/src/main/remote-image'
 import { publicFetch } from '../apps/desktop/src/main/public-fetch'
 
@@ -40,5 +41,38 @@ describe('remote message images', () => {
     })
     expect(await remoteImageData('https://images.example/redirect', redirect)).toBeNull()
     expect(redirect).toHaveBeenCalledTimes(1)
+  })
+
+  // Read status: the app never loads an image from the user's own Worker.
+  it('never requests a blocked URL', async () => {
+    const fetch = vi.fn<FetchResource>()
+    const blocked = (url: string) => new URL(url).origin === 'https://read.example.com'
+    expect(
+      await remoteImageData(
+        'https://read.example.com/p/AbCdEfGhIjKlMnOpQrStUv.gif',
+        fetch,
+        blocked,
+      ),
+    ).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('blocks the Worker host written with a trailing dot', async () => {
+    const fetch = vi.fn<FetchResource>()
+    const blocked = (url: string) => isWorkerImage(url, 'https://read.example.com')
+    expect(await remoteImageData('https://read.example.com./p/x.gif', fetch, blocked)).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('stops when a redirect lands on a blocked URL', async () => {
+    const fetch = vi.fn<FetchResource>().mockResolvedValue({
+      status: 302,
+      type: 'text/html',
+      bytes: Buffer.alloc(0),
+      location: 'https://read.example.com/p/AbCdEfGhIjKlMnOpQrStUv.gif',
+    })
+    const blocked = (url: string) => new URL(url).origin === 'https://read.example.com'
+    expect(await remoteImageData('https://images.example/hop', fetch, blocked)).toBeNull()
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

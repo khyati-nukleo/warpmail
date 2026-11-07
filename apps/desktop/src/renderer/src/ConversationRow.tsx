@@ -8,6 +8,7 @@ import { AccountMark } from './AccountMark'
 import { HintIconButton } from './HintIconButton'
 import { actionLimit } from './account-limits'
 import { useShortcutText } from './shortcuts'
+import { ReadStatusEye } from './read-status/ReadStatusEye' // Read status
 
 export function senderLabel(conversation: Conversation) {
   return conversation.from.map((sender) => sender.name || sender.email.split('@')[0]).join(', ')
@@ -169,6 +170,7 @@ export function ConversationRow({
         )}
         role="gridcell"
       >
+        <ReadStatusEye conversation={c} />
         <span className="row-attachment w-3.25">
           {c.hasAttachment && <Paperclip size={13} aria-label="Has attachments" />}
         </span>

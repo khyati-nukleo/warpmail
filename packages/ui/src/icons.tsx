@@ -22,6 +22,7 @@ import {
   CornerDownLeft as CornerDownLeftGlyph,
   Download as DownloadGlyph,
   ExternalLink as ExternalLinkGlyph,
+  Eye as EyeGlyph,
   File as FileGlyph,
   FileArchive as FileArchiveGlyph,
   FileImage as FileImageGlyph,
@@ -118,6 +119,7 @@ export const Copy = icon(CopyGlyph)
 export const CornerDownLeft = icon(CornerDownLeftGlyph)
 export const Download = icon(DownloadGlyph)
 export const ExternalLink = icon(ExternalLinkGlyph)
+export const Eye = icon(EyeGlyph)
 export const File = icon(FileGlyph)
 export const FileArchive = icon(FileArchiveGlyph)
 export const FileImage = icon(FileImageGlyph)

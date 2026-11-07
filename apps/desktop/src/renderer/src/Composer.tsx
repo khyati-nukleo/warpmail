@@ -38,6 +38,7 @@ import { RecipientField, type ChipSecurity } from './RecipientField'
 import { recipientProblems, useEncryption } from './encryption-ui'
 import { ContactKeyDialog, keysChanged, useUnlock } from './encryption-actions'
 import { ProtectionBar, ProtectionMenu, type Protection } from './ComposerProtection'
+import { ReadStatusSwitch } from './read-status/ReadStatusSwitch' // Read status
 import { formatBytes } from './mail-date'
 import {
   bindingText,
@@ -1035,6 +1036,13 @@ export function Composer({
                 </span>
               )}
             </Button>
+            {/* Read status */}
+            <ReadStatusSwitch
+              draft={draft}
+              protection={protection === 'none' && own?.enabled ? 'sign' : protection}
+              locked={locked}
+              onChange={(readStatus) => update({ readStatus })}
+            />
             <span className="compose-account flex-1 text-right text-muted text-[11px] max-[700px]:text-[10px]">
               {identity?.email ?? (senderMissing ? '' : account.email)}
             </span>

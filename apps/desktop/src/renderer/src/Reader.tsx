@@ -39,6 +39,8 @@ import { Button, IconButton, Dropdown, MenuItem, Spinner } from '@inlark/ui'
 import {
   friendlyError,
   isDraft,
+  isWorkerImage, // Read status
+  workerHosts,
   plainTextHtml,
   type Account,
   type Message,
@@ -58,6 +60,8 @@ import { emailBodyHtml, emailSanitizeOptions } from './email-html'
 import { markPaperCards, needsPaper, paperClass } from './email-paper'
 import { offersAction } from './view-actions'
 import { SecuritySummary, WithheldBody, withheld } from './MessageSecurity'
+import { ReadStatusPanel } from './read-status/ReadStatusPanel' // Read status
+import { useReadStatus } from './read-status/useReadStatus'
 
 const formatAddress = (a: { name: string; email: string }) =>
   a.name ? a.name + ' <' + a.email + '>' : a.email
@@ -192,6 +196,7 @@ const sharedStyles =
 export function EmailBody({
   message,
   remoteImages,
+  workerUrls, // Read status
   loading = false,
   onLinkHover,
   onMailto,
@@ -200,6 +205,8 @@ export function EmailBody({
 }: {
   message: Message
   remoteImages: boolean
+  /** Read status: the current and previous Worker origins, space-separated (none load). */
+  workerUrls?: string
   /** The message body is still being fetched; show its shape instead of the preview. */
   loading?: boolean
   onLinkHover?: (href: string | null) => void
@@ -294,7 +301,8 @@ export function EmailBody({
           image.style.display === 'none' ||
           image.style.visibility === 'hidden' ||
           (image.style.width === '1px' && image.style.height === '1px') ||
-          (image.getAttribute('width') === '1' && image.getAttribute('height') === '1')
+          (image.getAttribute('width') === '1' && image.getAttribute('height') === '1') ||
+          isWorkerImage(original, workerUrls?.split(' ')) // Read status: the Worker's own image
         ) {
           image.remove()
           return
@@ -365,7 +373,7 @@ export function EmailBody({
     return () => {
       active = false
     }
-  }, [message.id, message.html, message.text, effectiveRemoteImages, theme, loading])
+  }, [message.id, message.html, message.text, effectiveRemoteImages, workerUrls, theme, loading])
   useEffect(() => {
     if (!source || frameReady || renderIssue) return
     const timeout = window.setTimeout(() => {
@@ -734,6 +742,7 @@ export function Reader({
   // Unsent drafts sit below the conversation they would continue, never among what was said.
   const history = messages.filter((m) => !isDraft(m))
   const drafts = messages.filter(isDraft)
+  const readStatus = useReadStatus(account.id, history, history) // Read status
   const last = history.at(-1)
   const initiallyExpanded = () =>
     new Set(
@@ -1139,6 +1148,7 @@ export function Reader({
                       <EmailBody
                         message={message}
                         remoteImages={settings.remoteImages}
+                        workerUrls={workerHosts(settings.readStatus).join(' ')}
                         loading={loading && !message.html && !message.text}
                         onLinkHover={setLink}
                         onMailto={onMailto}
@@ -1196,6 +1206,11 @@ export function Reader({
                           })}
                         </div>
                       )}
+                      {/* Read status */}
+                      <ReadStatusPanel
+                        statuses={readStatus.get(message.id)}
+                        recipients={[...message.to, ...message.cc, ...message.bcc]}
+                      />
                       {draft && (
                         <div className="draft-message-actions flex gap-1.5 mt-4">
                           <Button onClick={() => onEditDraft(message)}>

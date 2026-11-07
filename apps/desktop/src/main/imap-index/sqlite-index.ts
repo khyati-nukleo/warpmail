@@ -231,6 +231,7 @@ interface MessageRow {
   preview: string
   body_structure: string | null
   unsubscribe: string | null
+  auto_submitted: string | null // Read status
 }
 
 /** Message-IDs without brackets or whitespace; a header value may hold several. */
@@ -302,12 +303,13 @@ function toMessage(row: MessageRow): IndexedMessage {
   if (row.sent_at !== null) message.sentAt = row.sent_at
   if (row.body_structure !== null) message.bodyStructure = JSON.parse(row.body_structure)
   if (row.unsubscribe !== null) message.unsubscribe = JSON.parse(row.unsubscribe)
+  if (row.auto_submitted !== null) message.autoSubmitted = row.auto_submitted // Read status
   return message
 }
 
 const MESSAGE_COLUMNS = `seq, id, mailbox_id, uid_validity, uid, modseq, message_id, email_id, in_reply_to, refs,
   thread_id, subject, from_addr, to_addr, cc_addr, bcc_addr, reply_to, received_at, sent_at, size,
-  flags, has_attachment, preview, body_structure, unsubscribe`
+  flags, has_attachment, preview, body_structure, unsubscribe, auto_submitted`
 
 function prepareFile(path: string) {
   if (path === ':memory:') return

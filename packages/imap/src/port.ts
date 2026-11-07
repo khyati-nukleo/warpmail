@@ -93,6 +93,8 @@ export interface SearchCriteria {
   flagged?: boolean
   deleted?: boolean
   header?: Record<string, string>
+  /** Read status: Gmail's own search syntax (`X-GM-RAW`), only with `X-GM-EXT-1`. */
+  gmraw?: string
 }
 
 export interface FetchQuery {

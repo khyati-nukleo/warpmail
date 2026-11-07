@@ -1583,6 +1583,11 @@ export const demoAPI: DesktopMailAPI = {
   testAiKey: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
   improveDraft: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
   cancelImprove: async () => {},
+  // Read status
+  readStatus: async (requests) => requests.map(() => null),
+  readStatusInfo: async () => ({ passwordSet: false, secureStorage: true }),
+  setReadStatusPassword: async () => ({ passwordSet: false, secureStorage: true }),
+  testReadStatus: async () => ({ ok: false, message: 'Not available in the demo.' }),
   ready: async () => {},
   onEvent: (listener) => {
     listeners.add(listener)

@@ -1,0 +1,241 @@
+import { describe, expect, it } from 'vitest'
+import {
+  addPixel,
+  isWorkerImage,
+  pixelUrl,
+  readStatusLimits,
+  rememberWorkerUrl,
+  stripPixels,
+  trackedRecipients,
+  trackingBlock,
+  workerBase,
+  workerHosts,
+} from '../packages/core/src'
+
+const base = 'https://read.example.com'
+const person = (email: string) => ({ name: '', email })
+const draft = (over: Record<string, unknown> = {}) => ({
+  to: [person('alex@example.org')],
+  cc: [],
+  bcc: [],
+  html: '<p>Hello</p>',
+  text: 'Hello',
+  attachments: [] as { id: string; name: string; type: string; size: number }[],
+  readStatus: undefined as boolean | undefined,
+  ...over,
+})
+const big = { id: 'big', name: 'big.zip', type: 'application/zip', size: 3 * 1024 * 1024 }
+const input = (over: Record<string, unknown> = {}) => ({
+  settings: { enabled: true, workerUrl: base },
+  passwordSet: true,
+  draft: draft(),
+  protection: 'none' as const,
+  perCopySending: true,
+  ownAddresses: ['me@example.com', 'me.alias@example.com'],
+  ...over,
+})
+
+describe('workerBase', () => {
+  it('accepts https origins and local http', () => {
+    expect(workerBase('https://read.example.com')).toBe(base)
+    expect(workerBase('https://read.example.com/')).toBe(base)
+    expect(workerBase('http://localhost:8787')).toBe('http://localhost:8787')
+    expect(workerBase('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787')
+  })
+  it('rejects everything else', () => {
+    for (const bad of [
+      'http://read.example.com',
+      'https://u:p@read.example.com',
+      'https://read.example.com/x',
+      '',
+      'nonsense',
+      undefined,
+    ])
+      expect(workerBase(bad)).toBeUndefined()
+  })
+})
+
+describe('pixels', () => {
+  it('builds the pixel url', () => {
+    expect(pixelUrl(base, 'abc')).toBe('https://read.example.com/p/abc.gif')
+  })
+  it('adds the pixel right after the opening body tag, or prepends', () => {
+    const src = pixelUrl(base, 'abc')
+    const out = addPixel(
+      '<html><head></head><BODY class="x" style="margin:0"><p>Hi</p></BODY></html>',
+      src,
+    )
+    expect(out).toMatch(
+      /^<html><head><\/head><BODY class="x" style="margin:0"><img src="[^"]+abc\.gif"[^>]*><p>Hi<\/p><\/BODY><\/html>$/,
+    )
+    expect(addPixel('<body><p>Hi</p></body>', src)).toMatch(/^<body><img src=[^>]+><p>Hi<\/p>/)
+    expect(addPixel('<p>Hi</p>', src)).toMatch(/^<img src="[^"]+abc\.gif"[^>]*><p>Hi<\/p>$/)
+    // Not fooled by tags that only start with "body".
+    expect(addPixel('<bodyx><p>Hi</p>', src)).toMatch(/^<img src=/)
+  })
+  it('recognises worker images', () => {
+    expect(isWorkerImage('https://READ.example.com/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com:443/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com./p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://READ.example.com.:443/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com.evil.example/p/x.gif', base)).toBe(false)
+    expect(isWorkerImage('http://read.example.com/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com:8443/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('ftp://read.example.com/x', base)).toBe(false)
+    expect(stripPixels('<p>a</p><img src="https://read.example.com./p/x.gif">', base)).toBe(
+      '<p>a</p>',
+    )
+    expect(isWorkerImage('https://read.example.com/p/x.gif', undefined)).toBe(false)
+  })
+  it('strips worker images however the tag is written', () => {
+    const w = 'https://read.example.com/p/y.gif'
+    const cdn = '<img src="https://cdn.example.com/a.png">'
+    for (const tag of [
+      `<img alt="a src=x" src="${w}">`,
+      `<img alt=it's src="${w}">`,
+      `<img alt="unclosed src="${w}>`,
+      `<img src='${w}'>`,
+      `<img src=${w}>`,
+      `<img\nwidth=1\nsrc\n=\n"${w}"\n/>`,
+      `<img data-src="${w}">`,
+      `<img alt="see https://read.example.com">`,
+    ])
+      expect(stripPixels(`<p>a</p>${tag}${cdn}`, base), tag).toBe(`<p>a</p>${cdn}`)
+    expect(stripPixels(`<imgx src="${w}">`, base)).toContain('<imgx')
+  })
+  it('strips worker images only', () => {
+    const html =
+      '<p>a</p><img src="https://READ.example.com/p/abc.gif" width=1>' +
+      "<IMG SRC='https://read.example.com:443/p/x.gif'>" +
+      '<img src="https://cdn.example.com/a.png">'
+    expect(stripPixels(html, base)).toBe('<p>a</p><img src="https://cdn.example.com/a.png">')
+    expect(stripPixels(html, undefined)).toBe(html)
+  })
+})
+
+describe('previous Worker addresses', () => {
+  const old = 'https://old.example.com'
+  it('workerHosts lists the current address and every previous one, once each', () => {
+    expect(workerHosts(undefined)).toEqual([])
+    expect(
+      workerHosts({
+        enabled: false,
+        workerUrl: base,
+        previousWorkerUrls: [old, base, 'not a url', 'https://older.example.com'],
+      }),
+    ).toEqual([base, old, 'https://older.example.com'])
+    expect(workerHosts({ enabled: true, previousWorkerUrls: [old] })).toEqual([old])
+  })
+  it('images on any of them are found and stripped', () => {
+    const hosts = [base, old]
+    expect(isWorkerImage('https://old.example.com/p/x.gif', hosts)).toBe(true)
+    expect(isWorkerImage('https://cdn.example.com/a.png', hosts)).toBe(false)
+    const html = `<p>a</p><img src="${old}/p/x.gif"><img src="${base}/p/y.gif">`
+    expect(stripPixels(html, hosts)).toBe('<p>a</p>')
+    expect(stripPixels(html, [])).toBe(html)
+  })
+  it('a changed address is remembered, newest first, at most 10, without duplicates', () => {
+    const at = (n: number) => `https://w${n}.example.com`
+    expect(rememberWorkerUrl({ enabled: true, workerUrl: base }, { enabled: true })).toEqual({
+      enabled: true,
+      previousWorkerUrls: [base],
+    })
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: old, previousWorkerUrls: [base] },
+        { enabled: true, workerUrl: base },
+      ),
+    ).toEqual({ enabled: true, workerUrl: base, previousWorkerUrls: [old] })
+    const many = Array.from({ length: 10 }, (_, i) => at(i))
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: old, previousWorkerUrls: many },
+        { enabled: true, workerUrl: base },
+      )?.previousWorkerUrls,
+    ).toEqual([old, ...many.slice(0, 9)])
+    // Unchanged: kept as it is; what the renderer sends for the list is not trusted.
+    expect(
+      rememberWorkerUrl(
+        { enabled: true, workerUrl: base, previousWorkerUrls: [old] },
+        { enabled: false, workerUrl: base, previousWorkerUrls: [] },
+      ),
+    ).toEqual({ enabled: false, workerUrl: base, previousWorkerUrls: [old] })
+  })
+})
+
+describe('trackingBlock', () => {
+  it('is undefined for an eligible draft; absent settings default to on but have no address', () => {
+    expect(trackingBlock(input())).toBeUndefined()
+    expect(trackingBlock(input({ settings: undefined }))).toBe('notConfigured')
+  })
+  it('reports each reason in order', () => {
+    expect(trackingBlock(input({ settings: { enabled: false } }))).toBe('off')
+    expect(trackingBlock(input({ settings: { enabled: true } }))).toBe('notConfigured')
+    expect(trackingBlock(input({ passwordSet: false }))).toBe('notConfigured')
+    expect(trackingBlock(input({ perCopySending: false }))).toBe('unsupported')
+    expect(trackingBlock(input({ draft: draft({ readStatus: false }) }))).toBe('switchedOff')
+    expect(trackingBlock(input({ protection: 'sign' }))).toBe('protected')
+    expect(trackingBlock(input({ protection: 'encrypt' }))).toBe('protected')
+    expect(trackingBlock(input({ draft: draft({ cc: [person('Me.Alias@Example.com')] }) }))).toBe(
+      'self',
+    )
+    expect(trackingBlock(input({ draft: draft({ html: '  ' }) }))).toBe('noHtml')
+    expect(trackingBlock(input({ draft: draft({ to: [person('noreply@example.org')] }) }))).toBe(
+      'automated',
+    )
+    const many = Array.from({ length: readStatusLimits.recipients + 1 }, (_, i) =>
+      person(`p${i}@example.org`),
+    )
+    expect(trackingBlock(input({ draft: draft({ to: many }) }))).toBe('tooMany')
+    const ten = Array.from({ length: 10 }, (_, i) => person(`p${i}@example.org`))
+    expect(trackingBlock(input({ draft: draft({ to: ten, attachments: [big] }) }))).toBe('tooLarge')
+  })
+  it('estimates size as attachments × 4/3 plus html and text, times the copies', () => {
+    expect(readStatusLimits.bytes).toBe(30 * 1024 * 1024)
+    const three = [person('a@example.org'), person('b@example.org'), person('c@example.org')]
+    const html = '<p>Hello</p>' // 12 characters
+    // Per copy: 7 864 308 × 4/3 = 10 485 744, + 12 html + 4 text = 10 MiB; × 3 copies = 30 MiB.
+    const sized = (text: string) =>
+      draft({
+        to: three,
+        html,
+        text,
+        attachments: [
+          { id: 'a', name: 'a.bin', type: 'application/octet-stream', size: 7_000_000 },
+          { id: 'b', name: 'b.bin', type: 'application/octet-stream', size: 864_308 },
+        ],
+      })
+    expect(trackingBlock(input({ draft: sized('abcd') }))).toBeUndefined()
+    expect(trackingBlock(input({ draft: sized('abcde') }))).toBe('tooLarge')
+  })
+  it('checks tooMany before tooLarge', () => {
+    const many = Array.from({ length: readStatusLimits.recipients + 1 }, (_, i) =>
+      person(`p${i}@example.org`),
+    )
+    expect(trackingBlock(input({ draft: draft({ to: many, attachments: [big] }) }))).toBe('tooMany')
+  })
+  it('orders checks: off beats notConfigured, unsupported beats switchedOff, protected beats self, self beats noHtml', () => {
+    expect(trackingBlock(input({ settings: { enabled: false }, passwordSet: false }))).toBe('off')
+    expect(
+      trackingBlock(input({ perCopySending: false, draft: draft({ readStatus: false }) })),
+    ).toBe('unsupported')
+    expect(trackingBlock(input({ protection: 'sign', draft: draft({ readStatus: false }) }))).toBe(
+      'switchedOff',
+    )
+    const self = draft({ bcc: [person('me@example.com')] })
+    expect(trackingBlock(input({ protection: 'sign', draft: self }))).toBe('protected')
+    expect(trackingBlock(input({ draft: { ...self, html: '' } }))).toBe('self')
+  })
+})
+
+describe('trackedRecipients', () => {
+  it('lowercases, trims and de-duplicates in order', () => {
+    expect(
+      trackedRecipients({
+        to: [person('Alex@Example.org')],
+        cc: [person(' alex@example.org'), person('sam@example.org')],
+        bcc: [],
+      }),
+    ).toEqual(['alex@example.org', 'sam@example.org'])
+  })
+})

@@ -12,6 +12,7 @@ import {
   SCHEMA_VERSION,
 } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import { WorkerMetadataIndex, type IndexPort } from '../apps/desktop/src/main/imap-index/client'
+import { toMessage } from '../packages/imap/src/convert'
 import type { FolderListing, IndexedMessage, MetadataIndex, NewMessage } from '@inlark/imap'
 
 let directory: string
@@ -114,6 +115,27 @@ describe('SQLite metadata index', () => {
     // WAL and shared-memory files inherit the database's owner-only mode.
     for (const suffix of ['-wal', '-shm'])
       expect((await stat(path + suffix)).mode & 0o777).toBe(0o600)
+  })
+
+  // Read status
+  it('reads Auto-Submitted back and maps it to autoReply', async () => {
+    const { INBOX } = await mailboxes()
+    const auto = (autoSubmitted: string | null) => ({
+      listId: null,
+      precedence: null,
+      autoSubmitted,
+    })
+    const [replied, no] = await index.upsertMessages('a', [
+      message(INBOX!, 1, { automation: auto('auto-replied') }),
+      message(INBOX!, 2, { automation: auto('no') }),
+    ])
+    const storedReplied = await one('a', replied!)
+    expect(storedReplied.autoSubmitted).toBe('auto-replied')
+    expect(toMessage('a', storedReplied).autoReply).toBe(true)
+    const storedNo = await one('a', no!)
+    expect(toMessage('a', storedNo).autoReply).toBeFalsy()
+    const [plain] = await index.upsertMessages('a', [message(INBOX!, 3)])
+    expect(toMessage('a', await one('a', plain!)).autoReply).toBeFalsy()
   })
 
   it('keeps IDs and threads on re-upsert and refreshes only flags, modseq and preview', async () => {

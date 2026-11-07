@@ -58,6 +58,22 @@ export const messageDate = (date: string) => {
   }
 }
 
+/** “today 3:12 pm”, “yesterday 9:05 am”, otherwise “Nov 3, 3:12 pm”, counted from `now`. */
+export const dayTime = (date: string, now = new Date()) => {
+  const d = new Date(date)
+  const time = timeFormatter
+    .formatToParts(d)
+    .map((p) => (p.type === 'dayPeriod' ? p.value.toLowerCase() : p.value.replace(/\s/g, ' ')))
+    .join('')
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (d.toDateString() === now.toDateString()) return 'today ' + time
+  if (d.toDateString() === yesterday.toDateString()) return 'yesterday ' + time
+  const formatter =
+    d.getFullYear() === now.getFullYear() ? currentYearFormatter : otherYearFormatter
+  return formatter.format(d) + ', ' + time
+}
+
 export const formatBytes = (bytes: number) =>
   bytes < 1024
     ? bytes + ' B'

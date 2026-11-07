@@ -1,6 +1,7 @@
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
+import type { ReadStatusInfo, ReadStatusLookup, ReadStatusRequest } from './read-status' // Read status
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -61,6 +62,7 @@ export interface Account {
   indexing?: IndexingProgress
   /** The local index is being updated for a new version of the app, which happens once. */
   updatingIndex?: boolean
+  readStatus?: boolean // Read status: Gmail over IMAP (X-GM-EXT-1, \All and \Trash shown), so it can be tracked
 }
 /** An address the provider delivers to this account and lets it send from. */
 export interface Alias {
@@ -145,6 +147,7 @@ export interface Message {
   inReplyTo?: string[]
   references?: string[]
   unsubscribe?: { url: string; oneClick: boolean }
+  autoReply?: boolean // Read status: carries Auto-Submitted other than `no`
   security?: MailSecurity
   /** Revision of ciphertext, never a decrypted-body fingerprint. */
   protectedRevision?: string
@@ -231,6 +234,8 @@ export interface Draft {
   error?: string
   /** What kind of problem `error` describes, so the composer can offer the right recovery. */
   errorKind?: DraftErrorKind
+  // Read status: false = switched off for this email.
+  readStatus?: boolean
 }
 export type DraftErrorKind =
   'conflict' | 'connection' | 'outgoingAuthentication' | 'certificate' | 'rejected'
@@ -257,6 +262,14 @@ export interface Settings {
   /** Inbox split tabs, in display order. */
   splitTabs?: SplitTab[]
   important?: ImportantSettings
+  // Read status: absent is treated as `{ enabled: true }`.
+  readStatus?: ReadStatusSettings
+}
+export interface ReadStatusSettings {
+  enabled: boolean
+  workerUrl?: string
+  /** Earlier Worker addresses, newest first (at most 10): their images stay blocked. */
+  previousWorkerUrls?: string[]
 }
 export const defaultSettings: Settings = {
   theme: 'dark',
@@ -446,6 +459,42 @@ export interface OutgoingMessage {
   /** Complete MIME without Bcc headers, for providers that transmit it themselves (SMTP). */
   mime?: Uint8Array
   envelope: { from: string; to: string[] }
+  // Read status: one copy per tracked recipient, each carrying only that recipient's image.
+  copies?: OutgoingCopy[]
+  /**
+   * The Sent copy must replace what the server filed itself, because the copies were not it.
+   * `ifPresent`: delivery is unconfirmed, so the clean copy is filed only if the server filed one.
+   */
+  replaceServerCopies?: boolean | 'ifPresent'
+  replacement?: SentCopyReplacement
+}
+// Read status
+export interface OutgoingCopy {
+  recipient: string
+  mime: Uint8Array
+}
+/** How a replaced Sent copy is told apart from recipients' copies, and kept durable. */
+export interface SentCopyReplacement {
+  /** The Worker's hosts: a copy whose HTML carries their image is a recipient's copy. */
+  hosts: string[]
+  /** The server's copies may already be in Trash: the clean copy is filed whatever the mode. */
+  owed?: boolean
+  /** Makes `owed` durable; awaited before anything is moved or filed. */
+  owe?(): Promise<void>
+  /** Told the clean copy's UID in Sent once it is confirmed there. */
+  confirmed?(uid: number): void
+  /** For `sweepSentCopies`: the clean copy's UID in Sent, as `confirmed` reported it. */
+  uid?: number
+}
+/** What became of one recipient's copy: `uncertain` may have arrived; `notSent` never left the device. */
+export interface CopyOutcome {
+  recipient: string
+  result: 'accepted' | 'rejected' | 'uncertain' | 'notSent'
+  reason?: string
+}
+export interface SubmissionTracking {
+  /** The image URL for this recipient, or undefined for a copy without an image. */
+  imageFor(recipient: string): string | undefined
 }
 export interface SubmissionOutcome {
   accepted: string[]
@@ -538,20 +587,30 @@ export interface MailProvider {
     draft: Draft,
     messageId: string,
     mime?: Uint8Array,
+    tracking?: SubmissionTracking, // Read status
   ): Promise<OutgoingMessage>
   /**
    * Sends a prepared message once. Throws `submissionRejected` when nothing was accepted,
    * `submissionUncertain` when the outcome is unknown, and other codes when sending never began.
    */
   submit(account: Account, message: OutgoingMessage, identityId: string): Promise<SubmissionOutcome>
+  // Read status: sends `message.copies` in order, awaiting `progress` before each; never retries a copy.
+  submitCopies?(
+    account: Account,
+    message: OutgoingMessage,
+    progress: (recipient: string, previous?: CopyOutcome) => Promise<void>,
+  ): Promise<CopyOutcome[]>
   /** Whether the server proves this message was submitted. A Sent copy alone is not proof. */
   submissionExists(account: Account, message: OutgoingMessage): Promise<boolean>
   /**
    * Files a Sent copy for providers that do not do so themselves. Returns `server` when a copy
-   * with the same Message-ID already exists. Throws `filingUncertain` when an append may have
+   * with the same Message-ID already exists, and `absent` when `replaceServerCopies` is
+   * `ifPresent` and the server has no copy. Throws `filingUncertain` when an append may have
    * completed without confirmation.
    */
-  fileSentCopy?(account: Account, message: OutgoingMessage): Promise<'filed' | 'server'>
+  fileSentCopy?(account: Account, message: OutgoingMessage): Promise<'filed' | 'server' | 'absent'>
+  // Read status: removes copies with an image the server filed after the clean one, never that one.
+  sweepSentCopies?(account: Account, message: OutgoingMessage): Promise<void>
   folderMappings?(account: Account): Promise<FolderMappingReview>
   setFolderMappings?(account: Account, mappings: FolderMappings): Promise<FolderMappingReview>
   subscribe(listener: (event: ProviderEvent) => void): () => void
@@ -569,6 +628,7 @@ export type AppEvent =
   | { type: 'update'; status: UpdateStatus }
   // Improve draft
   | { type: 'improve'; id: string; text: string }
+  | { type: 'readStatus' } // Read status
 export type UpdateStatus =
   | { phase: 'idle' }
   | { phase: 'downloading'; version: string; percent: number }
@@ -591,6 +651,7 @@ export interface SubmissionSummary {
   state: 'sent' | 'partial' | 'uncertain'
   sentCopy?: 'pending' | 'uncertain' | 'failed'
   rejected?: Address[]
+  unconfirmed?: string[] // Read status: copies that may have arrived; never recovered.
   error?: string
 }
 export interface Bootstrap {
@@ -770,5 +831,10 @@ export interface DesktopMailAPI {
   testAiKey(): Promise<AiTestResult>
   improveDraft(input: { id: string; text: string; style: ImproveStyle }): Promise<ImproveResult>
   cancelImprove(id: string): Promise<void>
+  // Read status
+  readStatus(requests: ReadStatusRequest[]): Promise<(ReadStatusLookup | null)[]>
+  readStatusInfo(): Promise<ReadStatusInfo>
+  setReadStatusPassword(password: string | null): Promise<ReadStatusInfo>
+  testReadStatus(workerUrl: string, password?: string): Promise<{ ok: boolean; message: string }>
   onEvent(listener: (event: AppEvent) => void): () => void
 }

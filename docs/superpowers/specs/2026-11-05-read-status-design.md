@@ -16,7 +16,7 @@ Under each sent email in a conversation, every recipient has a status:
 | **Delivered to Apple Mail, can't tell** | Only Apple's automatic image load was seen. Apple Mail loads images on delivery, whether or not anyone reads. |
 | **No signal yet**                       | Nothing seen. Images may be blocked, or the email may be unread.                                              |
 
-A reply always counts as opened.
+A reply from a person always counts as opened. Out-of-office and other automatic replies don't.
 
 The conversation list shows a **small eye** on emails someone has opened. There are no desktop notifications.
 
@@ -125,23 +125,24 @@ Decided with Khyati:
 6. Counting as described, with the caveats shown in small print (2026-11-05).
 7. Colleagues are tracked too (2026-11-05).
 8. A 1×1 transparent image in the HTML version (confirmed 2026-11-05).
+9. Automatic replies (out-of-office and others marked `Auto-Submitted`) don't count as opened; only a reply from a person does (Khyati, 2026-11-07).
 
 Proposed by Claude, approved by Khyati (2026-11-05):
 
-9. The Worker stores only the time and the source type, never IP addresses; codes are random.
-10. Records are deleted after 90 days.
-11. The Worker has a password, stored encrypted on each laptop.
-12. Collection every couple of minutes while the app runs, catching up on launch.
-13. Encrypted emails are never tracked.
-14. Sent keeps one clean copy with no image.
-15. Sending one copy per recipient is tested first, with the fallback if Gmail won't cooperate.
-16. The Worker has step-by-step setup on Khyati's Cloudflare account, on the free tier; a custom domain is recommended.
-17. A main switch in Settings.
+10. The Worker stores only the time and the source type, never IP addresses; codes are random.
+11. Records are deleted after 90 days.
+12. The Worker has a password, stored encrypted on each laptop.
+13. Collection every couple of minutes while the app runs, catching up on launch.
+14. Encrypted emails are never tracked.
+15. Sent keeps one clean copy with no image.
+16. Sending one copy per recipient is tested first, with the fallback if Gmail won't cooperate.
+17. The Worker has step-by-step setup on Khyati's Cloudflare account, on the free tier; a custom domain is recommended.
+18. A main switch in Settings.
 
 Builder-level calls by Claude (can be overridden):
 
-18. Image codes are a keyed hash of the email ID, the recipient and the Worker password, so both laptops match opens without storing a mapping anywhere.
-19. Warpmail never loads images from the Worker's address when showing mail, so Khyati's own views never count, including when Khyati is a recipient.
+19. Image codes are a keyed hash of the email ID, the recipient and the Worker password, so both laptops match opens without storing a mapping anywhere.
+20. Warpmail never loads images from the Worker's address when showing mail, so Khyati's own views never count, including when Khyati is a recipient.
 
 ## How it's built (for the builder)
 
@@ -159,11 +160,15 @@ Builder-level calls by Claude (can be overridden):
 - the SMTP envelope is addressed to that one recipient;
 - the HTML part carries that recipient's image.
 
-Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Do this straight after the last copy is sent, because Gmail's merged Sent copy carries the first recipient's image until it's replaced. How the send test did it, which worked:
+Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Do this straight after the last copy is sent, because Gmail's merged Sent copy carries the first recipient's image until it's replaced. Nothing is deleted for good before the clean copy is confirmed in Sent, so a dropped connection never loses Khyati's Sent copy:
 
-- Find the copies in All Mail with `X-GM-RAW "rfc822msgid:<id>"` and move them to Trash. Deleting from Sent only removes the Sent label.
-- Delete them from Trash for good. Find them there with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
-- `APPEND` the clean copy to Sent with `\Seen`. Gmail accepts it even though the deleted copies had the same `Message-ID`. Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. The "Sending…" and "Sent" states from the speed work must stay accurate.
+- Find the copies in All Mail with `X-GM-RAW "rfc822msgid:<id>"` (exact `Message-ID` only). Those carrying a Worker image move to Trash; deleting from Sent would only remove the Sent label. A clean copy an earlier attempt already filed in Sent is kept.
+- Before anything moves, the send journal records that a clean copy is owed. From then on every retry files it (after a restart too, and even for an unconfirmed send), until a clean copy is confirmed in Sent.
+- `APPEND` the clean copy to Sent with `\Seen` and confirm it is there: by the UID Gmail returns, else by a search in Sent for the `Message-ID`, with no Worker image in it. Gmail accepted it in the send test once the copies had left All Mail. If it isn't there (Gmail may refuse it while a copy with the same `Message-ID` sits in Trash), delete the trashed copies and file it again.
+- Only then delete the trashed copies for good. Find them in Trash with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
+- About a minute later, look once more: Gmail may file its merged copy after the clean one. Copies with this `Message-ID` and a Worker image go to Trash and are deleted there; the clean copy stays. The journal keeps this pending, so a restart within the hour still does it.
+
+Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. Dismissing the send never drops a clean copy still owed. The "Sending…" and "Sent" states from the speed work must stay accurate.
 
 **The Worker:**
 

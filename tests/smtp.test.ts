@@ -269,6 +269,20 @@ describe('SMTP submission', () => {
     expect(received).not.toContain('secret@example.test')
   })
 
+  it('reports a connection dropped before DATA as a network failure, not uncertain', async () => {
+    const { port, log, sockets } = await start({
+      secure: true,
+      onRcptTo(address) {
+        log.rcptTo.push(address.address)
+        sockets.forEach((s) => s.destroy())
+      },
+    })
+    const error = await failure(submitSmtp(settings(port), envelope(), await message()))
+    expect(error.code).toBe('outgoingNetwork')
+    expect(log.rcptTo).toEqual(['you@example.test'])
+    expect(log.data).toEqual([])
+  })
+
   it('treats a lost final response as uncertain', async () => {
     const { port, log, sockets } = await start({
       secure: true,

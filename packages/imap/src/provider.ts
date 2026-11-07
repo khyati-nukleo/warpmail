@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   accountKey,
   accountColors,
@@ -28,6 +28,10 @@ import {
   type ProviderEvent,
   type ProviderPage,
   type SubmissionOutcome,
+  type CopyOutcome, // Read status
+  type SubmissionTracking,
+  addPixel,
+  trackedRecipients,
 } from '@inlark/core'
 import {
   attachmentsOf,
@@ -56,7 +60,14 @@ import type {
 } from './metadata-index'
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
-import { submitSmtp, verifySmtp, type SmtpSettings } from './smtp'
+import {
+  appendSentCopy,
+  hasServerCopy,
+  readStatusServer,
+  replaceSentCopy,
+  sweepServerCopies,
+} from './sent-replace'
+import { submitSmtp, submitSmtpCopies, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
 
 export interface ImapProviderOptions {
@@ -80,6 +91,7 @@ export interface ImapProviderOptions {
       envelope: OutgoingMessage['envelope'],
       mime: Uint8Array,
     ) => Promise<SubmissionOutcome>
+    submitCopies?: typeof submitSmtpCopies // Read status
   }
   inspect?: typeof inspectCertificate
   /** Tests only: trust an extra certificate authority. */
@@ -241,6 +253,8 @@ export class ImapProvider implements MailProvider {
   private state: 'connected' | 'offline' | 'authentication' = 'connected'
   private lastFailure?: { at: number; error: unknown }
   private limits: AccountLimits = {}
+  /** Read status: Gmail with All Mail and Trash shown, the only server tracked sends work on. */
+  private readStatus = false
   constructor(private options: ImapProviderOptions) {
     this.accountId = accountKey(options.connectionId, 'imap')
     this.timing = { ...defaultTiming, ...options.timing }
@@ -346,6 +360,7 @@ export class ImapProvider implements MailProvider {
     this.disposed = false
     await this.run(async (port) => {
       const boxes = await this.refreshFolders(port)
+      this.readStatus = readStatusServer(port, boxes)
       // Counts for the folders shown first; the rest arrive with the first background pass.
       const roles = rolesByPath(reviewFolders(boxes, this.folders))
       for (const box of boxes.filter(
@@ -377,6 +392,7 @@ export class ImapProvider implements MailProvider {
       status: 'connected',
       protocol: 'imap',
       ...(Object.keys(this.limits).length ? { limits: this.limits } : {}),
+      ...(this.readStatus ? { readStatus: true } : {}),
     }
   }
   verifyOutgoing(): Promise<void> {
@@ -1647,7 +1663,18 @@ export class ImapProvider implements MailProvider {
 
   // Drafts and sending
 
-  private async compose(account: Account, draft: Draft, messageId: string, keepBcc: boolean) {
+  private async compose(
+    account: Account,
+    draft: Draft,
+    messageId: string,
+    keepBcc: boolean,
+    override: {
+      html?: string
+      date?: Date
+      attachments?: { name: string; type: string; cid?: string; content: Uint8Array }[]
+      boundary?: string
+    } = {}, // Read status
+  ) {
     const sender = this.sender(account, draft.identityId)
     return composeMime({
       from: { name: sender.name, email: sender.email },
@@ -1655,22 +1682,26 @@ export class ImapProvider implements MailProvider {
       cc: draft.cc,
       bcc: draft.bcc,
       subject: draft.subject,
-      html: draft.html,
+      html: override.html ?? draft.html,
       text: draft.text,
       messageId,
       inReplyTo: draft.inReplyTo,
       references: draft.references,
-      date: new Date(),
-      attachments: await Promise.all(
-        draft.attachments.map(async (a) => ({
-          name: a.name,
-          type: a.type,
-          cid: a.cid,
-          content: await this.options.readAttachment(a.id),
-        })),
-      ),
+      date: override.date ?? new Date(),
+      attachments: override.attachments ?? (await this.readAttachments(draft)),
       keepBcc,
+      boundary: override.boundary,
     })
+  }
+  private readAttachments(draft: Draft) {
+    return Promise.all(
+      draft.attachments.map(async (a) => ({
+        name: a.name,
+        type: a.type,
+        cid: a.cid,
+        content: await this.options.readAttachment(a.id),
+      })),
+    )
   }
   /** On the sender's own domain, so a message from an alias doesn't name the account's. */
   private messageId(email: string) {
@@ -1722,12 +1753,40 @@ export class ImapProvider implements MailProvider {
     draft: Draft,
     messageId: string,
     precomposed?: Uint8Array,
+    tracking?: SubmissionTracking,
   ): Promise<OutgoingMessage> {
     const recipients = [...new Set([...draft.to, ...draft.cc, ...draft.bcc].map((a) => a.email))]
     // Bcc recipients are only in the envelope, never in the transmitted headers.
-    const mime = precomposed ?? (await this.compose(account, draft, messageId, false))
     // Bounces go to the address the message is from, as recipients would expect.
     const from = this.sender(account, draft.identityId).email
+    if (tracking && !precomposed) {
+      // Read status: copies share one date and boundary so their headers are identical.
+      const date = new Date()
+      const boundary = randomBytes(8).toString('hex')
+      // Read once, so every copy carries the same bytes.
+      const attachments = await this.readAttachments(draft)
+      const mime = await this.compose(account, draft, messageId, true, {
+        date,
+        attachments,
+        boundary,
+      })
+      const copies = []
+      for (const recipient of trackedRecipients(draft)) {
+        const src = tracking.imageFor(recipient)
+        const html = src ? addPixel(draft.html, src) : draft.html
+        copies.push({
+          recipient,
+          mime: await this.compose(account, draft, messageId, false, {
+            html,
+            date,
+            attachments,
+            boundary,
+          }),
+        })
+      }
+      return { messageId, mime, copies, envelope: { from, to: recipients } }
+    }
+    const mime = precomposed ?? (await this.compose(account, draft, messageId, false))
     return { messageId, mime, envelope: { from, to: recipients } }
   }
   async submit(_account: Account, message: OutgoingMessage): Promise<SubmissionOutcome> {
@@ -1738,11 +1797,29 @@ export class ImapProvider implements MailProvider {
       message.mime,
     )
   }
+  // Read status
+  async submitCopies(
+    _account: Account,
+    message: OutgoingMessage,
+    progress: (recipient: string, previous?: CopyOutcome) => Promise<void>,
+  ): Promise<CopyOutcome[]> {
+    if (!message.copies?.length)
+      throw new ProviderError('submission', 'The copies were not prepared.')
+    return (this.options.smtp?.submitCopies || submitSmtpCopies)(
+      this.smtpSettings(),
+      message.envelope.from,
+      message.copies,
+      progress,
+    )
+  }
   /** SMTP gives no later proof of submission; only the recorded acceptance counts. */
   async submissionExists(): Promise<boolean> {
     return false
   }
-  async fileSentCopy(_account: Account, message: OutgoingMessage): Promise<'filed' | 'server'> {
+  async fileSentCopy(
+    _account: Account,
+    message: OutgoingMessage,
+  ): Promise<'filed' | 'server' | 'absent'> {
     const sent = await this.roleBox('sent')
     if (!sent)
       throw new ProviderError(
@@ -1751,6 +1828,26 @@ export class ImapProvider implements MailProvider {
       )
     if (!message.mime)
       throw new ProviderError('filing', 'The sent message is no longer available locally.')
+    if (message.replaceServerCopies) {
+      // Read status: the server's own copy carries a recipient's image, so it is replaced.
+      const mime = message.mime
+      const boxes = await this.sentCopyBoxes(sent.path)
+      const find = (port: ImapPort, id: string, uidNext: number) =>
+        this.withMessageId(port, id, uidNext)
+      const present = () => this.run((port) => hasServerCopy(port, boxes, message.messageId, find))
+      // An owed copy is filed whatever is found: the server's copies may already be in Trash.
+      if (!message.replacement?.owed && !(await present())) {
+        await sleep(this.timing.sentCopyGraceMs)
+        // Unconfirmed delivery: only a copy the server filed shows it was accepted.
+        if (message.replaceServerCopies === 'ifPresent' && !(await present())) return 'absent'
+      }
+      const uid = await this.run((port) =>
+        replaceSentCopy(port, boxes, message.messageId, mime, find, message.replacement),
+      )
+      if (uid) message.replacement?.confirmed?.(uid)
+      this.requestSync('all')
+      return 'filed'
+    }
     const filed = async (port: ImapPort) =>
       (await this.withMessageId(port, message.messageId, (await port.select(sent.path)).uidNext))
         .length > 0
@@ -1762,19 +1859,36 @@ export class ImapProvider implements MailProvider {
     await sleep(this.timing.sentCopyGraceMs)
     return this.run(async (port) => {
       if (await filed(port)) return 'server' as const
-      try {
-        await port.append(sent.path, message.mime!, ['\\Seen'], new Date())
-      } catch (error) {
-        if (isProviderError(error, 'network'))
-          throw new ProviderError(
-            'filingUncertain',
-            'The connection dropped while saving the Sent copy. It will be checked before trying again.',
-          )
-        throw new ProviderError('filing', 'The server did not accept the Sent copy.')
-      }
+      await appendSentCopy(port, sent.path, message.mime!)
       this.requestSync('all')
       return 'filed' as const
     })
+  }
+
+  // Read status
+  async sweepSentCopies(_account: Account, message: OutgoingMessage): Promise<void> {
+    const sent = await this.roleBox('sent')
+    if (!sent) return
+    const boxes = await this.sentCopyBoxes(sent.path)
+    await this.run((port) =>
+      sweepServerCopies(
+        port,
+        boxes,
+        message.messageId,
+        (p, id, uidNext) => this.withMessageId(p, id, uidNext),
+        message.replacement,
+      ),
+    )
+    this.requestSync('all')
+  }
+  /** Read status: Sent, plus Gmail's All Mail and Trash (flagged `\\All` and `\\Trash`). */
+  private async sentCopyBoxes(sent: string) {
+    const all = await this.index.listMailboxes(this.accountId)
+    return {
+      sent,
+      allMail: all.find((b) => b.specialUse === '\\All')?.path,
+      trash: all.find((b) => b.specialUse === '\\Trash')?.path,
+    }
   }
 
   subscribe(listener: (event: ProviderEvent) => void): () => void {

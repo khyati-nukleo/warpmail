@@ -986,6 +986,8 @@ export function App() {
             queryClient.setQueryData<SubmissionSummary[]>(['submissions'], event.submissions),
           )
       if (event.type === 'update') setUpdateStatus(event.status)
+      if (event.type === 'readStatus')
+        void queryClient.invalidateQueries({ queryKey: ['readStatus'] }) // Read status
     })
     if (boot.data) {
       void api

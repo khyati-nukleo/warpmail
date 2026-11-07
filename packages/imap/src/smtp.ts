@@ -2,7 +2,13 @@ import SMTPConnection from 'nodemailer/lib/smtp-connection'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { TLSSocket } from 'node:tls'
-import { ProviderError, type ServerSettings, type SubmissionOutcome } from '@inlark/core'
+import {
+  ProviderError,
+  type CopyOutcome,
+  type OutgoingCopy,
+  type ServerSettings,
+  type SubmissionOutcome,
+} from '@inlark/core'
 import { certificateError, certificateOptions } from './certificate'
 
 export interface SmtpSettings extends ServerSettings {
@@ -81,20 +87,11 @@ export async function submitSmtp(
   mime: Uint8Array,
 ): Promise<SubmissionOutcome> {
   const to = [...new Map(envelope.to.map((a) => [a.trim().toLowerCase(), a.trim()])).values()]
-  const invalid = [envelope.from, ...to].find((a) => !a || /[\s<>]/.test(a))
-  const problem = !envelope.from
-    ? 'The sender address is missing.'
-    : !to.length
-      ? 'The message has no recipients.'
-      : invalid !== undefined
-        ? `“${clean(invalid)}” isn't a valid address.`
-        : !mime.byteLength
-          ? 'The message is empty.'
-          : undefined
+  const problem = submissionProblem(envelope.from, to, [mime])
   if (problem) throw new ProviderError('submissionRejected', `${problem} Nothing was sent.`)
-  return session(
-    settings,
-    (conn, state) =>
+  return session(settings, (conn, state, dropped) =>
+    Promise.race([
+      dropped,
       new Promise<SubmissionOutcome>((resolve, reject) => {
         state.phase = 'envelope'
         const body = new Readable({
@@ -122,12 +119,145 @@ export async function submitSmtp(
           })
         })
       }),
+    ]),
   )
 }
 
+// Read status
+/**
+ * Sends each copy to its one recipient, in order, over one signed-in connection: one transaction per copy.
+ * Awaits `progress` before each copy; if it throws on the first copy nothing is sent and this rejects with
+ * that error, later the rest are `notSent`. Sign-in failures throw as in `submitSmtp`. Never retries a copy:
+ * after the connection ends, every copy not yet transmitted is `notSent`.
+ */
+export async function submitSmtpCopies(
+  settings: SmtpSettings,
+  from: string,
+  copies: OutgoingCopy[],
+  progress: (recipient: string, previous?: CopyOutcome) => Promise<void> = async () => undefined,
+): Promise<CopyOutcome[]> {
+  const recipients = copies.map((copy) => copy.recipient)
+  const keys = recipients.map((r) => r.toLowerCase())
+  const repeated = recipients.find((_, i) => keys.indexOf(keys[i]) !== i)
+  const problem =
+    submissionProblem(
+      from,
+      recipients,
+      copies.map((copy) => copy.mime),
+    ) ?? (repeated !== undefined ? `“${clean(repeated)}” has more than one copy.` : undefined)
+  if (problem) throw new ProviderError('submissionRejected', `${problem} Nothing was sent.`)
+  const host = settings.host
+  const sent = await session(settings, async (conn, state, dropped) => {
+    let lost = false
+    dropped.catch(() => (lost = true))
+    const outcomes: CopyOutcome[] = []
+    // Once set, the reason every remaining copy is not sent.
+    let stop: string | undefined
+    for (const copy of copies) {
+      const recipient = copy.recipient
+      if (!stop)
+        try {
+          await progress(recipient, outcomes.at(-1))
+        } catch (error) {
+          if (!outcomes.length) return { stopped: error }
+          stop = 'Not sent: sending stopped before this copy.'
+        }
+      if (lost) stop ??= ended(host)
+      if (stop) {
+        outcomes.push({ recipient, result: 'notSent', reason: stop })
+        continue
+      }
+      const outcome = await transmit(conn, state, dropped, settings, from, copy)
+      outcomes.push(outcome)
+      if (outcome.result === 'rejected') {
+        // A refused RCPT or DATA leaves the transaction open; RSET is harmless after the others.
+        if (!(await reset(conn, dropped)))
+          stop = lost
+            ? ended(host)
+            : `Not sent: ${host} wouldn't start another message on this connection.`
+      } else if (outcome.result !== 'accepted') stop = ended(host)
+    }
+    return { outcomes }
+  })
+  if ('stopped' in sent) throw sent.stopped
+  return sent.outcomes
+}
+
+/** One transaction: `MAIL FROM`, `RCPT TO` this copy's recipient, then its bytes. Never rejects. */
+function transmit(
+  conn: SMTPConnection,
+  state: State,
+  dropped: Promise<never>,
+  settings: SmtpSettings,
+  from: string,
+  copy: OutgoingCopy,
+): Promise<CopyOutcome> {
+  const recipient = copy.recipient
+  const settle = (error: ProviderError): CopyOutcome => ({
+    recipient,
+    result:
+      error.code === 'submissionRejected'
+        ? 'rejected'
+        : error.code === 'submissionUncertain'
+          ? 'uncertain'
+          : 'notSent',
+    reason: error.message,
+  })
+  state.phase = 'envelope'
+  return Promise.race([
+    // Judged by the phase when the drop is noticed, which this transaction set.
+    dropped.catch(() =>
+      settle(state.phase === 'data' ? uncertain(settings.host) : interrupted(settings.host)),
+    ),
+    new Promise<CopyOutcome>((resolve) => {
+      const mime = copy.mime
+      const body = new Readable({
+        read() {
+          state.phase = 'data'
+          this.push(Buffer.from(mime.buffer, mime.byteOffset, mime.byteLength))
+          this.push(null)
+        },
+      })
+      conn.send({ from, to: [recipient], size: mime.byteLength }, body, (error, info) =>
+        resolve(
+          error || !info
+            ? settle(sendFailure(settings, state, from, error ?? undefined))
+            : { recipient, result: 'accepted' },
+        ),
+      )
+    }),
+  ])
+}
+
+/** Sends RSET; false when the server refused it or the connection ended. */
+const reset = (conn: SMTPConnection, dropped: Promise<never>) =>
+  Promise.race([
+    dropped.catch(() => false),
+    new Promise<boolean>((resolve) => conn.reset((error) => resolve(!error))),
+  ])
+
+const ended = (host: string) => `Not sent: the connection to ${host} ended first.`
+
+function submissionProblem(from: string, to: string[], mimes: Uint8Array[]): string | undefined {
+  const invalid = [from, ...to].find((a) => !a || /[\s<>]/.test(a))
+  return !from
+    ? 'The sender address is missing.'
+    : !to.length
+      ? 'The message has no recipients.'
+      : invalid !== undefined
+        ? `“${clean(invalid)}” isn't a valid address.`
+        : mimes.some((mime) => !mime.byteLength)
+          ? 'The message is empty.'
+          : undefined
+}
+
+/**
+ * Connects, signs in, runs `work`, then quits. `dropped` rejects when the connection ends or fails; `work`
+ * races it itself, since socket failures never reach nodemailer's callbacks.
+ */
 async function session<T>(
   settings: SmtpSettings,
-  work: (conn: SMTPConnection, state: State) => Promise<T>,
+  work: (conn: SMTPConnection, state: State, dropped: Promise<never>) => Promise<T>,
 ): Promise<T> {
   if (
     !settings.host?.trim() ||
@@ -160,7 +290,7 @@ async function session<T>(
         `The connection to ${settings.host} isn't encrypted, so no password was sent. Check the security setting.`,
       )
     await Promise.race([login(conn, settings), dropped])
-    const result = await Promise.race([work(conn, state), dropped])
+    const result = await work(conn, state, dropped)
     done = true
     return result
   } catch (error) {

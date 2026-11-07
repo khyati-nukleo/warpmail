@@ -185,6 +185,8 @@ export const draftSchema = z.object({
   errorKind: z
     .enum(['conflict', 'connection', 'outgoingAuthentication', 'certificate', 'rejected'])
     .optional(),
+  // Read status
+  readStatus: z.boolean().optional(),
 })
 export const sendDraftSchema = draftSchema
   .refine(
@@ -231,6 +233,14 @@ export const settingsSchema = z.object({
     .object({
       always: importantListSchema(alwaysSenderSchema),
       never: importantListSchema(senderSchema),
+    })
+    .optional(),
+  // Read status
+  readStatus: z
+    .object({
+      enabled: z.boolean(),
+      workerUrl: z.string().max(2048).optional(),
+      previousWorkerUrls: z.array(z.string().max(2048)).max(10).optional(),
     })
     .optional(),
 })
@@ -349,4 +359,18 @@ export const ipcSchemas = {
     }),
   ]),
   cancelImprove: z.tuple([z.string().min(1).max(100)]),
+  // Read status
+  readStatus: z.tuple([
+    z
+      .array(
+        z.object({
+          messageId: z.string().min(1).max(998),
+          recipients: z.array(z.string().max(320)).max(600),
+        }),
+      )
+      .max(500),
+  ]),
+  readStatusInfo: z.tuple([]),
+  setReadStatusPassword: z.tuple([z.string().min(1).max(4096).nullable()]),
+  testReadStatus: z.tuple([z.string().max(2048), z.string().max(4096).optional()]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>

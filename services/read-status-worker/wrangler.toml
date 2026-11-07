@@ -1,0 +1,16 @@
+name = "read-status"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "read-status"
+# Put your own id here on your machine only. Do not commit it.
+database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+
+[triggers]
+crons = ["17 3 * * *"]
+
+# Cloudflare's own request logs would keep readers' IP addresses; keep them off.
+[observability]
+enabled = false

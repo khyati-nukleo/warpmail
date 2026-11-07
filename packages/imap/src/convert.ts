@@ -1,4 +1,4 @@
-import { parseUnsubscribe, type Attachment, type Message } from '@inlark/core'
+import { isAutoSubmitted, parseUnsubscribe, type Attachment, type Message } from '@inlark/core'
 import type { BodyPart, IndexedMessage, NewMessage } from './metadata-index'
 import type { FetchedMessage } from './port'
 
@@ -250,6 +250,7 @@ export function toMessage(accountId: string, m: IndexedMessage): Message {
     inReplyTo: m.inReplyTo,
     references: m.references,
     ...(m.unsubscribe ? { unsubscribe: m.unsubscribe } : {}),
+    ...(isAutoSubmitted(m.autoSubmitted) ? { autoReply: true } : {}), // Read status
   }
 }
 
