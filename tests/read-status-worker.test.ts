@@ -75,10 +75,17 @@ describe('read status worker', () => {
   it('does not record malformed codes or HEAD requests but still serves the image', async () => {
     const { call, rows } = setup()
     const short = await call('/p/short.gif')
-    const bad = await call(`/p/${'a'.repeat(15)}!.gif`)
+    const bad = await call(`/p/${'a'.repeat(21)}!.gif`)
+    // App codes are exactly 22 base64url characters; anything else is never written.
+    const lengths = await Promise.all([16, 21, 23, 64].map((n) => call(`/p/${'a'.repeat(n)}.gif`)))
     const head = await call(`/p/${CODE}.gif`, { method: 'HEAD' })
     expect(short.status).toBe(200)
     expect(bad.status).toBe(200)
+    for (const res of lengths) {
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toBe('image/gif')
+      expect((await res.arrayBuffer()).byteLength).toBe(43)
+    }
     expect(head.status).toBe(200)
     expect(head.headers.get('Content-Type')).toBe('image/gif')
     expect((await head.arrayBuffer()).byteLength).toBe(0)

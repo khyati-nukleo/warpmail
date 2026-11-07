@@ -12,9 +12,11 @@ Cloudflare keeps its own request logs apart from this Worker, and those include 
 
 ## Endpoints
 
-- `GET /p/<code>.gif` returns the image (never cached) and records the fetch.
+- `GET /p/<code>.gif` returns the image (never cached) and records the fetch. Only codes of exactly 22 letters, digits, `-` or `_` are recorded, as Warpmail makes them; any other address still gets the image and nothing is written.
 - `GET /records?since=<id>&limit=<n>` returns records after a cursor. It needs the header `Authorization: Bearer <PASSWORD>`.
 - Anything else is a 404.
+
+**A limit to know about:** anyone who sees an image address (a recipient, or anyone they forward the email to) can make up well-formed codes and cause writes. They can't read anything back or change an existing record. The free tier allows 100 000 writes a day, and every record is deleted after 90 days.
 
 ## Set it up
 
@@ -55,10 +57,10 @@ The default `https://read-status.<your-subdomain>.workers.dev` address works. A 
 ## Check that it works
 
 ```
-curl -I https://t.example.com/p/TESTTESTTESTTESTTEST.gif
+curl -I https://t.example.com/p/TESTTESTTESTTESTTESTTE.gif
 ```
 
-You should see `200` and `content-type: image/gif`. A `HEAD` request records nothing; to record a test fetch use `curl -s -o /dev/null https://t.example.com/p/TESTTESTTESTTESTTEST.gif`.
+You should see `200` and `content-type: image/gif`. A `HEAD` request records nothing; to record a test fetch use `curl -s -o /dev/null https://t.example.com/p/TESTTESTTESTTESTTESTTE.gif`.
 
 Then, using your own password:
 

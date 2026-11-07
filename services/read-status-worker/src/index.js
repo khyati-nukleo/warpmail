@@ -8,7 +8,8 @@ import { classify } from './classify.js'
 
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 const MAX_LIMIT = 1000
-const CODE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
+// Warpmail's codes are exactly 22 base64url characters; anything else is served but never written.
+const CODE_PATTERN = /^[A-Za-z0-9_-]{22}$/
 
 // The standard 43-byte transparent 1x1 GIF.
 const GIF = Uint8Array.from(
