@@ -1493,6 +1493,10 @@ export const demoAPI: DesktopMailAPI = {
     return { status: 'sent', message: 'This message has already been sent.' }
   },
   submissions: async () => [...submissions],
+  // Undo send: the demo sends nothing, so it keeps sending at once.
+  sendWithUndo: (draft) => demoAPI.send(draft),
+  undoSend: async () => ({ undone: false, reason: 'gone' }),
+  heldSends: async () => [],
   retrySentCopy: async (draftId) => {
     await pause(500)
     submissionFor(draftId)

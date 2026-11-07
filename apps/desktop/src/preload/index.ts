@@ -49,6 +49,10 @@ const methods = [
   'deleteServerDraft',
   'send',
   'reconcile',
+  // Undo send
+  'sendWithUndo',
+  'undoSend',
+  'heldSends',
   'submissions',
   'retrySentCopy',
   'recoverRejected',

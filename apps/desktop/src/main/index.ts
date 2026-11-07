@@ -315,6 +315,10 @@ else {
         deleteServerDraft: service.deleteServerDraft,
         send: service.send,
         reconcile: service.reconcile,
+        // Undo send
+        sendWithUndo: service.sendWithUndo,
+        undoSend: service.undoSend,
+        heldSends: service.heldSends,
         submissions: service.submissions,
         retrySentCopy: service.retrySentCopy,
         recoverRejected: service.recoverRejected,
@@ -406,9 +410,34 @@ else {
 }
 /** How long quitting waits for a message that is still sending. */
 const quitSendWaitMs = 30_000
+/** Undo send: how long inlark stays running out of sight to finish pending emails. */
+const quitHeldWaitMs = 2 * 60_000
 let quitWaiting = false
+let heldQuit: 'waiting' | 'done' | undefined
 app.on('before-quit', (event) => {
   quitting = true
+  // Undo send: a countdown still running follows "If you close the app during the countdown".
+  if (heldQuit === 'waiting') return event.preventDefault()
+  const held = heldQuit || quitWaiting ? undefined : service?.heldSendsOnQuit()
+  if (held) {
+    event.preventDefault()
+    heldQuit = 'waiting'
+    // The window closes straight away; inlark finishes out of sight, then quits.
+    if (window && !window.isDestroyed()) window.destroy()
+    tray?.destroy()
+    tray = null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    void Promise.race([
+      held.then(() => service.sendsSettled()),
+      new Promise((resolve) => (timer = setTimeout(resolve, quitHeldWaitMs))),
+    ]).then(() => {
+      clearTimeout(timer)
+      heldQuit = 'done'
+      quitWaiting = true
+      app.quit()
+    })
+    return
+  }
   const sends = quitWaiting ? undefined : service?.sendsSettled()
   if (sends) {
     // The composer closes on Send, so a quit often comes right after it. Let the message
