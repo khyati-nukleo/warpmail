@@ -1210,13 +1210,12 @@ export class MailService {
     this.guard(target.accountId, () => this.reminders.restore(target))
   /**
    * Moves each thread's archived mail back to its account's inbox, with one undo for all.
-   * One move per thread: each account's inbox differs, and a thread that fails stays out of
-   * `handled`, so it is tried again later.
+   * One move per thread: each account's inbox differs. `moved` lists the threads that moved;
+   * one that failed or had nothing in the archive folder stays out, so it is tried again later.
    */
   private async returnToInbox(targets: MutationTarget[]) {
-    const handled: MutationTarget[] = [],
+    const moved: MutationTarget[] = [],
       undo: UndoEntry[] = []
-    let moved = 0
     for (const target of targets)
       try {
         const { provider, account } = this.provider(target.accountId)
@@ -1232,9 +1231,7 @@ export class MailService {
           if (result.changed) undo.push(...(this.undos.get(result.undoId) || []))
           this.undos.delete(result.undoId)
         }
-        if (result.failures.length) continue
-        handled.push(target)
-        if (result.changed) moved++
+        if (!result.failures.length && result.changed) moved.push(target)
       } catch {
         // Disconnected: tried again on a later pass.
       }
@@ -1244,7 +1241,7 @@ export class MailService {
       this.undos.set(undoId, undo)
       if (this.undos.size > 20) this.undos.delete(this.undos.keys().next().value!)
     }
-    return { handled, moved, undoId }
+    return { moved, undoId }
   }
   mutateAll = async (query: MailQuery, action: MailAction): Promise<MutationResult> => {
     if (!['archive', 'trash', 'spam', 'read', 'unread', 'star', 'unstar'].includes(action))

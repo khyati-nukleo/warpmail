@@ -889,8 +889,8 @@ describe('IMAP reading', () => {
     const back = await (service as any).returnToInbox(
       threads.map((threadId) => ({ accountId, threadId })),
     )
-    expect(back).toMatchObject({ moved: 2, undoId: expect.any(String) })
-    expect(back.handled).toHaveLength(2)
+    expect(back).toMatchObject({ undoId: expect.any(String) })
+    expect(back.moved).toHaveLength(2)
     expect(server.box('INBOX').messages).toHaveLength(2)
     await service.undo(back.undoId)
     expect(server.box('INBOX').messages).toHaveLength(0)
@@ -1125,6 +1125,50 @@ describe('IMAP reading', () => {
     ;(service as any).reminders.invalidate(accountId)
     await new Promise((r) => setTimeout(r, 900))
     expect(server.box('INBOX').messages).toHaveLength(0)
+  })
+  it('leaves a follow-up due when nothing moved, and tries again later, not on every change', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      // Gmail, with archive still mapped to a folder that holds none of the thread.
+      server.addMailbox('[Gmail]/All Mail', '\\All')
+      server.deliver('[Gmail]/All Mail', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 10 * 86_400_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await (provider() as any).syncPass('all')
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      const mutate = vi.spyOn(service, 'mutate')
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(mutate).toHaveBeenCalledTimes(1)
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      // Not marked handled, here or in Gmail.
+      expect(await store.read('reminders-returned', [])).toEqual([])
+      expect(server.boxes.has('Warpmail/Returned')).toBe(false)
+      expect((await (service as any).reminders.due(accountId)).length).toBe(1)
+      // Not tried again on every change.
+      for (let i = 0; i < 3; i++) {
+        ;(service as any).reminders.invalidate(accountId)
+        await new Promise((r) => setTimeout(r, 600))
+      }
+      expect(mutate).toHaveBeenCalledTimes(1)
+      // She maps archive to All Mail; a while later, after a full pass, it comes back.
+      await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
+      vi.setSystemTime(start + 11 * 60_000)
+      await (provider() as any).syncPass('all')
+      ;(service as any).reminders.invalidate(accountId)
+      await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), {
+        timeout: 3000,
+      })
+      expect(mutate.mock.calls.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {

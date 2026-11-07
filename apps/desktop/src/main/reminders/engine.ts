@@ -26,11 +26,9 @@ export interface ReminderEngineDeps {
   provider(accountId: string): MailProvider | undefined
   /**
    * Moves these threads' archived mail back to the inbox, with one undo for all of them.
-   * `handled` lists the threads that moved or had nothing to move; failed ones are left out.
+   * `moved` lists the threads that moved; failed ones and ones with nothing to move are left out.
    */
-  returnToInbox(
-    targets: ReturnTarget[],
-  ): Promise<{ handled: ReturnTarget[]; moved: number; undoId?: string }>
+  returnToInbox(targets: ReturnTarget[]): Promise<{ moved: ReturnTarget[]; undoId?: string }>
   emit(event: AppEvent): void
   store: {
     read<T>(key: string, fallback: T): Promise<T>
@@ -72,6 +70,11 @@ const maxWaitMs = 60 * 60_000
 const scanLimit = 25
 const returnedKey = 'reminders-returned'
 const returnedLimit = 500
+/**
+ * A return that moved nothing (the archive folder held none of it, or the move failed) is tried
+ * again this long after, once a full sync has run since: not on every change.
+ */
+const retryMs = 10 * 60_000
 const dayMs = 86_400_000
 /** How long a switch label waits for its Sent copy to be indexed. */
 const labelWaitMs = 10 * 60_000
@@ -116,6 +119,8 @@ export class ReminderEngine {
     syncAsked?: boolean
   }[] = []
   private labelling = new Set<string>()
+  /** Returns that moved nothing, by key, with when they were tried. */
+  private unmoved = new Map<string, number>()
 
   constructor(private deps: ReminderEngineDeps) {}
 
@@ -346,6 +351,12 @@ export class ReminderEngine {
         // Once per ask and due time: a snooze that ends later may bring it back again.
         const askId = ask?.messageId ?? reminder.messageId
         const key = [id, reminder.threadId, askId, reminder.dueMs].join('|')
+        const tried = this.unmoved.get(key)
+        if (
+          tried !== undefined &&
+          (now < tried + retryMs || target.provider.readyForReminders?.(tried + 1) === false)
+        )
+          continue
         waiting.push({ accountId: id, threadId: reminder.threadId, key, ask })
       }
       if (held) target.provider.awaitFullSync?.()
@@ -361,6 +372,8 @@ export class ReminderEngine {
     for (const id of this.imapIds())
       for (const { reminder } of await this.derived(id))
         if (reminder.dueMs > now) next = Math.min(next, reminder.dueMs)
+    for (const tried of this.unmoved.values())
+      if (tried + retryMs > now) next = Math.min(next, tried + retryMs)
     if (this.wake) clearTimeout(this.wake)
     this.wake = undefined
     if (this.disposed || next === Infinity) return
@@ -455,11 +468,16 @@ export class ReminderEngine {
         due.map(({ accountId, threadId }) => ({ accountId, threadId })),
       )
     } catch {
-      this.log('reminders-return-failed')
-      return
+      result = { moved: [] }
     }
-    const handled = new Set(result.handled.map((t) => t.accountId + '|' + t.threadId + '|'))
-    const done = due.filter((w) => handled.has(w.accountId + '|' + w.threadId + '|'))
+    const moved = new Set(result.moved.map((t) => t.accountId + '|' + t.threadId + '|'))
+    const done = due.filter((w) => moved.has(w.accountId + '|' + w.threadId + '|'))
+    // Still due: tried again later, and never marked handled, here or in Gmail.
+    for (const w of due) {
+      this.unmoved.delete(w.key)
+      if (!done.includes(w)) this.unmoved.set(w.key, this.now())
+    }
+    while (this.unmoved.size > returnedLimit) this.unmoved.delete(this.unmoved.keys().next().value!)
     if (done.length < due.length) this.log('reminders-return-failed')
     if (done.length)
       await this.deps.store.write(
@@ -478,10 +496,10 @@ export class ReminderEngine {
         })
     this.labelsWaiting = this.labelsWaiting.slice(-labelsWaitingLimit)
     for (const accountId of new Set(done.map((w) => w.accountId))) await this.saveLabels(accountId)
-    if (result.moved)
+    if (done.length)
       this.deps.emit({
         type: 'remindersReturned',
-        count: result.moved,
+        count: done.length,
         ...(result.undoId ? { undoId: result.undoId } : {}),
       })
   }

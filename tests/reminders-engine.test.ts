@@ -99,8 +99,7 @@ function harness(
     }),
   } as unknown as Harness['provider']
   const returned = vi.fn(async (targets: { accountId: string; threadId: string }[]) => ({
-    handled: targets,
-    moved: targets.length,
+    moved: targets,
     undoId: 'undo-1' as string | undefined,
   }))
   const engine = new ReminderEngine({
@@ -253,8 +252,7 @@ describe('ReminderEngine', () => {
       now: addWorkingDays(receivedMs, 4),
     })
     h.returned.mockImplementationOnce(async (targets) => ({
-      handled: targets.filter((t) => t.threadId !== 't3'),
-      moved: 2,
+      moved: targets.filter((t) => t.threadId !== 't3'),
       undoId: 'undo-2',
     }))
     h.engine.start()
@@ -267,6 +265,11 @@ describe('ReminderEngine', () => {
       'a1|t1|m1@example.com|' + due,
       'a1|t2|m2@example.com|' + due,
     ])
+    // Not on the next change, but ten minutes on.
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    h.clock.now += 10 * 60_000
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenLastCalledWith([{ accountId: 'a1', threadId: 't3' }])
@@ -353,6 +356,37 @@ describe('ReminderEngine', () => {
     // Still listed as due; archiving it after it came back said it was handled.
     expect(await h.engine.due('a1')).toHaveLength(2)
     expect(h.returned).not.toHaveBeenCalled()
+  })
+  it('leaves a follow-up that moved nothing due, unmarked, and retries it after a full sync', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    // The archive folder holds none of the thread.
+    h.returned.mockImplementation(async () => ({ moved: [], undoId: undefined }))
+    let syncedAt = h.clock.now
+    h.provider.readyForReminders = vi.fn((dueMs: number) => dueMs <= syncedAt)
+    h.engine.start()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    expect(h.stored.get('reminders-returned')).toBeUndefined()
+    expect(h.provider.labelMessage).not.toHaveBeenCalled()
+    expect(h.events.filter((e) => e.type === 'remindersReturned')).toEqual([])
+    expect(h.log).toHaveBeenCalledWith('reminders-return-failed')
+    expect(await h.engine.due('a1')).toHaveLength(1)
+    for (let i = 0; i < 3; i++) {
+      h.engine.invalidate('a1')
+      await settle()
+    }
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    // Ten minutes on, the engine wakes by itself, but waits for a full sync since the try.
+    h.events.length = 0
+    h.clock.now += 10 * 60_000
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    await settle()
+    expect(h.events).toContainEqual({ type: 'changed' })
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    syncedAt = h.clock.now
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(2)
   })
   it('returns nothing until the provider has synced in full since connecting', async () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
