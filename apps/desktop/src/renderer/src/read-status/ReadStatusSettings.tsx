@@ -123,8 +123,8 @@ export function ReadStatusSettings({
     <>
       <h3 className="m-0 text-[20px] font-[550] tracking-[-0.5px]">Read status</h3>
       <p className="settings-lead text-muted mt-1.5 mb-6 mx-0 text-[12px] leading-[1.6]">
-        See when the people you email have opened your messages. Opens are counted by your own
-        Cloudflare Worker, and only you can read them.
+        Shows, for each recipient, whether an email you sent was probably opened. Some mail apps
+        hide opens, so &ldquo;No signal yet&rdquo; doesn&rsquo;t mean unread.
       </p>
 
       <section className={sectionClass} aria-labelledby={ids + '-on'}>
@@ -133,7 +133,10 @@ export function ReadStatusSettings({
             <strong id={ids + '-on'} className="font-normal text-[13px]">
               Track read status
             </strong>
-            <p className={noteClass}>Adds a tracking image to emails you send, when you choose.</p>
+            <p className={noteClass}>
+              Adds an invisible image to emails you send, so opens can be seen. You can turn it off
+              for any email in the composer.
+            </p>
           </div>
           <Switch
             aria-labelledby={ids + '-on'}
@@ -168,6 +171,9 @@ export function ReadStatusSettings({
             if (event.key === 'Enter') saveAddress()
           }}
         />
+        {!address.trim() && !addressProblem && (
+          <p className={noteClass}>No address yet, so nothing is tracked.</p>
+        )}
         {addressProblem && (
           <p id={ids + '-address-problem'} role="alert" className={errorClass}>
             Enter the Worker&rsquo;s https address.
@@ -192,7 +198,7 @@ export function ReadStatusSettings({
               value={password}
               placeholder={passwordSet ? 'Saved' : ''}
               disabled={!secureStorage}
-              autoComplete="off"
+              autoComplete="new-password"
               spellCheck={false}
               onChange={(event) => setPassword(event.target.value)}
             />
@@ -235,6 +241,14 @@ export function ReadStatusSettings({
             </p>
           )}
         </div>
+        <p className="setting-footnote text-muted text-[12px] leading-[1.6] mt-3 mb-0">
+          Use the same address and password on both laptops. Changing the password hides statuses of
+          emails sent before.
+        </p>
+        <p className="text-faint text-[12px] leading-[1.6] mt-1 mb-0">
+          Setup steps: <span className="font-mono">services/read-status-worker/README.md</span> in
+          the Warpmail repository.
+        </p>
       </section>
 
       <section className={sectionClass} aria-labelledby={ids + '-last'}>
@@ -245,10 +259,6 @@ export function ReadStatusSettings({
             : 'Opens haven’t been collected yet.'}
         </p>
         {info.data?.error && <p className={errorClass}>{info.data.error}</p>}
-        <p className="setting-footnote text-faint text-[12px] leading-[1.6] mt-3 mb-0">
-          Use the same address and password on both laptops. Changing the password hides statuses of
-          emails sent before. To set up the Worker, follow services/read-status-worker/README.md.
-        </p>
       </section>
     </>
   )
