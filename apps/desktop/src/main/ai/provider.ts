@@ -17,7 +17,11 @@ export class ImproveError extends Error {
 }
 
 export interface ImproveProvider {
-  /** Yields the whole improved text so far after each change; the last value is the result. */
+  /**
+   * Yields the whole improved text so far after each change, so callers never join deltas. A
+   * server-side fallback continues the text rather than starting it over. The last value is the
+   * result.
+   */
   improve(text: string, style: ImproveStyle, signal: AbortSignal): AsyncIterable<string>
   /** Proves the key works without sending any draft. */
   check(signal?: AbortSignal): Promise<void>

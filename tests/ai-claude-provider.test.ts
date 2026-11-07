@@ -158,11 +158,11 @@ describe('claude provider', () => {
     expect(content).toContain('Lunch at noon?')
   })
 
-  it('starts over when a fallback model takes over mid-stream', async () => {
+  it('keeps the text streamed before a server-side fallback and adds what follows', async () => {
     const s = await startServer({
       events: [
         start,
-        ...textEvents(['Draft A']).slice(0, 3),
+        ...textEvents(['Hello Sam,']).slice(0, 3),
         {
           event: 'content_block_start',
           data: {
@@ -177,14 +177,17 @@ describe('claude provider', () => {
           },
         },
         { event: 'content_block_stop', data: { type: 'content_block_stop', index: 1 } },
-        ...textEvents(['Draft B'], 'end_turn', 2),
+        ...textEvents([' the report', ' is ready.'], 'end_turn', 2),
         stop,
       ],
     })
     const provider = createClaudeProvider({ apiKey, baseURL: s.baseURL, maxRetries: 0 })
     const values = await collect(provider.improve('x', 'polish', new AbortController().signal))
-    expect(values.at(-1)).toBe('Draft B')
-    expect(values).toContain('Draft A')
+    expect(values).toEqual([
+      'Hello Sam,',
+      'Hello Sam, the report',
+      'Hello Sam, the report is ready.',
+    ])
   })
 
   it.each<[number, string, ImproveErrorKind]>([

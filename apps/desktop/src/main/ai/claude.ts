@@ -95,6 +95,8 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
         },
         { signal },
       )
+      // Text from every text block, in order. A server-side fallback keeps what was already
+      // streamed: its `fallback` block only marks where the fallback model carries on.
       let accumulated = ''
       let last = ''
       let stopReason: string | null = null
@@ -104,7 +106,6 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
         if (event.type === 'message_start') {
           addUsage(event.message.usage)
         } else if (event.type === 'content_block_start') {
-          if (event.content_block.type === 'fallback') accumulated = ''
           if (event.content_block.type === 'text') textBlocks.add(event.index)
         } else if (event.type === 'content_block_delta') {
           if (event.delta.type === 'text_delta' && textBlocks.has(event.index)) {
