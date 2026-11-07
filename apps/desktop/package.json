@@ -18,6 +18,7 @@
     "package:linux": "electron-builder --linux AppImage deb rpm --publish never"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
     "@base-ui/react": "^1.8.0",
     "@inlark/core": "workspace:*",
     "@inlark/crypto": "workspace:*",

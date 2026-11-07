@@ -50,6 +50,12 @@ import { SignatureNode } from './signature'
 import { linkTarget } from './link-target'
 import { SignatureParagraph, hasDraftContent, replaceSignature } from './composer-document'
 import { serverSaves } from './draft-sync'
+import { useImprove } from './improve/useImprove'
+import { encryptionUndecided } from './improve/improve-session'
+import { markForeignSignatures } from './improve/foreign-signature'
+import { ImproveControls, ImproveNotice } from './improve/ImproveControls'
+import { ImprovePreview } from './improve/ImprovePreview'
+import { ComposerCommandMenu } from './improve/ComposerCommandMenu'
 
 /** One From choice: an account and one of its sending addresses. */
 const senderKey = (accountId: string, identityId: string) => JSON.stringify([accountId, identityId])
@@ -96,6 +102,7 @@ export function Composer({
   onClose,
   onOpenAccounts,
   onOpenEncryption,
+  onOpenAiSettings,
   notify,
   onSaved,
   onSend,
@@ -109,6 +116,8 @@ export function Composer({
   onOpenAccounts: () => void
   /** Opens Settings → Encryption, to set up or fix this address's key. */
   onOpenEncryption: () => void
+  /** Opens Settings → AI, to add the Anthropic API key. */
+  onOpenAiSettings: () => void
   notify: (message: string, tone?: 'error' | 'info') => void
   onSaved: () => void
   /** Takes over a saved draft to send once the composer has closed. */
@@ -234,6 +243,8 @@ export function Composer({
       return next
     })
   const form = useForm({ defaultValues: { subject: initial.subject } })
+  // Read once: a signature from another mail app becomes one block, so Improve never sends it.
+  const [openingHtml] = useState(() => markForeignSignatures(initial.html))
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -247,7 +258,7 @@ export function Composer({
       SignatureParagraph,
     ],
     content:
-      initial.html ||
+      openingHtml ||
       '<p>' +
         initial.text
           .replace(/&/g, '&amp;')
@@ -274,6 +285,25 @@ export function Composer({
       link: editor?.isActive('link') || false,
     }),
   })
+  const improve = useImprove({
+    editor,
+    protection,
+    locked,
+    encryptionUndecided: encryptionUndecided({
+      hasRecipients: recipientEmails.length > 0,
+      lookup: !(!!draft.identityId && recipientEmails.every(validAddress))
+        ? 'off'
+        : encryptionReady.isError
+          ? 'failed'
+          : encryptionReady.data
+            ? 'done'
+            : 'pending',
+      recommend: !!encryptionReady.data?.recommend,
+      chosen: encryptionChoice.current,
+      protection,
+    }),
+  })
+  const improveOpen = improve.session.phase !== 'closed'
   useEffect(() => {
     if (
       encryptionReady.data?.recommend &&
@@ -300,8 +330,9 @@ export function Composer({
   }, [editor])
   useEffect(() => {
     // Locking for a send is not an edit, so it must not reset the draft or its error.
-    editor?.setEditable(!locked, false)
-  }, [editor, locked])
+    // While Improve is open the draft stays as it was, so accepting can't overwrite new typing.
+    editor?.setEditable(!(locked || improveOpen), false)
+  }, [editor, locked, improveOpen])
   useEffect(() => {
     alive.current = true
     return () => {
@@ -398,6 +429,8 @@ export function Composer({
       })
   }
   const send = async () => {
+    // The preview shows other text than the draft would send; accept or keep it first.
+    if (improveOpen) return
     if (draft.status === 'uncertain') {
       if (sending || changingFrom || account.status !== 'connected') return
       // Checking delivery sends nothing and changes nothing, so it needs no save or review.
@@ -526,7 +559,7 @@ export function Composer({
     send: {
       ignoreInputs: ignoreInputsForCommand,
       run: () => void send(),
-      enabled: !linkOpen && !discardOpen && !sending && !changingFrom,
+      enabled: !linkOpen && !discardOpen && !sending && !changingFrom && !improveOpen,
     },
     attachFiles: {
       run: () => void attachFiles(),
@@ -563,6 +596,11 @@ export function Composer({
       run: () => setProtection(protection === 'encrypt' ? 'none' : 'encrypt'),
       enabled: canEdit && !!own,
     },
+    improveDraft: {
+      run: () => improve.start('polish'),
+      enabled: canEdit && improve.session.phase === 'closed',
+      ignoreInputs: ignoreInputsForCommand,
+    },
   })
   const addressField = (name: 'to' | 'cc' | 'bcc', label: string) => (
     <RecipientField
@@ -596,7 +634,9 @@ export function Composer({
     <Dialog.Root
       open
       disablePointerDismissal
-      onOpenChange={(open) => {
+      onOpenChange={(open, details) => {
+        // Escape with Improve open closes only the preview, wherever focus is.
+        if (!open && details.reason === 'escape-key' && improveOpen) return improve.keep()
         if (!open && !sending && !changingFrom) void close()
       }}
     >
@@ -812,8 +852,10 @@ export function Composer({
             </div>
           </Modal>
           <div className="compose-body flex-1 overflow-auto py-5 px-6 min-h-0">
-            <EditorContent editor={editor} />
-            {draft.attachments.length > 0 && (
+            {/* Hidden, not unmounted, while Improve is open, so the editor keeps its undo history. */}
+            <EditorContent editor={editor} hidden={improveOpen} />
+            {improveOpen && <ImprovePreview improve={improve} />}
+            {draft.attachments.length > 0 && !improveOpen && (
               <div className="compose-attachments flex gap-1.75 flex-wrap mt-3.75">
                 {draft.attachments.map((a) => (
                   <div
@@ -894,7 +936,7 @@ export function Composer({
               '[&:is(fieldset)]:border-b-0 [&:is(fieldset):disabled]:opacity-50 m-0 border-r-0 border-l-0 border-b-0 min-w-0',
               '[&_.active-format]:bg-primary-tint [&_.active-format]:text-primary',
             )}
-            disabled={locked}
+            disabled={locked || improveOpen}
           >
             <IconButton
               label="Bold"
@@ -944,6 +986,7 @@ export function Composer({
             >
               <Paperclip size={15} />
             </IconButton>
+            <ImproveControls improve={improve} shortcut={keys('improveDraft')} />
             {(own || protection !== 'none') && (
               <ProtectionMenu
                 mode={protection}
@@ -953,11 +996,18 @@ export function Composer({
               />
             )}
           </fieldset>
+          <ImproveNotice
+            improve={improve}
+            onOpenSettings={async () => {
+              await close()
+              onOpenAiSettings()
+            }}
+          />
           <div className="compose-footer flex items-center gap-2.5 py-3.25 px-5 border-t border-solid border-t-border">
             <Button
               variant="primary"
               onClick={() => void send()}
-              disabled={sending || changingFrom || account.status !== 'connected'}
+              disabled={sending || changingFrom || improveOpen || account.status !== 'connected'}
             >
               {sending ? (
                 <Spinner size={14} />
@@ -999,6 +1049,22 @@ export function Composer({
           </div>
         </Dialog.Popup>
       </Dialog.Portal>
+      <ComposerCommandMenu
+        improve={improve}
+        enabled={!linkOpen && !discardOpen}
+        canEdit={canEdit}
+        canSend={!linkOpen && !discardOpen && !sending && !changingFrom && !improveOpen}
+        canSave={!linkOpen && !discardOpen && !sending && !changingFrom}
+        actions={{
+          send: () => void send(),
+          attachFiles: () => void attachFiles(),
+          showCc: () => focusRecipient('cc'),
+          showBcc: () => focusRecipient('bcc'),
+          expand: () => setExpanded((current) => !current),
+          saveClose: () => void close(),
+          discard: () => setDiscardOpen(true),
+        }}
+      />
       <ContactKeyDialog email={reviewKey} onClose={() => setReviewKey(undefined)} />
       {unlockDialog}
       <Modal

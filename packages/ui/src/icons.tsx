@@ -78,6 +78,7 @@ import {
   Shuffle as ShuffleGlyph,
   SignatureIcon as SignatureGlyph,
   SlidersHorizontal as SlidersHorizontalGlyph,
+  SparklesIcon as SparklesGlyph,
   SquarePenIcon as SquarePenGlyph,
   Star as StarGlyph,
   Sun as SunGlyph,
@@ -173,6 +174,7 @@ export const ShieldX = icon(ShieldXGlyph)
 export const Shuffle = icon(ShuffleGlyph)
 export const Signature = icon(SignatureGlyph)
 export const SlidersHorizontal = icon(SlidersHorizontalGlyph)
+export const Sparkles = icon(SparklesGlyph)
 export const SquarePen = icon(SquarePenGlyph)
 export const Star = icon(StarGlyph)
 export const Sun = icon(SunGlyph)

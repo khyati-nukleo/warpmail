@@ -1,4 +1,6 @@
 import {
+  defaultAiModel,
+  improveErrorMessages,
   accountKey,
   conversationFromMessages,
   defaultSettings,
@@ -875,6 +877,15 @@ const copyOf = (source: Draft, patch: Partial<Draft>): Draft => ({
   updatedAt: new Date().toISOString(),
   ...patch,
 })
+// Improve draft
+const demoAiStatus = {
+  hasKey: false,
+  secureStorage: false,
+  model: defaultAiModel,
+  month: new Date().toISOString().slice(0, 7),
+  improves: 0,
+  estimatedCost: 0,
+}
 export const demoAPI: DesktopMailAPI = {
   updateStatus: async () => ({ phase: 'idle' }),
   encryptionStatus: async () => encryptionState(),
@@ -1562,6 +1573,16 @@ export const demoAPI: DesktopMailAPI = {
   restart: async () => location.reload(),
   diagnostics: async () =>
     JSON.stringify({ mode: 'demo', message: 'Mail data is generated locally.' }, null, 2),
+  // Improve draft: the demo has no API key and never calls out.
+  aiStatus: async () => demoAiStatus,
+  setAiKey: async () => {
+    throw new Error('Improve is not available in the demo.')
+  },
+  removeAiKey: async () => demoAiStatus,
+  setAiModel: async () => demoAiStatus,
+  testAiKey: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
+  improveDraft: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
+  cancelImprove: async () => {},
   ready: async () => {},
   onEvent: (listener) => {
     listeners.add(listener)

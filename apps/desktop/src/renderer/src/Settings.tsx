@@ -20,6 +20,7 @@ import {
   Keyboard,
   LockKeyhole,
   Inbox,
+  Sparkles,
 } from '@inlark/ui/icons'
 import { Button, Dropdown, EmptyState, MenuItem, Modal, Select, Switch } from '@inlark/ui'
 import {
@@ -39,6 +40,7 @@ import { AliasesDialog } from './Aliases'
 import { IndexingMeter } from './IndexingMeter'
 import { ShortcutEditor } from './ShortcutEditor'
 import { EncryptionPanel } from './EncryptionSettings'
+import { AiSettings } from './AiSettings'
 import { newMessageAccount } from './compose-account'
 import { InboxSettings } from './split/InboxSettings'
 
@@ -259,6 +261,7 @@ export function SettingsPanel({
               ['inbox', 'Inbox', Inbox],
               ['accounts', 'Accounts', Mail],
               ['signatures', 'Signatures', PenLine],
+              ['ai', 'AI', Sparkles],
               ['encryption', 'Encryption', LockKeyhole],
               ['shortcuts', 'Shortcuts', Keyboard],
               ['about', 'About', Info],
@@ -781,6 +784,7 @@ export function SettingsPanel({
                 )}
               </>
             )}
+            {tab === 'ai' && <AiSettings notify={notify} />}
             {tab === 'encryption' &&
               (bootstrap.accounts.length ? (
                 <EncryptionPanel

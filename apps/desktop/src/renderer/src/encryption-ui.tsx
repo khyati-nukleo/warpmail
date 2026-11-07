@@ -80,6 +80,8 @@ export function PasswordField({
   error,
   autoFocus,
   autoComplete = 'off',
+  disabled,
+  placeholder,
 }: {
   label: string
   value: string
@@ -88,6 +90,8 @@ export function PasswordField({
   error?: string
   autoFocus?: boolean
   autoComplete?: string
+  disabled?: boolean
+  placeholder?: string
 }) {
   return (
     <label className={formField}>
@@ -97,6 +101,8 @@ export function PasswordField({
         autoFocus={autoFocus}
         autoComplete={autoComplete}
         spellCheck={false}
+        disabled={disabled}
+        placeholder={placeholder}
         value={value}
         aria-invalid={!!error || undefined}
         onChange={(e) => onChange(e.target.value)}
