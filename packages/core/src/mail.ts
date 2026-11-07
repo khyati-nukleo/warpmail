@@ -62,9 +62,13 @@ export function conversationFromMessages(
   }
 }
 // Reminders
-/** What a list sorts by: a due reminder's time, else the latest message's (both ISO). */
+/**
+ * What a list sorts by: the later of a due reminder's time and the latest message's (both ISO),
+ * as the index sorts it. A reminder only raises a conversation.
+ */
 export function conversationSortKey(c: Conversation): string {
-  return c.reminder?.dueAt ?? c.receivedAt
+  const due = c.reminder?.dueAt
+  return due && due > c.receivedAt ? due : c.receivedAt
 }
 export function mergePages(
   pages: { accountId: string; page: ProviderPage; position: number }[],

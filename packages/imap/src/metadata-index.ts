@@ -275,7 +275,7 @@ export interface ConversationFilter {
   /** Only conversations in this tab. Needs exactly one `mailboxIds` entry: the inbox. */
   split?: SplitScope
   // Reminders
-  /** Threads in the result sort by `sortMs` (ms) instead of their latest date; adds none. */
+  /** Threads in the result sort by `sortMs` (ms) when it is after their latest date; adds none. */
   boost?: { threadId: string; sortMs: number }[]
 }
 

@@ -133,7 +133,7 @@ export function boostTimes(boost: { threadId: string; sortMs: number }[] | undef
 
 /**
  * The `conversations` page with due reminders on top: boosted threads sort by their time `k`
- * instead of their latest message `r`. `g` is the plain grouped set, so filters, tabs and totals
+ * instead of their latest message `r`, never below it (a reminder only raises a thread). `g` is the plain grouped set, so filters, tabs and totals
  * are unchanged; `x` is the same set read for the boosted threads alone (`boosted`, through the
  * thread index), so a boost never adds a thread. Giving every thread of `g` a `k` costs each of
  * them a lookup (at 100k messages, five times the plain page with a LEFT JOIN, a fifth more with
@@ -161,7 +161,8 @@ export function boostedConversationPage(
   return {
     sql: `WITH g AS MATERIALIZED (${source.sql}),
         b AS MATERIALIZED (SELECT value ->> 0 AS t, value ->> 1 AS k FROM json_each(?)),
-        x AS MATERIALIZED (SELECT q.t, q.r, q.s, b.k FROM (${boosted.sql}) q JOIN b ON b.t = q.t),
+        x AS MATERIALIZED (SELECT q.t, q.r, q.s, max(b.k, q.r) AS k FROM (${boosted.sql}) q
+          JOIN b ON b.t = q.t),
         h AS (SELECT t, r, s, k FROM x ${keysetK}
           UNION ALL
           SELECT t, r, s, r FROM (

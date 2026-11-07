@@ -170,7 +170,7 @@ export interface Conversation {
   count: number
   messages: Message[]
   // Reminders
-  /** A due reminder: the conversation sorts by `dueAt` (ISO) in the inbox. */
+  /** A due reminder: in the inbox the conversation sorts by `dueAt` (ISO) when that is later. */
   reminder?: { kind: ReminderKind; dueAt: string; messageId: string }
 }
 export interface Identity {

@@ -181,6 +181,25 @@ describe('inbox order with due reminders (index)', () => {
     expect(uids(page.items).some((uid) => uid % 5 === 0)).toBe(false)
   })
 
+  it('never sinks a thread whose due time is older than its latest message', () => {
+    const early = [...boost, { threadId: thread.get(60)!, sortMs: ms(59) }]
+    const plain = index.conversations('a', { mailboxIds: [inbox] }, { limit: 120 })
+    const page = index.conversations('a', filter({ boost: early }), { limit: 120 })
+    const natural = uids(plain.items).filter((uid) => uid > 3)
+    expect(uids(page.items)).toEqual([2, 3, 1, ...natural])
+    expect(page.items.find((r) => r.latest.uid === 60)!.sortMs).toBeUndefined()
+    // Keyset pages around it, and offset pages, agree.
+    const at = uids(page.items).indexOf(60)
+    const before = page.items[at - 1]!
+    const next = index.conversations('a', filter({ boost: early }), {
+      limit: 2,
+      after: { receivedAt: before.latest.receivedAt, threadId: before.threadId },
+    })
+    expect(uids(next.items)).toEqual([60, 59])
+    const offset = index.conversations('a', filter({ boost: early }), { limit: 2, offset: at })
+    expect(uids(offset.items)).toEqual([60, 59])
+  })
+
   it('takes a thread listed twice once, at its latest due time', () => {
     const twice = [...boost, { threadId: thread.get(1)!, sortMs: ms(250) }]
     const page = index.conversations('a', filter({ boost: twice }), { limit: 50 })
@@ -304,6 +323,26 @@ describe('merging accounts with due reminders', () => {
     // One consumed from each: the next page starts after them, skipping nothing.
     expect(page.next).toEqual({ a: 1, b: 1 })
     expect(page.total).toBe(4)
+  })
+
+  it('never sorts a conversation below its latest message', () => {
+    const early = {
+      ...conv('b', 'b1', '2026-09-23T12:00:00.000Z'),
+      reminder: { kind: 'reply' as const, dueAt: '2026-09-23T08:00:00.000Z', messageId: 'x' },
+    }
+    expect(conversationSortKey(early)).toBe('2026-09-23T12:00:00.000Z')
+    const page = mergePages(
+      [
+        {
+          accountId: 'a',
+          position: 0,
+          page: { items: [conv('a', 'a1', '2026-09-23T11:00:00.000Z')], total: 1 },
+        },
+        { accountId: 'b', position: 0, page: { items: [early], total: 1 } },
+      ],
+      2,
+    )
+    expect(page.items.map((c) => c.id)).toEqual(['b1', 'a1'])
   })
 })
 
