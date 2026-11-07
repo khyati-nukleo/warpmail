@@ -1,7 +1,11 @@
 import type { Address, Draft, ReadStatusSettings } from './model'
 import { isAutomatedAddress } from './split'
 
-export const readStatusLimits = { recipients: 25 }
+export const readStatusLimits = {
+  recipients: 25,
+  /** Copies × estimated message size; each copy is composed in memory. */
+  bytes: 30 * 1024 * 1024,
+}
 
 export type FetchSource = 'apple' | 'google' | 'other'
 export interface FetchRecord {
@@ -31,6 +35,7 @@ export type TrackingBlock =
   | 'noHtml'
   | 'automated'
   | 'tooMany'
+  | 'tooLarge'
   | 'unsupported'
 
 /** The Worker's origin when it is safe to use: https (or local http), no credentials, no path. */
@@ -166,10 +171,16 @@ export function trackedRecipients(draft: Pick<Draft, 'to' | 'cc' | 'bcc'>): stri
   return [...seen]
 }
 
+/** Rough size of one copy: base64 attachments plus both bodies. */
+function estimatedSize(draft: Pick<Draft, 'html' | 'text' | 'attachments'>): number {
+  const attachments = (draft.attachments ?? []).reduce((sum, a) => sum + (a.size || 0), 0)
+  return (attachments * 4) / 3 + draft.html.length + (draft.text ?? '').length
+}
+
 export function trackingBlock(input: {
   settings?: ReadStatusSettings
   passwordSet: boolean
-  draft: Pick<Draft, 'to' | 'cc' | 'bcc' | 'html' | 'readStatus'>
+  draft: Pick<Draft, 'to' | 'cc' | 'bcc' | 'html' | 'text' | 'attachments' | 'readStatus'>
   protection: 'none' | 'encrypt' | 'sign'
   perCopySending: boolean
   /** The user's own addresses, lowercased. On Gmail a copy to oneself is the merged Sent copy. */
@@ -186,6 +197,7 @@ export function trackingBlock(input: {
   if (!input.draft.html.trim()) return 'noHtml'
   if (!recipients.some((email) => !isAutomatedAddress(email))) return 'automated'
   if (recipients.length > readStatusLimits.recipients) return 'tooMany'
+  if (recipients.length * estimatedSize(input.draft) > readStatusLimits.bytes) return 'tooLarge'
   return undefined
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('../apps/desktop/src/main/public-fetch', async (original) => ({
@@ -14,10 +14,11 @@ vi.mock('electron', () => ({
     encryptString: (value: string) => Buffer.from(Buffer.from(value).reverse()),
     decryptString: (value: Buffer) => Buffer.from(value).reverse().toString(),
   },
-  dialog: {},
+  dialog: { showOpenDialog: vi.fn() },
   shell: {},
   Notification: { isSupported: () => false },
 }))
+import { dialog } from 'electron'
 import { publicFetch } from '../apps/desktop/src/main/public-fetch'
 import { MailService, type ProviderFactory } from '../apps/desktop/src/main/service'
 import { JsonStore } from '../apps/desktop/src/main/storage'
@@ -387,6 +388,21 @@ describe('Read status: sends that are never tracked', () => {
       expect(await untrackedReasons()).toEqual([reason])
       expect(isTrackedMessageId(password, (await journal()).messageId)).toBe(false)
     })
+  it('when one copy per person would be too large', async () => {
+    // 3 MiB × 4/3 × 10 recipients is over the 30 MiB limit.
+    const path = join(directory, 'big.zip')
+    await writeFile(path, Buffer.alloc(3 * 1024 * 1024, 1))
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const attachments = await service.stageAttachments()
+    const ten = many.slice(0, 10)
+    expect((await service.send({ ...draft, to: ten, cc: [], bcc: [], attachments })).status).toBe(
+      'sent',
+    )
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(submitCopies).not.toHaveBeenCalled()
+    expect(await untrackedReasons()).toEqual(['tooLarge'])
+    expect(isTrackedMessageId(password, (await journal()).messageId)).toBe(false)
+  })
   it('when the email is signed', async () => {
     // A signed send may fail before submitting here, since no OpenPGP key exists.
     await service.send({ ...draft, encryption: 'sign' }).catch(() => undefined)

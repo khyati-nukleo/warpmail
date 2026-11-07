@@ -17,9 +17,12 @@ const draft = (over: Record<string, unknown> = {}) => ({
   cc: [],
   bcc: [],
   html: '<p>Hello</p>',
+  text: 'Hello',
+  attachments: [] as { id: string; name: string; type: string; size: number }[],
   readStatus: undefined as boolean | undefined,
   ...over,
 })
+const big = { id: 'big', name: 'big.zip', type: 'application/zip', size: 3 * 1024 * 1024 }
 const input = (over: Record<string, unknown> = {}) => ({
   settings: { enabled: true, workerUrl: base },
   passwordSet: true,
@@ -132,6 +135,32 @@ describe('trackingBlock', () => {
       person(`p${i}@example.org`),
     )
     expect(trackingBlock(input({ draft: draft({ to: many }) }))).toBe('tooMany')
+    const ten = Array.from({ length: 10 }, (_, i) => person(`p${i}@example.org`))
+    expect(trackingBlock(input({ draft: draft({ to: ten, attachments: [big] }) }))).toBe('tooLarge')
+  })
+  it('estimates size as attachments × 4/3 plus html and text, times the copies', () => {
+    expect(readStatusLimits.bytes).toBe(30 * 1024 * 1024)
+    const three = [person('a@example.org'), person('b@example.org'), person('c@example.org')]
+    const html = '<p>Hello</p>' // 12 characters
+    // Per copy: 7 864 308 × 4/3 = 10 485 744, + 12 html + 4 text = 10 MiB; × 3 copies = 30 MiB.
+    const sized = (text: string) =>
+      draft({
+        to: three,
+        html,
+        text,
+        attachments: [
+          { id: 'a', name: 'a.bin', type: 'application/octet-stream', size: 7_000_000 },
+          { id: 'b', name: 'b.bin', type: 'application/octet-stream', size: 864_308 },
+        ],
+      })
+    expect(trackingBlock(input({ draft: sized('abcd') }))).toBeUndefined()
+    expect(trackingBlock(input({ draft: sized('abcde') }))).toBe('tooLarge')
+  })
+  it('checks tooMany before tooLarge', () => {
+    const many = Array.from({ length: readStatusLimits.recipients + 1 }, (_, i) =>
+      person(`p${i}@example.org`),
+    )
+    expect(trackingBlock(input({ draft: draft({ to: many, attachments: [big] }) }))).toBe('tooMany')
   })
   it('orders checks: off beats notConfigured, unsupported beats switchedOff, protected beats self, self beats noHtml', () => {
     expect(trackingBlock(input({ settings: { enabled: false }, passwordSet: false }))).toBe('off')

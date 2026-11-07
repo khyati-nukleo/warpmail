@@ -9,6 +9,7 @@ const notTracked = {
   noHtml: 'Not tracked: plain-text emails can’t carry read status.',
   automated: 'Not tracked: every recipient is an automated address.',
   tooMany: `Not tracked: more than ${readStatusLimits.recipients} recipients.`,
+  tooLarge: 'Not tracked: too large to send one copy per person.',
 } as const
 
 /** “Read status: on/off” for one email; hidden until read status is set up for this account. */
