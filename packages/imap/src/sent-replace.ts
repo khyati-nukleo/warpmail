@@ -27,6 +27,21 @@ export type FindMessageId = (
 /** A Message-ID that searches can only match exactly (no spaces, quotes or brackets). */
 const exactId = /^[^\s<>"]+@[^\s<>"]+$/
 
+/**
+ * Whether tracked sends can work here: only Gmail keeps the app's Message-ID and lets its own
+ * Sent copy be replaced, and only with All Mail and Trash shown in IMAP (see `gmailBoxes`).
+ */
+export function readStatusServer(
+  port: Pick<ImapPort, 'capabilities'>,
+  boxes: { specialUse?: string | null }[],
+): boolean {
+  return (
+    port.capabilities.has('X-GM-EXT-1') &&
+    boxes.some((b) => b.specialUse === '\\All') &&
+    boxes.some((b) => b.specialUse === '\\Trash')
+  )
+}
+
 /** Gmail's All Mail and Trash, or undefined on other servers. Without them nothing is deleted. */
 function gmailBoxes(port: ImapPort, boxes: SentCopyBoxes) {
   if (!port.capabilities.has('X-GM-EXT-1')) return undefined

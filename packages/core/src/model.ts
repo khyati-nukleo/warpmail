@@ -62,6 +62,7 @@ export interface Account {
   indexing?: IndexingProgress
   /** The local index is being updated for a new version of the app, which happens once. */
   updatingIndex?: boolean
+  readStatus?: boolean // Read status: Gmail over IMAP (X-GM-EXT-1, \All and \Trash shown), so it can be tracked
 }
 /** An address the provider delivers to this account and lets it send from. */
 export interface Alias {

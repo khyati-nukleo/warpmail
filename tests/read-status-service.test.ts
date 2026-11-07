@@ -549,6 +549,36 @@ describe('Read status: sends that are never tracked', () => {
     expect(await untrackedReasons()).toEqual(['tooLarge'])
     expect(isTrackedMessageId(password, (await journal()).messageId)).toBe(false)
   })
+  /** Signs in again, so the account is looked at afresh on the changed server. */
+  const reconnect = async () => {
+    await service.connect(input)
+    await connected()
+  }
+  it('when the IMAP server is not Gmail', async () => {
+    server.gmail = false
+    await reconnect()
+    expect(service.accounts[0].readStatus).toBeUndefined()
+    expect((await service.send(draft)).status).toBe('sent')
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(submitCopies).not.toHaveBeenCalled()
+    expect(await untrackedReasons()).toEqual(['unsupported'])
+    expect(isTrackedMessageId(password, (await journal()).messageId)).toBe(false)
+  })
+  it("when Gmail's All Mail is not shown in IMAP", async () => {
+    server.boxes.delete(ALL)
+    await reconnect()
+    expect(service.accounts[0].readStatus).toBeUndefined()
+    expect((await service.send(draft)).status).toBe('sent')
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(submitCopies).not.toHaveBeenCalled()
+    expect(await untrackedReasons()).toEqual(['unsupported'])
+  })
+  it('a Gmail account is tracked', async () => {
+    expect(service.accounts[0].readStatus).toBe(true)
+    expect((await service.send(draft)).status).toBe('sent')
+    expect(submitCopies).toHaveBeenCalledTimes(1)
+    expect(submit).not.toHaveBeenCalled()
+  })
   it('when the email is signed', async () => {
     // A signed send may fail before submitting here, since no OpenPGP key exists.
     await service.send({ ...draft, encryption: 'sign' }).catch(() => undefined)

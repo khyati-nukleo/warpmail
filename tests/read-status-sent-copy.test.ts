@@ -107,6 +107,24 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
+describe('Read status: which accounts can be tracked', () => {
+  it('marks a Gmail account with All Mail and Trash shown', async () => {
+    gmailServer()
+    await connected()
+    expect(account.readStatus).toBe(true)
+  })
+  it('leaves other IMAP servers and Gmail without All Mail or Trash unmarked', async () => {
+    await connected()
+    expect(account.readStatus).toBeUndefined()
+    gmailServer({ allMail: false })
+    await connected()
+    expect(account.readStatus).toBeUndefined()
+    gmailServer({ trashUse: null })
+    await connected()
+    expect(account.readStatus).toBeUndefined()
+  })
+})
+
 describe('Read status: the Sent copy of a tracked email', () => {
   it("replaces Gmail's merged copy with one clean copy", async () => {
     gmailServer()

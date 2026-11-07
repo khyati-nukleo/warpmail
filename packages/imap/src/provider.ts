@@ -60,7 +60,7 @@ import type {
 } from './metadata-index'
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
-import { appendSentCopy, hasServerCopy, replaceSentCopy } from './sent-replace'
+import { appendSentCopy, hasServerCopy, readStatusServer, replaceSentCopy } from './sent-replace'
 import { submitSmtp, submitSmtpCopies, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
 
@@ -247,6 +247,8 @@ export class ImapProvider implements MailProvider {
   private state: 'connected' | 'offline' | 'authentication' = 'connected'
   private lastFailure?: { at: number; error: unknown }
   private limits: AccountLimits = {}
+  /** Read status: Gmail with All Mail and Trash shown, the only server tracked sends work on. */
+  private readStatus = false
   constructor(private options: ImapProviderOptions) {
     this.accountId = accountKey(options.connectionId, 'imap')
     this.timing = { ...defaultTiming, ...options.timing }
@@ -352,6 +354,7 @@ export class ImapProvider implements MailProvider {
     this.disposed = false
     await this.run(async (port) => {
       const boxes = await this.refreshFolders(port)
+      this.readStatus = readStatusServer(port, boxes)
       // Counts for the folders shown first; the rest arrive with the first background pass.
       const roles = rolesByPath(reviewFolders(boxes, this.folders))
       for (const box of boxes.filter(
@@ -383,6 +386,7 @@ export class ImapProvider implements MailProvider {
       status: 'connected',
       protocol: 'imap',
       ...(Object.keys(this.limits).length ? { limits: this.limits } : {}),
+      ...(this.readStatus ? { readStatus: true } : {}),
     }
   }
   verifyOutgoing(): Promise<void> {

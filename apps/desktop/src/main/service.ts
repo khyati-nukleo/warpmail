@@ -2002,7 +2002,11 @@ export class MailService {
       passwordSet: !!password,
       draft,
       protection,
-      perCopySending: !!provider.submitCopies && provider.capabilities.sentCopy === 'client',
+      // Only Gmail keeps the Message-ID and lets its own Sent copy be replaced.
+      perCopySending:
+        !!provider.submitCopies &&
+        provider.capabilities.sentCopy === 'client' &&
+        account.readStatus === true,
       ownAddresses: ownAddresses(this.accounts),
     })
     if (block || !base || !password) {

@@ -10,9 +10,10 @@ const notTracked = {
   automated: 'Not tracked: every recipient is an automated address.',
   tooMany: `Not tracked: more than ${readStatusLimits.recipients} recipients.`,
   tooLarge: 'Not tracked: too large to send one copy per person.',
+  unsupported: 'Read status works with Gmail accounts only.',
 } as const
 
-/** “Read status: on/off” for one email; hidden until read status is set up for this account. */
+/** “Read status: on/off” for one email; hidden until read status is set up. */
 export function ReadStatusSwitch({
   draft,
   protection,
@@ -33,10 +34,10 @@ export function ReadStatusSwitch({
     passwordSet: !!info.data?.passwordSet,
     draft,
     protection,
-    perCopySending: account?.protocol === 'imap',
+    perCopySending: account?.readStatus === true,
     ownAddresses: own,
   })
-  if (block === 'off' || block === 'notConfigured' || block === 'unsupported') return null
+  if (block === 'off' || block === 'notConfigured') return null
   // Nothing addressed or written yet is not a reason to show the email as untracked.
   const unfinished =
     (block === 'automated' && !trackedRecipients(draft).length) ||

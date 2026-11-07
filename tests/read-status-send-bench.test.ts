@@ -96,6 +96,9 @@ describe('read status send bench', () => {
   it('a tracked send through the app stays close to an untracked one', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'inlark-read-status-bench-'))
     const imap = new FakeImapServer()
+    // Read status only tracks Gmail: All Mail shown, X-GM-EXT-1 offered.
+    imap.addMailbox('All Mail', '\\All')
+    imap.gmail = true
     const config: ImapConnectionConfig = {
       protocol: 'imap',
       email: 'me@example.com',
@@ -128,6 +131,7 @@ describe('read status send bench', () => {
         remember: true,
         connectionId: 'bench',
       })
+      expect(account.readStatus).toBe(true)
       await service.readStatusSecret.set(password)
       const draft = (): Draft => ({
         id: randomUUID(),
