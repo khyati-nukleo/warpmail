@@ -60,6 +60,7 @@ import type {
 } from './metadata-index'
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
+import { appendSentCopy, hasServerCopy, replaceSentCopy } from './sent-replace'
 import { submitSmtp, submitSmtpCopies, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
 
@@ -1806,6 +1807,24 @@ export class ImapProvider implements MailProvider {
       )
     if (!message.mime)
       throw new ProviderError('filing', 'The sent message is no longer available locally.')
+    if (message.replaceServerCopies) {
+      // Read status: the server's own copy carries a recipient's image, so it is replaced.
+      const mime = message.mime
+      const boxes = {
+        sent: sent.path,
+        allMail: (await this.index.listMailboxes(this.accountId)).find(
+          (b) => b.specialUse === '\\All',
+        )?.path,
+        trash: (await this.roleBox('trash'))?.path,
+      }
+      const find = (port: ImapPort, id: string, uidNext: number) =>
+        this.withMessageId(port, id, uidNext)
+      if (!(await this.run((port) => hasServerCopy(port, boxes, message.messageId, find))))
+        await sleep(this.timing.sentCopyGraceMs)
+      await this.run((port) => replaceSentCopy(port, boxes, message.messageId, mime, find))
+      this.requestSync('all')
+      return 'filed'
+    }
     const filed = async (port: ImapPort) =>
       (await this.withMessageId(port, message.messageId, (await port.select(sent.path)).uidNext))
         .length > 0
@@ -1817,16 +1836,7 @@ export class ImapProvider implements MailProvider {
     await sleep(this.timing.sentCopyGraceMs)
     return this.run(async (port) => {
       if (await filed(port)) return 'server' as const
-      try {
-        await port.append(sent.path, message.mime!, ['\\Seen'], new Date())
-      } catch (error) {
-        if (isProviderError(error, 'network'))
-          throw new ProviderError(
-            'filingUncertain',
-            'The connection dropped while saving the Sent copy. It will be checked before trying again.',
-          )
-        throw new ProviderError('filing', 'The server did not accept the Sent copy.')
-      }
+      await appendSentCopy(port, sent.path, message.mime!)
       this.requestSync('all')
       return 'filed' as const
     })

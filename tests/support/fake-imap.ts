@@ -226,6 +226,73 @@ export class FakeImapServer {
   get commandPorts() {
     return this.ports.filter((p) => p.purpose === 'command')
   }
+  // Read status: opt-in Gmail mode, set before ports are made. Adds X-GM-EXT-1, answers `gmraw`
+  // "rfc822msgid:<id>" searches, and keeps label semantics: every message is in All Mail, so an
+  // APPEND elsewhere lands there too, and moving it out of All Mail takes it out of every other
+  // folder except the destination. Existing behaviour is untouched while it is off.
+  private gmailPorts = false
+  get gmail() {
+    return this.capabilities.has('X-GM-EXT-1')
+  }
+  set gmail(on: boolean) {
+    if (on) this.capabilities.add('X-GM-EXT-1')
+    else this.capabilities.delete('X-GM-EXT-1')
+    if (!on || this.gmailPorts) return
+    this.gmailPorts = true
+    const plain = this.port
+    this.port = (options, purpose) => this.asGmail(plain(options, purpose))
+  }
+  private asGmail(port: FakePort) {
+    const [select, search, move, append] = [port.select, port.search, port.move, port.append].map(
+      (fn) => fn.bind(port),
+    ) as [FakePort['select'], FakePort['search'], FakePort['move'], FakePort['append']]
+    const allMail = () => [...this.boxes.values()].find((b) => b.specialUse === '\\All')
+    const on = () => this.gmail
+    let selected: string | undefined
+    port.select = async (path) => {
+      const result = await select(path)
+      selected = path
+      return result
+    }
+    port.search = async ({ gmraw, ...rest }) => {
+      if (gmraw === undefined) return search(rest)
+      if (!on()) throw new ProviderError('unsupported', 'No X-GM-EXT-1.')
+      const id = /^rfc822msgid:<?([^>]+)>?$/.exec(gmraw)?.[1]
+      const matches = new Set(await search(rest))
+      return this.box(selected!)
+        .messages.filter((m) => matches.has(m.uid) && id && m.input.messageId === id)
+        .map((m) => m.uid)
+    }
+    port.move = async (uids, destination) => {
+      const source = selected ? this.box(selected) : undefined
+      const ids = new Set(
+        source?.messages.filter((m) => uids.includes(m.uid)).map((m) => m.input.messageId),
+      )
+      const result = await move(uids, destination)
+      if (on() && source && source === allMail())
+        for (const box of this.boxes.values())
+          if (box !== source && box.path !== destination)
+            box.messages = box.messages.filter(
+              (m) => !m.input.messageId || !ids.has(m.input.messageId),
+            )
+      return result
+    }
+    port.append = async (path, content, flags, date) => {
+      const result = await append(path, content, flags, date)
+      const all = allMail()
+      if (on() && all && all.path !== path) {
+        const m = this.box(path).messages.at(-1)!
+        all.messages.push({
+          ...m,
+          uid: all.uidNext++,
+          flags: new Set(m.flags),
+          modseq: ++this.modseq,
+        })
+      }
+      return result
+    }
+    return port
+  }
 }
 
 export class FakePort implements ImapPort {
