@@ -234,6 +234,9 @@ export interface Draft {
   encryptionRequired?: boolean
   downgradeConfirmed?: boolean
   earlierPlaintext?: boolean
+  // Reminders
+  /** The follow-up switch's choice at send; undefined lets the ask-check decide. */
+  followUp?: boolean
   status: 'local' | 'saving' | 'synced' | 'error' | 'sending' | 'uncertain' | 'sent'
   error?: string
   /** What kind of problem `error` describes, so the composer can offer the right recovery. */

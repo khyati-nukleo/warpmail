@@ -180,6 +180,7 @@ export const draftSchema = z.object({
   encryptionRequired: z.boolean().optional(),
   downgradeConfirmed: z.boolean().optional(),
   earlierPlaintext: z.boolean().optional(),
+  followUp: z.boolean().optional(), // Reminders
   status: z.enum(['local', 'saving', 'synced', 'error', 'sending', 'uncertain', 'sent']),
   error: z.string().optional(),
   errorKind: z

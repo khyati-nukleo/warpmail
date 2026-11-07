@@ -36,6 +36,8 @@ import { api, isDemo } from './api'
 import { localSaveDraft, localDeleteDraft } from './cache'
 import { RecipientField, type ChipSecurity } from './RecipientField'
 import { recipientProblems, useEncryption } from './encryption-ui'
+import { FollowUpSwitch } from './reminders/FollowUpSwitch'
+import { followUpGuess } from './reminders/draft-text'
 import { ContactKeyDialog, keysChanged, useUnlock } from './encryption-actions'
 import { ProtectionBar, ProtectionMenu, type Protection } from './ComposerProtection'
 import { ReadStatusSwitch } from './read-status/ReadStatusSwitch' // Read status
@@ -490,6 +492,10 @@ export function Composer({
       return
     }
     // The draft is safe on this device: sending carries on, and reports back, after closing.
+    latest.current = {
+      ...latest.current,
+      followUp: latest.current.followUp ?? followUpGuess(latest.current),
+    } // Reminders
     onSend(latest.current)
     onSaved()
     onClose()
@@ -1042,6 +1048,12 @@ export function Composer({
               protection={protection === 'none' && own?.enabled ? 'sign' : protection}
               locked={locked}
               onChange={(readStatus) => update({ readStatus })}
+            />
+            <FollowUpSwitch
+              draft={draft}
+              account={account}
+              disabled={locked}
+              onChange={(followUp) => update({ followUp })}
             />
             <span className="compose-account flex-1 text-right text-muted text-[11px] max-[700px]:text-[10px]">
               {identity?.email ?? (senderMissing ? '' : account.email)}

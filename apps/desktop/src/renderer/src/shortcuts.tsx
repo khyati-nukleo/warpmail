@@ -132,6 +132,14 @@ export const shortcutDefinitions = [
     description: 'While composing. Shows the changes before anything is replaced.',
     defaults: [['Mod+J']],
   },
+  // Reminders
+  {
+    id: 'toggleFollowUp',
+    section: 'Write',
+    label: 'Follow-up on or off',
+    description: 'While composing, in an IMAP account.',
+    defaults: [['Mod+Shift+O']],
+  },
   { id: 'showCc', section: 'Write', label: 'Show and focus Cc', defaults: [['Mod+Shift+C']] },
   { id: 'showBcc', section: 'Write', label: 'Show and focus Bcc', defaults: [['Mod+Shift+B']] },
   {
