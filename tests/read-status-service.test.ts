@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+vi.mock('../apps/desktop/src/main/public-fetch', async (original) => ({
+  ...(await original<typeof import('../apps/desktop/src/main/public-fetch')>()),
+  publicFetch: vi.fn(async () => ({ status: 404, type: 'text/html', bytes: Buffer.alloc(0) })),
+}))
 vi.mock('electron', () => ({
   app: { getVersion: () => 'test' },
   safeStorage: {
@@ -14,6 +18,7 @@ vi.mock('electron', () => ({
   shell: {},
   Notification: { isSupported: () => false },
 }))
+import { publicFetch } from '../apps/desktop/src/main/public-fetch'
 import { MailService, type ProviderFactory } from '../apps/desktop/src/main/service'
 import { JsonStore } from '../apps/desktop/src/main/storage'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
@@ -446,6 +451,11 @@ describe('Read status: settling copies', () => {
 describe('Read status: the app never loads the Worker', () => {
   it('refuses an image from the Worker even with remote images on', async () => {
     await service.setSettings({ ...service.settings, remoteImages: true })
+    vi.mocked(publicFetch).mockClear()
     expect(await service.remoteImage(`${base}/p/AbCdEfGhIjKlMnOpQrStUv.gif`)).toBeNull()
+    expect(await service.remoteImage(`${base}./p/AbCdEfGhIjKlMnOpQrStUv.gif`)).toBeNull()
+    expect(publicFetch).not.toHaveBeenCalled()
+    await service.remoteImage('https://images.example.net/logo.png')
+    expect(publicFetch).toHaveBeenCalledTimes(1)
   })
 })

@@ -55,8 +55,13 @@ export function pixelUrl(base: string, code: string): string {
 
 export function isWorkerImage(src: string, base?: string): boolean {
   if (!base) return false
+  // Compare scheme, host (case and trailing dot ignored) and port, so `host.` is the same server.
+  const key = (url: string) => {
+    const u = new URL(url.trim())
+    return `${u.protocol}//${u.hostname.replace(/\.+$/, '').toLowerCase()}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`
+  }
   try {
-    return new URL(src.trim()).origin === new URL(base).origin
+    return key(src) === key(base)
   } catch {
     return false
   }

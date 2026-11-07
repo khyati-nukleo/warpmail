@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { isWorkerImage } from '../packages/core/src'
 import { remoteImageData } from '../apps/desktop/src/main/remote-image'
 import { publicFetch } from '../apps/desktop/src/main/public-fetch'
 
@@ -53,6 +54,13 @@ describe('remote message images', () => {
         blocked,
       ),
     ).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('blocks the Worker host written with a trailing dot', async () => {
+    const fetch = vi.fn<FetchResource>()
+    const blocked = (url: string) => isWorkerImage(url, 'https://read.example.com')
+    expect(await remoteImageData('https://read.example.com./p/x.gif', fetch, blocked)).toBeNull()
     expect(fetch).not.toHaveBeenCalled()
   })
 

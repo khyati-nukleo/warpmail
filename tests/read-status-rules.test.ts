@@ -64,7 +64,13 @@ describe('pixels', () => {
   it('recognises worker images', () => {
     expect(isWorkerImage('https://READ.example.com/p/x.gif', base)).toBe(true)
     expect(isWorkerImage('https://read.example.com:443/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com./p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://READ.example.com.:443/p/x.gif', base)).toBe(true)
     expect(isWorkerImage('https://read.example.com.evil.example/p/x.gif', base)).toBe(false)
+    expect(isWorkerImage('http://read.example.com/p/x.gif', base)).toBe(false)
+    expect(stripPixels('<p>a</p><img src="https://read.example.com./p/x.gif">', base)).toBe(
+      '<p>a</p>',
+    )
     expect(isWorkerImage('https://read.example.com/p/x.gif', undefined)).toBe(false)
   })
   it('strips worker images however the tag is written', () => {
