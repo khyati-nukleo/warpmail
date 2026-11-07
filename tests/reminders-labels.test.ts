@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { Account, ImapConnectionConfig, SplitScope } from '../packages/core/src'
 import { ImapProvider } from '../packages/imap/src'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
+import { planMutation } from '../apps/desktop/src/main/mail-mutations'
 import { FakeImapServer, FakePort, type FakeMessageInput } from './support/fake-imap'
 
 const config: ImapConnectionConfig = {
@@ -112,14 +113,73 @@ describe('Warpmail label folders', () => {
     expect(made).toHaveLength(1)
     expect(server.commands.filter((c) => c === 'CREATE')).toHaveLength(1)
   })
-  it('copies from INBOX, then Sent, when All Mail does not have it', async () => {
-    server.deliver('Archive', email)
-    server.deliver('INBOX', email)
+  it('copies from INBOX when All Mail does not have it', async () => {
+    for (const path of ['Archive', 'Sent', 'INBOX']) server.deliver(path, email)
     const made = copies()
     const p = await connected()
     await p.labelMessage!(account, 'followUp', 'question@example.org', true)
     expect(made).toEqual([{ from: 'INBOX', to: 'Warpmail/Follow up' }])
   })
+  it('copies from Sent when neither All Mail nor INBOX has it', async () => {
+    for (const path of ['Archive', 'Sent']) server.deliver(path, { ...email, from: [me] })
+    const made = copies()
+    const p = await connected()
+    await p.labelMessage!(account, 'followUp', 'question@example.org', true)
+    expect(made).toEqual([{ from: 'Sent', to: 'Warpmail/Follow up' }])
+  })
+  it('never copies from Trash or Junk', async () => {
+    for (const path of ['Trash', 'Junk']) server.deliver(path, email)
+    const made = copies()
+    const p = await connected()
+    await expect(
+      p.labelMessage!(account, 'noReminder', 'question@example.org', true),
+    ).rejects.toMatchObject({ code: 'notFound' })
+    expect(made).toEqual([])
+  })
+  it('adding a label that is already there changes nothing and announces nothing', async () => {
+    gmail()
+    const made = copies()
+    const p = await connected()
+    await p.labelMessage!(account, 'noReminder', 'question@example.org', true)
+    const events: string[] = []
+    // Previews filled in the background after the first add are announced as historical.
+    p.subscribe((event) => {
+      if (event.type === 'changed' && !event.historical) events.push(event.type)
+    })
+    const before = server.commands.length
+    await p.labelMessage!(account, 'noReminder', 'question@example.org', true)
+    expect(made).toHaveLength(1)
+    expect(events).not.toContain('changed')
+    expect(server.commands.slice(before)).not.toContain('STATUS')
+  })
+  it('asks for a full sync when the label folder was rebuilt during a remove', async () => {
+    gmail()
+    const p = await connected()
+    await p.labelMessage!(account, 'noReminder', 'question@example.org', true)
+    server.resetUidValidity(noReminder)
+    const requested = vi.spyOn(p, 'requestSync')
+    await p.labelMessage!(account, 'noReminder', 'question@example.org', false)
+    expect(server.box(noReminder).messages).toEqual([])
+    expect(requested).toHaveBeenCalledWith('all')
+  })
+  for (const action of ['move', 'spam', 'trash'] as const)
+    it('keeps the labels when its conversation is acted on (' + action + ')', async () => {
+      gmail(['INBOX'])
+      const p = await connected()
+      await p.labelMessage!(account, 'noReminder', 'question@example.org', true)
+      const [thread] = (await p.query(account, { view: 'inbox' })).items
+      const boxes = await p.mailboxes(account)
+      const messages = await p.conversationMetadata(account, [thread!.id])
+      const archive = boxes.find((b) => b.name === 'Archive')!.id
+      const plan = planMutation(messages, boxes, action, archive)
+      const result = await p.update(account, plan.changes, plan.destroy, p.getStateToken(account))
+      expect(result.failures).toEqual([])
+      expect(server.box('INBOX').messages).toEqual([])
+      expect(server.box(noReminder).messages).toHaveLength(1)
+      await sync(p)
+      expect(server.box(noReminder).messages).toHaveLength(1)
+      if (action === 'move') expect((await facts(p))[0]?.labels.noReminder).toBe(true)
+    })
   it('skips a location whose UIDVALIDITY changed on the server', async () => {
     gmail()
     const made = copies()

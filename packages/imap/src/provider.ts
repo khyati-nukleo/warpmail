@@ -1100,19 +1100,25 @@ export class ImapProvider implements MailProvider {
         if (target.uidValidity === selected.uidValidity) {
           await this.index.removeUids(this.accountId, target.id, uids)
           this.sources.forget(target.id, uids)
-        }
+        } else this.requestSync('all') // its stored rows are stale and would keep the label
         this.emit({ type: 'changed', accountId: this.accountId })
         return
       }
-      // All Mail holds every email on Gmail; then Inbox, then Sent; never another label folder.
-      const sent = this.review(boxes).mappings.sent?.path
+      // All Mail holds every email on Gmail; then Inbox, then Sent; never another label folder,
+      // Trash or Junk.
+      const review = this.review(boxes)
+      const roles = rolesByPath(review)
+      const sent = review.mappings.sent?.path
       const order = (b: IndexedMailbox) =>
         b.specialUse === '\\All' ? 0 : isInbox(b.path) ? 1 : b.path === sent ? 2 : 3
       const sources = rows
         .map((row) => ({ row, box: boxes.find((b) => b.id === row.mailboxId) }))
         .filter(
           (s): s is { row: IndexedMessage; box: IndexedMailbox } =>
-            !!s.box && !s.box.noSelect && !isWarpmailFolder(s.box.path, s.box.delimiter),
+            !!s.box &&
+            !s.box.noSelect &&
+            !isWarpmailFolder(s.box.path, s.box.delimiter) &&
+            !['trash', 'junk'].includes(roles.get(s.box.path) || ''),
         )
         .sort((a, b) => order(a.box) - order(b.box))
       if (!sources.length) throw gone()
@@ -1129,6 +1135,10 @@ export class ImapProvider implements MailProvider {
       const selected = await port.select(target.path)
       const labelled =
         selected.exists > 0 && (await this.withMessageId(port, messageId, selected.uidNext)).length
+      const indexed = async () =>
+        (await this.index.findByMessageId(this.accountId, messageId, target!.id)).length > 0
+      // Already labelled and indexed: nothing changes, so nothing is announced.
+      if (labelled && (await indexed())) return
       if (!labelled) {
         let copied = false
         for (const { row, box } of sources) {
@@ -1145,8 +1155,7 @@ export class ImapProvider implements MailProvider {
       }
       // Index the copy now, so reminders see the label at once.
       await this.syncMailbox(port, target)
-      if (!(await this.index.findByMessageId(this.accountId, messageId, target.id)).length)
-        throw gone()
+      if (!(await indexed())) throw gone()
       this.emit({ type: 'changed', accountId: this.accountId })
     })
   }
@@ -1335,7 +1344,15 @@ export class ImapProvider implements MailProvider {
     )
   }
   async conversationMetadata(account: Account, threadIds: string[]): Promise<Message[]> {
-    const rows = await this.index.threadMessages(this.accountId, threadIds)
+    // Reminders: label copies stay out of mutations, so moving a conversation keeps its labels.
+    const hidden = new Set(
+      (await this.index.listMailboxes(this.accountId))
+        .filter((b) => isWarpmailFolder(b.path, b.delimiter))
+        .map((b) => b.id),
+    )
+    const rows = (await this.index.threadMessages(this.accountId, threadIds)).filter(
+      (m) => !hidden.has(m.mailboxId),
+    )
     return (await this.current(rows)).map((m) => toMessage(account.id, m))
   }
   async messages(
