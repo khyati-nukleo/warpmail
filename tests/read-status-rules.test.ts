@@ -26,6 +26,7 @@ const input = (over: Record<string, unknown> = {}) => ({
   draft: draft(),
   protection: 'none' as const,
   perCopySending: true,
+  ownAddresses: ['me@example.com', 'me.alias@example.com'],
   ...over,
 })
 
@@ -105,6 +106,9 @@ describe('trackingBlock', () => {
     expect(trackingBlock(input({ draft: draft({ readStatus: false }) }))).toBe('switchedOff')
     expect(trackingBlock(input({ protection: 'sign' }))).toBe('protected')
     expect(trackingBlock(input({ protection: 'encrypt' }))).toBe('protected')
+    expect(trackingBlock(input({ draft: draft({ cc: [person('Me.Alias@Example.com')] }) }))).toBe(
+      'self',
+    )
     expect(trackingBlock(input({ draft: draft({ html: '  ' }) }))).toBe('noHtml')
     expect(trackingBlock(input({ draft: draft({ to: [person('noreply@example.org')] }) }))).toBe(
       'automated',
@@ -114,7 +118,7 @@ describe('trackingBlock', () => {
     )
     expect(trackingBlock(input({ draft: draft({ to: many }) }))).toBe('tooMany')
   })
-  it('orders checks: off beats notConfigured, unsupported beats switchedOff', () => {
+  it('orders checks: off beats notConfigured, unsupported beats switchedOff, protected beats self, self beats noHtml', () => {
     expect(trackingBlock(input({ settings: { enabled: false }, passwordSet: false }))).toBe('off')
     expect(
       trackingBlock(input({ perCopySending: false, draft: draft({ readStatus: false }) })),
@@ -122,6 +126,9 @@ describe('trackingBlock', () => {
     expect(trackingBlock(input({ protection: 'sign', draft: draft({ readStatus: false }) }))).toBe(
       'switchedOff',
     )
+    const self = draft({ bcc: [person('me@example.com')] })
+    expect(trackingBlock(input({ protection: 'sign', draft: self }))).toBe('protected')
+    expect(trackingBlock(input({ draft: { ...self, html: '' } }))).toBe('self')
   })
 })
 

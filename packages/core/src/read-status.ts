@@ -8,6 +8,7 @@ export type TrackingBlock =
   | 'notConfigured'
   | 'switchedOff'
   | 'protected'
+  | 'self'
   | 'noHtml'
   | 'automated'
   | 'tooMany'
@@ -138,6 +139,8 @@ export function trackingBlock(input: {
   draft: Pick<Draft, 'to' | 'cc' | 'bcc' | 'html' | 'readStatus'>
   protection: 'none' | 'encrypt' | 'sign'
   perCopySending: boolean
+  /** The user's own addresses, lowercased. On Gmail a copy to oneself is the merged Sent copy. */
+  ownAddresses: string[]
 }): TrackingBlock | undefined {
   const settings = input.settings ?? { enabled: true }
   if (!settings.enabled) return 'off'
@@ -145,8 +148,9 @@ export function trackingBlock(input: {
   if (!input.perCopySending) return 'unsupported'
   if (input.draft.readStatus === false) return 'switchedOff'
   if (input.protection !== 'none') return 'protected'
-  if (!input.draft.html.trim()) return 'noHtml'
   const recipients = trackedRecipients(input.draft)
+  if (recipients.some((email) => input.ownAddresses.includes(email))) return 'self'
+  if (!input.draft.html.trim()) return 'noHtml'
   if (!recipients.some((email) => !isAutomatedAddress(email))) return 'automated'
   if (recipients.length > readStatusLimits.recipients) return 'tooMany'
   return undefined

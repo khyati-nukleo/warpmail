@@ -49,6 +49,16 @@ import {
   type AddressSeen,
   type RuleSuggestion,
   suggestionTerm,
+  // Read status
+  isAutomatedAddress,
+  ownAddresses,
+  pixelUrl,
+  stripPixels,
+  trackingBlock,
+  workerBase,
+  type CopyOutcome,
+  type SubmissionOutcome,
+  type SubmissionTracking,
 } from '@inlark/core'
 import { JmapProvider } from '@inlark/jmap'
 import { publicFetch } from './public-fetch'
@@ -69,6 +79,9 @@ import {
   type TabCounts,
 } from './split-inbox'
 import { JsonStore, encryptSecret, decryptSecret, secureStorageAvailable } from './storage'
+import { imageCode, trackedMessageId } from './read-status/codes'
+import { ReadStatusSecret } from './read-status/secret'
+import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
 
 export type Connection = {
   id: string
@@ -141,10 +154,16 @@ type Journal = {
   /** The user has seen and resolved this attempt. */
   dismissed?: boolean
   at: string
+  // Read status: sent one copy per recipient; each copy's state is durable before it is sent.
+  tracked?: boolean
+  copies?: JournalCopy[]
+  /** Recipients whose copy may have arrived: never offered for recovery. */
+  unconfirmed?: string[]
 }
 /** Drafts are saved to the server only after this long without an edit; local saves are instant. */
 const draftIdleMs = 10_000
 const interruptedSend = 'Sending was interrupted before the message left. Review it and send again.'
+const closedWhileSending = 'The app closed during sending. Check delivery before retrying.'
 /** How long send waits for a draft save already in progress before asking to retry. */
 const draftSaveWaitMs = 60_000
 /** Settles when `promise` does or after `ms`, whichever comes first. Never rejects. */
@@ -259,6 +278,7 @@ export class MailService {
   private logs: { at: string; event: string; state?: string }[] = []
   private senderAvatars = new SenderAvatarResolver()
   readonly encryption: EncryptionService
+  readonly readStatusSecret: ReadStatusSecret
   private protectedLoaded = new Set<string>()
   private protectionTransition = false
   private draftWrites: Promise<unknown> = Promise.resolve()
@@ -267,6 +287,7 @@ export class MailService {
     private emit: (event: AppEvent) => void,
     private options: ServiceOptions = {},
   ) {
+    this.readStatusSecret = new ReadStatusSecret(store)
     this.encryption = new EncryptionService(store, options.crypto, (accountId, email) =>
       this.guard(
         accountId,
@@ -296,6 +317,8 @@ export class MailService {
         status: 'connecting' as const,
       })),
     )
+    // Read status: without the password nothing is tracked; sending itself is unaffected.
+    await this.readStatusSecret.load().catch(() => this.log('read-status-secret-unavailable'))
     this.localDrafts = new Map((await this.store.read<Draft[]>('drafts', [])).map((d) => [d.id, d]))
     this.journals = new Map(
       (await this.store.read<Journal[]>('submissions', [])).map((j) => [j.draftId, j]),
@@ -327,13 +350,15 @@ export class MailService {
           error: note.error,
           errorKind: note.errorKind,
         })
-      if (journal.state === 'submitting') {
+      if (journal.state === 'submitting' && journal.copies)
+        await this.recoverTracked(journal, draft)
+      else if (journal.state === 'submitting') {
         journal.state = 'uncertain'
         if (draft)
           this.localDrafts.set(draft.id, {
             ...draft,
             status: 'uncertain',
-            error: 'The app closed during sending. Check delivery before retrying.',
+            error: closedWhileSending,
           })
       }
       if (journal.sentCopy === 'appending') journal.sentCopy = 'uncertain'
@@ -342,6 +367,29 @@ export class MailService {
     await this.persistJournal()
     void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id)))
     this.timer = setInterval(() => void this.refresh(), 60_000)
+  }
+  /** Read status: a tracked send the app closed during settles from its copies, never resent. */
+  private async recoverTracked(journal: Journal, draft?: Draft) {
+    journal.copies = recoverCopies(journal.copies!)
+    const { state, ...settled } = settleCopies(journal.copies)
+    Object.assign(journal, settled, { state })
+    if (state === 'rejected') {
+      // Nothing arrived: like a refused send, the draft keeps its content and says why.
+      const error = settled.rejected[0]?.reason || interruptedSend
+      Object.assign(journal, { error, errorKind: 'rejected', at: new Date().toISOString() })
+      journal.sentCopy = journal.previousDraft = journal.mime = undefined
+      await this.removeMime(journal.draftId)
+      if (draft)
+        this.localDrafts.set(draft.id, { ...draft, status: 'error', error, errorKind: 'rejected' })
+    } else if (!draft) return
+    else if (state === 'sent') await this.completeDraft(draft)
+    else if (state === 'partial') this.localDrafts.set(draft.id, { ...draft, status: 'sent' })
+    else
+      this.localDrafts.set(draft.id, {
+        ...draft,
+        status: 'uncertain',
+        error: closedWhileSending,
+      })
   }
   encryptionStatus = () => this.encryption.status()
   private async sendingIdentity(accountId: string, identityId: string) {
@@ -1624,16 +1672,22 @@ export class MailService {
       emailId: journal.emailId,
       envelope: journal.envelope || { from: '', to: [] },
       mime: journal.mime ? await readFile(this.mimePath(journal.draftId)) : undefined,
+      // Read status: a retry after a restart must replace the server's copy too.
+      ...(journal.tracked ? { replaceServerCopies: true } : {}),
     }
   }
-  /** A unique Message-ID per attempt, on the domain of the address the message is from. */
-  private messageIdFor(account: Account, identityId: string) {
+  /** The domain of the address the message is from. */
+  private messageDomain(account: Account, identityId: string) {
     const email = account.aliases?.find((a) => a.id === identityId)?.email || account.email
     const domain = email
       .split('@')[1]
       ?.toLowerCase()
       .replace(/[^a-z0-9.-]/g, '')
-    return randomUUID() + '@' + (domain || 'inlark.invalid')
+    return domain || 'inlark.invalid'
+  }
+  /** A unique Message-ID per attempt, on the domain of the address the message is from. */
+  private messageIdFor(account: Account, identityId: string) {
+    return randomUUID() + '@' + this.messageDomain(account, identityId)
   }
   private rejectedAddresses(draft: Draft, journal: Journal): Address[] {
     const refused = new Set((journal.rejected || []).map((r) => r.email.toLowerCase()))
@@ -1648,12 +1702,21 @@ export class MailService {
     const sentCopy = filing ? {} : { sentCopy: pending ? ('pending' as const) : ('filed' as const) }
     if (journal.state === 'partial') {
       const rejected = draft ? this.rejectedAddresses(draft, journal) : []
+      const refused = journal.rejected?.length || rejected.length
+      const unconfirmed = journal.unconfirmed?.length
       return {
         status: 'partial',
         message:
           'Sent to some recipients. ' +
-          (journal.rejected?.length || rejected.length) +
-          ' refused the message.' +
+          (!journal.tracked
+            ? refused + ' refused the message.'
+            : // Read status: one copy each, so a copy can also be lost with the connection.
+              [
+                refused ? refused + " didn't get it." : '',
+                unconfirmed ? `Delivery to ${unconfirmed} isn't confirmed.` : '',
+              ]
+                .filter(Boolean)
+                .join(' ')) +
           (pending ? ' Sent copy pending.' : ''),
         rejected,
         ...sentCopy,
@@ -1750,15 +1813,21 @@ export class MailService {
     if (existing && existing.state !== 'rejected') return this.reconcile(draft.id)
     draft = sendDraftSchema.parse(await this.saveDraft(draft))
     const { provider, account } = this.provider(draft.accountId)
+    // Read status: a quoted Worker image never goes out again, tracked or not.
+    const base = workerBase(this.settings.readStatus?.workerUrl)
+    const content = base ? { ...draft, html: stripPixels(draft.html, base) } : draft
+    const tracking = this.trackingFor(content, account, provider)
     this.busyDrafts.add(draft.id)
     const journal: Journal = {
       draftId: draft.id,
       accountId: draft.accountId,
       subject: draft.subject,
       messageId:
-        provider.capabilities.sentCopy === 'client'
+        tracking?.messageId ??
+        (provider.capabilities.sentCopy === 'client'
           ? this.messageIdFor(account, draft.identityId)
-          : draft.id + '@inlark.local',
+          : draft.id + '@inlark.local'),
+      ...(tracking && { tracked: true }),
       state: 'preparing',
       at: new Date().toISOString(),
     }
@@ -1793,14 +1862,15 @@ export class MailService {
       const protectedMime =
         (draft.encryption && draft.encryption !== 'none') ||
         this.encryption.identity(draft.accountId, draft.identityId)?.enabled
-          ? await this.protectedMime(draft, journal.messageId!)
+          ? await this.protectedMime(content, journal.messageId!)
           : undefined
-      uploaded = protectedMime ? draft : await this.uploadDraft(draft)
+      uploaded = protectedMime ? content : await this.uploadDraft(content)
       const outgoing = await provider.prepareSubmission(
         account,
         uploaded,
         journal.messageId!,
         protectedMime,
+        tracking?.images,
       )
       journal.emailId = outgoing.emailId
       journal.envelope = outgoing.envelope
@@ -1809,6 +1879,14 @@ export class MailService {
         journal.mime = true
       }
       if (provider.capabilities.sentCopy === 'client') journal.sentCopy = 'pending'
+      if (tracking) {
+        // Read status: the server's own Sent copy is a recipient's copy, so it is replaced.
+        outgoing.replaceServerCopies = true
+        journal.copies = (outgoing.copies ?? []).map((c) => ({
+          recipient: c.recipient,
+          state: 'pending' as const,
+        }))
+      }
       // Once the message is accepted, the server draft it replaces must go, even after a restart.
       if (draft.serverId && draft.serverId !== journal.emailId)
         journal.previousDraft = {
@@ -1822,14 +1900,14 @@ export class MailService {
       this.localDrafts.set(draft.id, { ...uploaded, status: 'sending' })
       await this.persistDrafts()
       attempted = true
-      const outcome = await this.guard(account.id, (p, a) =>
-        p.submit(a, outgoing, draft.identityId),
-      )
+      const outcome = tracking
+        ? await this.submitTracked(journal, account, outgoing)
+        : await this.guard(account.id, (p, a) => p.submit(a, outgoing, draft.identityId))
       accepted = true
       this.outgoing(account.connectionId, undefined)
       journal.accepted = outcome.accepted
       journal.rejected = outcome.rejected
-      journal.state = outcome.rejected.length ? 'partial' : 'sent'
+      journal.state = outcome.rejected.length || journal.unconfirmed?.length ? 'partial' : 'sent'
       // Acceptance is recorded before filing or cleanup, which may fail independently.
       await this.persistJournal()
       // A partial send keeps its content so the refused recipients can be recovered.
@@ -1877,6 +1955,76 @@ export class MailService {
     } finally {
       if (!finishing) this.busyDrafts.delete(draft.id)
     }
+  }
+  /** Read status: the tracked Message-ID and images, or undefined for an untracked send. */
+  private trackingFor(draft: Draft, account: Account, provider: MailProvider) {
+    const settings = this.settings.readStatus
+    const base = workerBase(settings?.workerUrl)
+    const password = this.readStatusSecret.get()
+    const encrypted =
+      (draft.encryption && draft.encryption !== 'none') ||
+      this.encryption.identity(draft.accountId, draft.identityId)?.enabled
+    const block = trackingBlock({
+      settings,
+      passwordSet: !!password,
+      draft,
+      protection: !encrypted ? 'none' : draft.encryption === 'encrypt' ? 'encrypt' : 'sign',
+      perCopySending: !!provider.submitCopies && provider.capabilities.sentCopy === 'client',
+      ownAddresses: ownAddresses(this.accounts),
+    })
+    if (block || !base || !password) {
+      this.log('read-status-untracked', block)
+      return undefined
+    }
+    const messageId = trackedMessageId(password, this.messageDomain(account, draft.identityId))
+    const images: SubmissionTracking = {
+      imageFor: (recipient) =>
+        isAutomatedAddress(recipient)
+          ? undefined
+          : pixelUrl(base, imageCode(password, messageId, recipient)),
+    }
+    return { messageId, images }
+  }
+  /**
+   * Read status: sends one copy per recipient over one session. Each copy is durable as
+   * `sending` before it leaves, so a crash never sends to anyone twice. Throws, like `submit`,
+   * when nothing was accepted.
+   */
+  private async submitTracked(
+    journal: Journal,
+    account: Account,
+    outgoing: OutgoingMessage,
+  ): Promise<SubmissionOutcome> {
+    const copies = journal.copies!
+    const record = (recipient: string, state: JournalCopy['state'], reason?: string) => {
+      const copy = copies.find((c) => c.recipient === recipient)
+      if (copy) Object.assign(copy, { state, reason })
+    }
+    const progress = async (recipient: string, previous?: CopyOutcome) => {
+      if (previous) record(previous.recipient, previous.result, previous.reason)
+      record(recipient, 'sending')
+      await this.persistJournal().catch((error) => {
+        if (previous) throw error
+        // Before the first copy nothing has left, and nothing will: a plain not-sent.
+        record(recipient, 'pending')
+        throw new ProviderError(
+          'submission',
+          'The send record could not be saved, so nothing was sent. Try again.',
+        )
+      })
+    }
+    const outcomes = await this.guard(account.id, (p, a) => p.submitCopies!(a, outgoing, progress))
+    for (const o of outcomes) record(o.recipient, o.result, o.reason)
+    const { state, ...settled } = settleCopies(copies)
+    journal.unconfirmed = settled.unconfirmed
+    if (state === 'rejected')
+      throw new ProviderError(
+        'submissionRejected',
+        settled.rejected[0]?.reason || 'The message was not sent.',
+      )
+    if (state === 'uncertain')
+      throw new ProviderError('submissionUncertain', 'Delivery is not confirmed.')
+    return settled
   }
   /**
    * Finishes an accepted send after it has been reported: files the Sent copy and removes the
