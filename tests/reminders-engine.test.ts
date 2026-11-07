@@ -265,6 +265,20 @@ describe('ReminderEngine', () => {
     await settle()
     expect(h.returned).toHaveBeenLastCalledWith([{ accountId: 'a1', threadId: 't3' }])
   })
+  it('returns nothing until the provider has synced in full since connecting', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    let ready = false
+    h.provider.readyForReminders = vi.fn(() => ready)
+    h.engine.start()
+    await settle()
+    // Shown from the index as it was, but nothing moves on it.
+    expect(await h.engine.due('a1')).toHaveLength(1)
+    expect(h.returned).not.toHaveBeenCalled()
+    ready = true
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledWith([{ accountId: 'a1', threadId: 't1' }])
+  })
   it('never returns a forgot-to-reply or one not yet due', async () => {
     const h = make({
       facts: [

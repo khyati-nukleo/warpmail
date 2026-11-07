@@ -868,6 +868,59 @@ describe('IMAP reading', () => {
     expect(server.box('INBOX').messages).toHaveLength(0)
     expect(server.box('Archive').messages).toHaveLength(2)
   })
+  it('returns nothing on the index left from last time until a full sync since connecting', async () => {
+    const ask = {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    }
+    server.deliver('Archive', ask)
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    // Pat answers while the app is closed.
+    server.deliver('INBOX', {
+      messageId: 'answer@x',
+      references: ['ask@x'],
+      subject: 'Re: Plans',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(Date.now() - 86_400_000).toISOString(),
+      text: 'Confirmed.',
+    })
+    await restart()
+    // Long enough for the launch catch-up (half a second) to have run.
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('Archive').messages).toHaveLength(1)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+    // The full pass sees the answer, so there is still nothing to return.
+    await (provider() as any).syncPass('all')
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('Archive').messages).toHaveLength(1)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+  })
+  it('returns a due follow-up once a full sync since connecting has run', async () => {
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await restart()
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('inbox')
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('all')
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+  })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {
       messageId: 'waiting@x',

@@ -671,6 +671,11 @@ export interface MailProvider {
   ): Promise<void>
   /** Asks for a sync soon, such as when an email just filed isn't indexed yet. */
   requestSync?(scope: 'inbox' | 'all'): void
+  /**
+   * False until a full sync has run since connecting: until then the index may predate a reply
+   * or a dismissal made elsewhere, and returning to the inbox would act on it. Omitted: ready.
+   */
+  readyForReminders?(): boolean
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }

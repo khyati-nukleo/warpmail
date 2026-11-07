@@ -885,6 +885,22 @@ describe('IMAP read-ahead', () => {
     expect(read.indexOf(9)).toBe(1)
   })
   // Reminders
+  it('is ready for reminders only after a full pass since connecting', async () => {
+    const p = await connected()
+    const events: string[] = []
+    p.subscribe((e) => void events.push(e.type))
+    expect(p.readyForReminders()).toBe(false)
+    await (p as any).syncPass('inbox')
+    expect(p.readyForReminders()).toBe(false)
+    await sync(p)
+    expect(p.readyForReminders()).toBe(true)
+    // Announced even with nothing new, so held-back returns run.
+    expect(events).toContain('changed')
+    await p.connect()
+    expect(p.readyForReminders()).toBe(false)
+    await sync(p)
+    expect(p.readyForReminders()).toBe(true)
+  })
   it('reads message bodies in the background without counting as the user’s own open', async () => {
     for (let i = 1; i <= 3; i++)
       server.deliver('Sent', {

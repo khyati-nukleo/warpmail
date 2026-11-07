@@ -317,6 +317,9 @@ export class ReminderEngine {
       const derived = await this.derived(id)
       // In the background: the inbox never waits for bodies to be read.
       if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)
+      // Showing reminders from an index left from last time is fine; moving mail on it is not.
+      // The provider announces its first full sync, which recomputes.
+      if (target.provider.readyForReminders?.() === false) continue
       for (const { reminder, inInbox } of derived)
         if (reminder.kind === 'followUp' && !inInbox && reminder.dueMs <= now)
           waiting.push({

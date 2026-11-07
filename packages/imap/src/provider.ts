@@ -244,6 +244,9 @@ export class ImapProvider implements MailProvider {
   private wakeLoop?: () => void
   private pending: 'none' | 'inbox' | 'all' = 'none'
   private lastSync = 0
+  // Reminders: a full pass has run since this connection; inbox-only passes set lastSync too.
+  private connection = 0
+  private fullSince = -1
   private lastFull = new Map<string, number>()
   private uidLists = new Map<string, number[]>()
   private searches = new Map<string, { ids: string[]; incomplete: boolean; at: number }>()
@@ -363,6 +366,7 @@ export class ImapProvider implements MailProvider {
 
   async connect(): Promise<Account[]> {
     this.disposed = false
+    this.connection++ // Reminders
     await this.run(async (port) => {
       const boxes = await this.refreshFolders(port)
       this.readStatus = readStatusServer(port, boxes)
@@ -573,6 +577,9 @@ export class ImapProvider implements MailProvider {
         if (!this.disposed && this.pending === 'none') await this.wait(this.timing.reconcileMs)
       } catch (error) {
         if (this.disposed) break
+        // Reminders: changes may be missed while the connection is down.
+        if (isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline'))
+          this.connection++
         if (isProviderError(error, 'authentication')) this.setState('authentication', error.message)
         else if (isProviderError(error, 'network', 'tls', 'certificate'))
           this.setState('offline', error.message)
@@ -613,6 +620,7 @@ export class ImapProvider implements MailProvider {
     return boxes.filter((b) => !b.noSelect).sort((a, b) => rank(a) - rank(b))
   }
   private async syncPass(scope: 'inbox' | 'all') {
+    const connection = this.connection // Reminders
     const boxes = await this.run(async (port) => this.refreshFolders(port), true)
     let changed = false
     for (const box of this.ordered(boxes)) {
@@ -621,7 +629,10 @@ export class ImapProvider implements MailProvider {
       changed = (await this.run((port) => this.syncMailbox(port, box), true)) || changed
     }
     this.lastSync = Date.now()
-    if (changed) this.emit({ type: 'changed', accountId: this.accountId })
+    // Reminders: the first full pass announces itself, so held-back returns run.
+    const ready = scope === 'all' && connection === this.connection && this.fullSince !== connection
+    if (ready) this.fullSince = connection
+    if (changed || ready) this.emit({ type: 'changed', accountId: this.accountId })
     await this.emitProgress()
   }
   private async emitProgress() {
@@ -1018,6 +1029,10 @@ export class ImapProvider implements MailProvider {
     )
   }
   // Reminders
+  /** Whether a full pass has run since connecting, so the index is current enough to act on. */
+  readyForReminders(): boolean {
+    return this.fullSince === this.connection
+  }
   /**
    * Counted mail is every selectable folder but Drafts, Trash, Junk and the Warpmail label
    * folders; Drafts still goes along, since Gmail lists drafts in All Mail too.
