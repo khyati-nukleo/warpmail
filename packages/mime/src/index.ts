@@ -18,6 +18,8 @@ export interface ComposeInput {
   attachments: { name: string; type: string; cid?: string; content: Uint8Array }[]
   /** Drafts keep Bcc so another client resuming the draft sees it; transmitted/Sent copies never do. */
   keepBcc?: boolean
+  /** Read status: the shared part of every multipart boundary, so copies' headers are identical. */
+  boundary?: string
 }
 
 export interface ParsedMime {
@@ -79,6 +81,7 @@ export async function composeMime(input: ComposeInput): Promise<Uint8Array> {
     disableUrlAccess: true,
     // The default prefix names the library; boundaries should not identify the client.
     boundaryPrefix: '--',
+    ...(input.boundary ? { baseBoundary: input.boundary } : {}),
     // Canonical CRLF, so the bytes stored as a Sent copy are exactly the bytes transmitted.
     newline: 'windows',
   }).compile()

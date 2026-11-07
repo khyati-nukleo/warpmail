@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   accountKey,
   accountColors,
@@ -1672,6 +1672,7 @@ export class ImapProvider implements MailProvider {
       html?: string
       date?: Date
       attachments?: { name: string; type: string; cid?: string; content: Uint8Array }[]
+      boundary?: string
     } = {}, // Read status
   ) {
     const sender = this.sender(account, draft.identityId)
@@ -1689,6 +1690,7 @@ export class ImapProvider implements MailProvider {
       date: override.date ?? new Date(),
       attachments: override.attachments ?? (await this.readAttachments(draft)),
       keepBcc,
+      boundary: override.boundary,
     })
   }
   private readAttachments(draft: Draft) {
@@ -1758,11 +1760,16 @@ export class ImapProvider implements MailProvider {
     // Bounces go to the address the message is from, as recipients would expect.
     const from = this.sender(account, draft.identityId).email
     if (tracking && !precomposed) {
-      // Read status: copies share one date so their headers are identical.
+      // Read status: copies share one date and boundary so their headers are identical.
       const date = new Date()
+      const boundary = randomBytes(8).toString('hex')
       // Read once, so every copy carries the same bytes.
       const attachments = await this.readAttachments(draft)
-      const mime = await this.compose(account, draft, messageId, true, { date, attachments })
+      const mime = await this.compose(account, draft, messageId, true, {
+        date,
+        attachments,
+        boundary,
+      })
       const copies = []
       for (const recipient of trackedRecipients(draft)) {
         const src = tracking.imageFor(recipient)
@@ -1773,6 +1780,7 @@ export class ImapProvider implements MailProvider {
             html,
             date,
             attachments,
+            boundary,
           }),
         })
       }

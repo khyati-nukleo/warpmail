@@ -65,10 +65,9 @@ const tracking = {
   imageFor: (r: string) => (r === 'kim@example.org' ? undefined : url(r)),
 }
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
-const headerBlock = (bytes: Uint8Array) =>
-  text(bytes)
-    .split(/\r?\n\r?\n/)[0]
-    .replace(/boundary="?[^";\r\n]+"?/gi, 'boundary=X')
+/** The raw header block, byte for byte (boundaries included). */
+const headerBlock = (bytes: Uint8Array) => text(bytes).split('\r\n\r\n')[0]
+const boundaryOf = (bytes: Uint8Array) => /boundary="?([^";\r\n]+)"?/i.exec(headerBlock(bytes))?.[1]
 
 describe('read status copies', () => {
   it('builds one copy per recipient with identical headers', async () => {
@@ -101,6 +100,32 @@ describe('read status copies', () => {
     }
     const blocks = out.copies!.map((c) => headerBlock(c.mime))
     expect(new Set(blocks).size).toBe(1)
+    // The clean copy differs only by its Bcc line.
+    const cleanBlock = headerBlock(out.mime!)
+      .split('\r\n')
+      .filter((line) => !/^bcc:/i.test(line))
+      .join('\r\n')
+    expect(cleanBlock).toBe(blocks[0])
+  })
+  it('every copy and the clean copy share one boundary, new for each send', async () => {
+    const first = await provider.prepareSubmission(
+      account,
+      draft(),
+      'id1@example.com',
+      undefined,
+      tracking,
+    )
+    const second = await provider.prepareSubmission(
+      account,
+      draft(),
+      'id2@example.com',
+      undefined,
+      tracking,
+    )
+    const boundaries = [first.mime!, ...first.copies!.map((c) => c.mime)].map(boundaryOf)
+    expect(boundaries[0]).toBeDefined()
+    expect(new Set(boundaries).size).toBe(1)
+    expect(boundaryOf(second.mime!)).not.toBe(boundaries[0])
   })
   it('each copy carries only its own image', async () => {
     const out = await provider.prepareSubmission(
@@ -133,6 +158,8 @@ describe('read status copies', () => {
     const out = await provider.prepareSubmission(account, draft(), 'id1@example.com')
     expect(out.copies).toBeUndefined()
     expect(text(out.mime!)).not.toMatch(/^Bcc:/im)
+    const again = await provider.prepareSubmission(account, draft(), 'id1@example.com')
+    expect(boundaryOf(again.mime!)).not.toBe(boundaryOf(out.mime!))
   })
   it('reads each attachment once and every copy carries the same bytes', async () => {
     const withFile: Draft = {
