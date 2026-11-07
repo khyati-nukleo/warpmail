@@ -11,10 +11,14 @@ const list = (values: readonly unknown[]) => JSON.stringify(values)
  * mailboxes. Every list is one JSON parameter, and the CROSS JOINs make each list drive its
  * lookups: without index statistics SQLite misjudges json_each sizes.
  *
- * `recent` reads `messages_mailbox_received` once per mailbox; `latest` then reads only those
- * threads' entries in `messages_mailbox_person`, which holds the person test. With a single
- * max() aggregate, SQLite takes the bare `seq` from the row holding the max, as in
- * `conversationSource`. Gmail's copies of one email share a thread, so they make one fact.
+ * `recent` reads `messages_mailbox_received` once per mailbox; `latest` then reads those
+ * threads' entries in `messages_mailbox_person`, which holds the person test (an always sender
+ * with subject words also reads that message's row). With a single max() aggregate, SQLite
+ * takes the bare `seq` from the row holding the max, as in `conversationSource`. Gmail's copies
+ * of one email share a thread, so they make one fact.
+ *
+ * Gmail also lists drafts in All Mail, so an email with a copy in Drafts is unsent and never
+ * the fact. Drafts are few: the list is read once from the index and probed per row.
  */
 export function reminderFactsQuery(
   accountId: string,
@@ -34,15 +38,17 @@ export function reminderFactsQuery(
             CROSS JOIN messages r ON r.account_id = ? AND r.mailbox_id = b.value
               AND r.received_ms >= ?
           UNION ALL
-          SELECT coalesce(a.thread_id, j.value), 1 FROM json_each(?) j
-            LEFT JOIN thread_aliases a ON a.account_id = ? AND a.alias = j.value)
+          SELECT coalesce(ta.thread_id, j.value), 1 FROM json_each(?) j
+            LEFT JOIN thread_aliases ta ON ta.account_id = ? AND ta.alias = j.value)
         GROUP BY t
       ), latest AS MATERIALIZED (
         SELECT g.t, g.listed, max(m.received_ms) AS ms, m.seq AS s FROM recent g
           CROSS JOIN json_each(?) b
           CROSS JOIN messages m ON m.account_id = ? AND m.mailbox_id = b.value
             AND m.thread_id = g.t
-        WHERE ${test.sql}
+        WHERE ${test.sql} AND (m.email_id IS NULL OR m.email_id NOT IN (
+          SELECT d.email_id FROM messages d
+          WHERE d.account_id = ? AND d.mailbox_id = ? AND d.email_id IS NOT NULL))
         GROUP BY g.t
       )
       SELECT l.t AS thread_id, m.message_id, m.received_at, m.from_email, m.to_addr,
@@ -64,6 +70,8 @@ export function reminderFactsQuery(
       mailboxIds,
       accountId,
       ...test.params,
+      accountId,
+      query.draftsId ?? null,
       accountId,
       query.inboxId,
       accountId,

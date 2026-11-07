@@ -18,7 +18,14 @@ import type { FolderListing, MetadataIndex, NewMessage, ReminderFactsQuery } fro
 let directory: string
 let path: string
 let index: MetadataIndex
-let boxes: { inbox: string; all: string; sent: string; noReminder: string; followUp: string }
+let boxes: {
+  inbox: string
+  all: string
+  sent: string
+  noReminder: string
+  followUp: string
+  drafts: string
+}
 
 const folder = (path: string, specialUse: string | null = null): FolderListing => ({
   path,
@@ -30,7 +37,8 @@ const folder = (path: string, specialUse: string | null = null): FolderListing =
   noSelect: false,
 })
 
-const day = (n: number) => new Date(Date.UTC(2024, 0, 1) + n * 3600_000).toISOString()
+/** `n` hours into 2024. */
+const hour = (n: number) => new Date(Date.UTC(2024, 0, 1) + n * 3600_000).toISOString()
 const me = [{ name: 'Me', email: 'me@example.com' }]
 const ada = [{ name: 'Ada', email: 'ada@example.com' }]
 const bo = [{ name: 'Bo', email: 'bo@example.org' }]
@@ -54,7 +62,7 @@ function message(mailboxId: string, uid: number, extra: Partial<NewMessage> = {}
     cc: [],
     bcc: [],
     replyTo: [],
-    receivedAt: day(uid),
+    receivedAt: hour(uid),
     size: 1000 + uid,
     flags: [],
     hasAttachment: false,
@@ -73,7 +81,8 @@ function facts(extra: Partial<ReminderFactsQuery> = {}) {
     mailboxIds: [boxes.inbox, boxes.all, boxes.sent],
     labelIds: { noReminder: boxes.noReminder, followUp: boxes.followUp },
     important,
-    sinceMs: Date.parse(day(0)),
+    sinceMs: Date.parse(hour(0)),
+    draftsId: boxes.drafts,
     ...extra,
   })
 }
@@ -85,12 +94,13 @@ async function threadOf(uid: number, mailboxId = boxes.inbox) {
 
 async function open() {
   index = openInProcessIndex(path)
-  const [inbox, all, sentBox, noReminder, followUp] = await index.syncMailboxes('a', [
+  const [inbox, all, sentBox, noReminder, followUp, drafts] = await index.syncMailboxes('a', [
     folder('INBOX'),
     folder('[Gmail]/All Mail', '\\All'),
     folder('[Gmail]/Sent Mail', '\\Sent'),
     folder('Warpmail/No reminder'),
     folder('Warpmail/Follow up'),
+    folder('[Gmail]/Drafts', '\\Drafts'),
   ])
   boxes = {
     inbox: inbox!.id,
@@ -98,6 +108,7 @@ async function open() {
     sent: sentBox!.id,
     noReminder: noReminder!.id,
     followUp: followUp!.id,
+    drafts: drafts!.id,
   }
 }
 
@@ -118,7 +129,7 @@ describe('reminder facts', () => {
       {
         threadId: await threadOf(1),
         messageId: 'm1@example.com',
-        receivedAt: day(1),
+        receivedAt: hour(1),
         fromEmail: 'ada@example.com',
         to: ['me@example.com'],
         inInbox: true,
@@ -181,14 +192,14 @@ describe('reminder facts', () => {
     await index.upsertMessages('a', [
       message(boxes.inbox, 1, { emailId: 'e1' }),
       // Same email, later date: it would be the latest if label folders counted.
-      message(boxes.noReminder, 1, { emailId: 'e1', receivedAt: day(5) }),
+      message(boxes.noReminder, 1, { emailId: 'e1', receivedAt: hour(5) }),
       // A thread that is only in a label folder.
       message(boxes.followUp, 7),
     ])
     expect(await facts()).toEqual([
       expect.objectContaining({
         messageId: 'm1@example.com',
-        receivedAt: day(1),
+        receivedAt: hour(1),
         labels: { noReminder: true, followUp: false },
       }),
     ])
@@ -196,12 +207,12 @@ describe('reminder facts', () => {
 
   it('stores ask-checks by Message-ID and lists Sent mail still unchecked', async () => {
     await index.upsertMessages('a', [sent(1), sent(2)])
-    const since = Date.parse(day(0))
+    const since = Date.parse(hour(0))
     const ids = { 1: (await index.messagesAt('a', boxes.sent, [1]))[0]!.id }
     const needed = await index.askChecksNeeded('a', boxes.sent, since, 10)
     expect(needed.map((n) => n.messageId)).toEqual(['m2@example.com', 'm1@example.com'])
     expect(needed[1]).toEqual({ id: ids[1], messageId: 'm1@example.com' })
-    expect(await index.askChecksNeeded('a', boxes.sent, Date.parse(day(2)), 10)).toHaveLength(1)
+    expect(await index.askChecksNeeded('a', boxes.sent, Date.parse(hour(2)), 10)).toHaveLength(1)
     expect(await index.askChecksNeeded('a', boxes.sent, since, 1)).toHaveLength(1)
 
     await index.setAskChecks('a', [{ messageId: 'm1@example.com', asks: true }])
@@ -230,7 +241,7 @@ describe('reminder facts', () => {
         automation: { listId: '<news.example>', precedence: null, autoSubmitted: null },
       }),
     ])
-    const sinceMs = Date.parse(day(5))
+    const sinceMs = Date.parse(hour(5))
     const [one, two] = [await threadOf(1), await threadOf(2)]
     expect(await facts({ sinceMs })).toEqual([])
     expect((await facts({ sinceMs, threadIds: [one] })).map((f) => f.threadId)).toEqual([one])
@@ -248,8 +259,36 @@ describe('reminder facts', () => {
     ])
     const merged = await threadOf(3)
     const old = merged === one ? two : one
-    const found = await facts({ sinceMs: Date.parse(day(9)), threadIds: [old] })
+    const found = await facts({ sinceMs: Date.parse(hour(9)), threadIds: [old] })
     expect(found.map((f) => [f.threadId, f.messageId])).toEqual([[merged, 'm3@example.com']])
+  })
+
+  it('ignores my unsent draft reply, which Gmail also lists in All Mail', async () => {
+    const draft = { from: me, to: ada, inReplyTo: ['m1@example.com'], emailId: 'd2' }
+    await index.upsertMessages('a', [
+      message(boxes.inbox, 1, { emailId: 'e1' }),
+      message(boxes.all, 2, { ...draft, flags: ['\\Draft'] }),
+      message(boxes.drafts, 2, { ...draft, flags: ['\\Draft'] }),
+    ])
+    const found = await facts()
+    expect(found.map((f) => [f.messageId, f.fromEmail])).toEqual([
+      ['m1@example.com', 'ada@example.com'],
+    ])
+  })
+
+  it('counts an automated sender on the Important always list as a person', async () => {
+    await index.upsertMessages('a', [
+      message(boxes.inbox, 1, {
+        from: [{ name: 'News', email: 'news@example.org' }],
+        unsubscribe: { url: 'https://list.example/u', oneClick: true },
+      }),
+    ])
+    expect(await facts()).toEqual([])
+    const always = { ...important, always: [{ address: 'news@example.org', words: [] }] }
+    const found = await facts({ important: always })
+    expect(found.map((f) => [f.messageId, f.fromEmail])).toEqual([
+      ['m1@example.com', 'news@example.org'],
+    ])
   })
 
   it('treats a sender on the Important never list as automated', async () => {
@@ -304,6 +343,7 @@ describe('schema v5', () => {
         },
         sinceMs: 0,
         threadIds: ['t1'],
+        draftsId: boxes.drafts,
       })!
       const details = [
         ...plan(query.sql, query.params),
@@ -314,7 +354,7 @@ describe('schema v5', () => {
         expect(detail).not.toMatch(/^SCAN m\b/)
         expect(detail).not.toMatch(/^SCAN messages\b/)
         // Nor any other read of messages or the checks that is not a lookup.
-        expect(detail).not.toMatch(/^SCAN [rinfcx]\b/)
+        expect(detail).not.toMatch(/^SCAN (?:[rinfcxd]|ta)\b/)
       }
     } finally {
       db.close()

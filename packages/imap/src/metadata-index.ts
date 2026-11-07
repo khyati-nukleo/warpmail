@@ -299,4 +299,6 @@ export interface ReminderFactsQuery {
   /** Threads with mail in `mailboxIds` since then; older ones only when in `threadIds`. */
   sinceMs: number
   threadIds?: string[]
+  /** Emails with a copy here are unsent drafts (Gmail lists them in All Mail too). */
+  draftsId?: string
 }
