@@ -185,6 +185,8 @@ export const draftSchema = z.object({
   errorKind: z
     .enum(['conflict', 'connection', 'outgoingAuthentication', 'certificate', 'rejected'])
     .optional(),
+  // Read status
+  readStatus: z.boolean().optional(),
 })
 export const sendDraftSchema = draftSchema
   .refine(
@@ -232,6 +234,10 @@ export const settingsSchema = z.object({
       always: importantListSchema(alwaysSenderSchema),
       never: importantListSchema(senderSchema),
     })
+    .optional(),
+  // Read status
+  readStatus: z
+    .object({ enabled: z.boolean(), workerUrl: z.string().max(2048).optional() })
     .optional(),
 })
 export const ipcSchemas = {

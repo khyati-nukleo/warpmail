@@ -231,6 +231,8 @@ export interface Draft {
   error?: string
   /** What kind of problem `error` describes, so the composer can offer the right recovery. */
   errorKind?: DraftErrorKind
+  // Read status: false = switched off for this email.
+  readStatus?: boolean
 }
 export type DraftErrorKind =
   'conflict' | 'connection' | 'outgoingAuthentication' | 'certificate' | 'rejected'
@@ -257,6 +259,12 @@ export interface Settings {
   /** Inbox split tabs, in display order. */
   splitTabs?: SplitTab[]
   important?: ImportantSettings
+  // Read status: absent is treated as `{ enabled: true }`.
+  readStatus?: ReadStatusSettings
+}
+export interface ReadStatusSettings {
+  enabled: boolean
+  workerUrl?: string
 }
 export const defaultSettings: Settings = {
   theme: 'dark',
