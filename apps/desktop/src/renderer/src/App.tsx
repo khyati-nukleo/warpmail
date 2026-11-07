@@ -2602,6 +2602,7 @@ export function App() {
             onClose={() => setComposer(undefined)}
             onOpenAccounts={() => openSettings('accounts')}
             onOpenEncryption={() => openSettings('encryption')}
+            onOpenAiSettings={() => openSettings('ai')}
             notify={notify}
             onSaved={() => void queryClient.invalidateQueries({ queryKey: ['drafts'] })}
             onSend={sendInBackground}
