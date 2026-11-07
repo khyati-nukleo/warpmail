@@ -8,6 +8,9 @@ import {
   type SnoozeOption,
 } from './snooze-model'
 
+// Focus on mount, as an input's autoFocus does: the dialog leaves focus alone once it is inside.
+const focusOnMount = (el: HTMLElement | null) => el?.focus({ preventScroll: true })
+
 /** Choose when something comes back: three presets or a date (9:00 that morning). */
 export function SnoozePicker({
   open,
@@ -39,8 +42,8 @@ export function SnoozePicker({
   const until = dateInputToUntil(date, clock)
   const choose = (index: number) => {
     const option = options[index]
-    if (option.id === 'date') setPicking(true)
-    else onPick((option as SnoozeOption).until)
+    if ('until' in option) onPick(option.until)
+    else setPicking(true)
   }
   return (
     <Modal
@@ -79,7 +82,7 @@ export function SnoozePicker({
           aria-label="Snooze until"
           aria-activedescendant={listId + '-' + active}
           tabIndex={0}
-          autoFocus
+          ref={focusOnMount}
           className="outline-none -mx-1.5 px-1.5"
           onKeyDown={(event) => {
             const next = moveActive(active, options.length, event.key, event.ctrlKey)
