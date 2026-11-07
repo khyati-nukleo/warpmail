@@ -16,7 +16,7 @@ Under each sent email in a conversation, every recipient has a status:
 | **Delivered to Apple Mail, can't tell** | Only Apple's automatic image load was seen. Apple Mail loads images on delivery, whether or not anyone reads. |
 | **No signal yet**                       | Nothing seen. Images may be blocked, or the email may be unread.                                              |
 
-A reply always counts as opened.
+A reply from a person always counts as opened. Out-of-office and other automatic replies don't.
 
 The conversation list shows a **small eye** on emails someone has opened. There are no desktop notifications.
 
@@ -125,23 +125,24 @@ Decided with Khyati:
 6. Counting as described, with the caveats shown in small print (2026-11-05).
 7. Colleagues are tracked too (2026-11-05).
 8. A 1×1 transparent image in the HTML version (confirmed 2026-11-05).
+9. Automatic replies (out-of-office and others marked `Auto-Submitted`) don't count as opened; only a reply from a person does (Khyati, 2026-11-07).
 
 Proposed by Claude, approved by Khyati (2026-11-05):
 
-9. The Worker stores only the time and the source type, never IP addresses; codes are random.
-10. Records are deleted after 90 days.
-11. The Worker has a password, stored encrypted on each laptop.
-12. Collection every couple of minutes while the app runs, catching up on launch.
-13. Encrypted emails are never tracked.
-14. Sent keeps one clean copy with no image.
-15. Sending one copy per recipient is tested first, with the fallback if Gmail won't cooperate.
-16. The Worker has step-by-step setup on Khyati's Cloudflare account, on the free tier; a custom domain is recommended.
-17. A main switch in Settings.
+10. The Worker stores only the time and the source type, never IP addresses; codes are random.
+11. Records are deleted after 90 days.
+12. The Worker has a password, stored encrypted on each laptop.
+13. Collection every couple of minutes while the app runs, catching up on launch.
+14. Encrypted emails are never tracked.
+15. Sent keeps one clean copy with no image.
+16. Sending one copy per recipient is tested first, with the fallback if Gmail won't cooperate.
+17. The Worker has step-by-step setup on Khyati's Cloudflare account, on the free tier; a custom domain is recommended.
+18. A main switch in Settings.
 
 Builder-level calls by Claude (can be overridden):
 
-18. Image codes are a keyed hash of the email ID, the recipient and the Worker password, so both laptops match opens without storing a mapping anywhere.
-19. Warpmail never loads images from the Worker's address when showing mail, so Khyati's own views never count, including when Khyati is a recipient.
+19. Image codes are a keyed hash of the email ID, the recipient and the Worker password, so both laptops match opens without storing a mapping anywhere.
+20. Warpmail never loads images from the Worker's address when showing mail, so Khyati's own views never count, including when Khyati is a recipient.
 
 ## How it's built (for the builder)
 
