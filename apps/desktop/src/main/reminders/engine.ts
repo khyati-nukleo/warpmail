@@ -1,6 +1,7 @@
 import {
   connectionErrorCodes,
   deriveReminder,
+  isProviderError,
   ownAddresses,
   ProviderError,
   reminderLookbackDays,
@@ -11,6 +12,7 @@ import {
   type MailProvider,
   type Message,
   type Reminder,
+  type ReminderLabel,
   type Settings,
   type SplitScope,
 } from '@inlark/core'
@@ -38,6 +40,17 @@ export interface ReminderEngineDeps {
 }
 
 export type ReturnTarget = { accountId: string; threadId: string }
+export type ReminderTarget = { accountId: string; threadId: string; messageId: string }
+export interface SentInput {
+  accountId: string
+  /** The Sent copy's Message-ID, without angle brackets. */
+  messageId: string
+  sentCopy?: string
+  /** The composer's follow-up switch, when it showed one. */
+  followUp?: boolean
+  html: string
+  text: string
+}
 type Derived = { reminder: Reminder; inInbox: boolean }[]
 type Target = { account: Account; provider: MailProvider }
 
@@ -50,6 +63,9 @@ const scanLimit = 25
 const returnedKey = 'reminders-returned'
 const returnedLimit = 500
 const dayMs = 86_400_000
+/** Recomputes a label waits through for its Sent copy to be indexed, before giving up. */
+const labelTries = 5
+const labelsWaitingLimit = 100
 
 const background = { background: true }
 const offline = (error: unknown) =>
@@ -78,6 +94,14 @@ export class ReminderEngine {
   private queue: Promise<void> = Promise.resolve()
   private started = false
   private disposed = false
+  /** Switch labels whose Sent copy wasn't indexed yet; tried again as each sync lands. */
+  private labelsWaiting: {
+    accountId: string
+    label: ReminderLabel
+    messageId: string
+    tries: number
+  }[] = []
+  private labelling = new Set<string>()
 
   constructor(private deps: ReminderEngineDeps) {}
 
@@ -118,6 +142,76 @@ export class ReminderEngine {
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = setTimeout(() => this.flush(), debounceMs)
     this.debounceMax ??= setTimeout(() => this.flush(), debounceMaxMs)
+  }
+
+  /**
+   * After a send: stores the main-process ask-check of the sent body, the same check the
+   * other laptop runs on the Sent copy, and saves the follow-up switch as a label only when
+   * it differs from that guess. Never throws.
+   */
+  async afterSend(input: SentInput): Promise<void> {
+    try {
+      if (input.sentCopy !== 'filed' && input.sentCopy !== 'server') return
+      const target = this.target(input.accountId)
+      if (!target || !reminderSettingsOf(this.deps.settings()).followUp) return
+      const { account, provider } = target
+      const guess = mainAskCheck({ html: input.html, text: input.text })
+      await provider.setAskChecks?.(account, [{ messageId: input.messageId, asks: guess }])
+      this.invalidate(account.id)
+      if (input.followUp === undefined || input.followUp === guess) return
+      this.labelsWaiting.push({
+        accountId: account.id,
+        label: input.followUp ? 'followUp' : 'noReminder',
+        messageId: input.messageId,
+        tries: 0,
+      })
+      this.labelsWaiting = this.labelsWaiting.slice(-labelsWaitingLimit)
+      await this.saveLabels(account.id)
+    } catch {
+      this.log('reminders-after-send-failed')
+    }
+  }
+
+  /** Writes the waiting switch labels; one whose email isn't indexed yet waits for a sync. */
+  private async saveLabels(accountId: string) {
+    if (this.labelling.has(accountId)) return
+    this.labelling.add(accountId)
+    try {
+      for (const waiting of this.labelsWaiting.filter((w) => w.accountId === accountId)) {
+        const target = this.target(accountId)
+        if (!target?.provider.labelMessage) return
+        waiting.tries++
+        try {
+          await target.provider.labelMessage(target.account, waiting.label, waiting.messageId, true)
+          this.labelsWaiting = this.labelsWaiting.filter((w) => w !== waiting)
+          this.invalidate(accountId)
+        } catch (error) {
+          this.log('reminders-label-failed')
+          const later = isProviderError(error, 'notFound', ...connectionErrorCodes)
+          if (!later || waiting.tries >= labelTries)
+            this.labelsWaiting = this.labelsWaiting.filter((w) => w !== waiting)
+        }
+      }
+    } finally {
+      this.labelling.delete(accountId)
+    }
+  }
+
+  /** Hides a reminder on every device: a `No reminder` label on its email. */
+  dismiss(target: ReminderTarget): Promise<void> {
+    return this.noReminder(target, true)
+  }
+  /** Undoes `dismiss`. */
+  restore(target: ReminderTarget): Promise<void> {
+    return this.noReminder(target, false)
+  }
+  private async noReminder({ accountId, messageId }: ReminderTarget, add: boolean) {
+    const account = this.deps.accounts().find((a) => a.id === accountId && a.protocol === 'imap')
+    const provider = account && this.deps.provider(accountId)
+    if (!account || !provider?.labelMessage)
+      throw new ProviderError('unsupported', 'Reminders work with IMAP accounts only.')
+    await provider.labelMessage(account, 'noReminder', messageId, add)
+    this.invalidate(accountId)
   }
 
   /** Catches up on launch: reminders that came due while the app was closed. */
@@ -195,6 +289,7 @@ export class ReminderEngine {
       if (this.disposed) return
       const target = this.target(id)
       if (!target) continue
+      if (this.labelsWaiting.some((w) => w.accountId === id)) await this.saveLabels(id)
       const derived = await this.derived(id)
       // In the background: the inbox never waits for bodies to be read.
       if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)

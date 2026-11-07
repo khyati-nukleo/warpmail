@@ -395,4 +395,11 @@ export const ipcSchemas = {
   readStatusInfo: z.tuple([]),
   setReadStatusPassword: z.tuple([z.string().min(1).max(4096).nullable()]),
   testReadStatus: z.tuple([z.string().max(2048), z.string().max(4096).optional()]),
+  // Reminders
+  dismissReminder: z.tuple([
+    z.object({ accountId: id, threadId: id, messageId: z.string().min(1).max(998) }),
+  ]),
+  restoreReminder: z.tuple([
+    z.object({ accountId: id, threadId: id, messageId: z.string().min(1).max(998) }),
+  ]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>

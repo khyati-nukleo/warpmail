@@ -1589,6 +1589,9 @@ export const demoAPI: DesktopMailAPI = {
   setReadStatusPassword: async () => ({ passwordSet: false, secureStorage: true }),
   testReadStatus: async () => ({ ok: false, message: 'Not available in the demo.' }),
   ready: async () => {},
+  // Reminders: the demo has no IMAP account, so there is nothing to label.
+  dismissReminder: async () => {},
+  restoreReminder: async () => {},
   onEvent: (listener) => {
     listeners.add(listener)
     return () => {

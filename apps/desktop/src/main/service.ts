@@ -92,7 +92,7 @@ import { ReadStatusSecret } from './read-status/secret'
 import { ReadStatusCollector } from './read-status/collector'
 import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
-import { ReminderEngine } from './reminders/engine' // Reminders
+import { ReminderEngine, type ReminderTarget } from './reminders/engine' // Reminders
 
 export type Connection = {
   id: string
@@ -1202,6 +1202,11 @@ export class MailService {
     return result
   }
   // Reminders
+  /** Hides a reminder on every device by labelling its email; `restoreReminder` undoes it. */
+  dismissReminder = (target: ReminderTarget): Promise<void> =>
+    this.guard(target.accountId, () => this.reminders.dismiss(target))
+  restoreReminder = (target: ReminderTarget): Promise<void> =>
+    this.guard(target.accountId, () => this.reminders.restore(target))
   /**
    * Moves each thread's archived mail back to its account's inbox, with one undo for all.
    * One move per thread: each account's inbox differs, and a thread that fails stays out of
@@ -2173,6 +2178,14 @@ export class MailService {
       // The old draft goes first: until then it could be opened and sent a second time.
       await this.removeReplacedDraft(journal)
       if (journal.sentCopy) await this.fileSentCopy(journal, outgoing)
+      void this.reminders.afterSend({
+        accountId: journal.accountId,
+        messageId: journal.messageId!,
+        sentCopy: journal.sentCopy,
+        followUp: draft.followUp,
+        html: draft.html,
+        text: draft.text,
+      }) // Reminders
     } catch {
       // Filing and cleanup record their own failures; the next refresh retries them.
       this.log('sent-finish-failed')

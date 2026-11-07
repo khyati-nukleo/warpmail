@@ -890,5 +890,10 @@ export interface DesktopMailAPI {
   readStatusInfo(): Promise<ReadStatusInfo>
   setReadStatusPassword(password: string | null): Promise<ReadStatusInfo>
   testReadStatus(workerUrl: string, password?: string): Promise<{ ok: boolean; message: string }>
+  // Reminders
+  /** Hides a reminder on every device; rejects with a message to show when it can't. */
+  dismissReminder(target: { accountId: string; threadId: string; messageId: string }): Promise<void>
+  /** Undoes `dismissReminder`. */
+  restoreReminder(target: { accountId: string; threadId: string; messageId: string }): Promise<void>
   onEvent(listener: (event: AppEvent) => void): () => void
 }

@@ -356,6 +356,9 @@ else {
         readStatusInfo: service.readStatusInfo,
         setReadStatusPassword: service.setReadStatusPassword,
         testReadStatus: service.testReadStatus,
+        // Reminders
+        dismissReminder: service.dismissReminder,
+        restoreReminder: service.restoreReminder,
       }
       for (const [name, schema] of Object.entries(ipcSchemas))
         ipcMain.handle('mail:' + name, async (event, ...args: unknown[]) => {

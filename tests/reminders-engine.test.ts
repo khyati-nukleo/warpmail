@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   addWorkingDays,
+  ProviderError,
   type Account,
   type AppEvent,
   type MailProvider,
@@ -49,6 +50,7 @@ interface Harness {
   stored: Map<string, unknown>
   clock: { now: number }
   settings: Settings
+  log: ReturnType<typeof vi.fn>
 }
 
 function harness(
@@ -57,8 +59,10 @@ function harness(
     now?: number
     settings?: Partial<Settings>
     sent?: { id: string; messageId: string; html?: string; text?: string }[]
+    account?: Account
   } = {},
 ): Harness {
+  const owner = options.account ?? account
   const facts = options.facts ?? []
   const checks = new Map<string, boolean>()
   const sent = options.sent ?? []
@@ -66,6 +70,7 @@ function harness(
   const settings = { ...options.settings } as Settings
   const events: AppEvent[] = []
   const stored = new Map<string, unknown>()
+  const log = vi.fn()
   const provider = {
     reminderFacts: vi.fn(async () =>
       facts.map((f) => (checks.has(f.messageId!) ? { ...f, asks: checks.get(f.messageId!)! } : f)),
@@ -84,6 +89,9 @@ function harness(
         .filter((s) => ids.includes(s.id) && (s.html !== undefined || s.text !== undefined))
         .map((s) => ({ id: s.id, html: s.html, text: s.text })),
     ),
+    labelMessage: vi.fn(async (_a: Account, label: 'noReminder' | 'followUp', id: string, add) => {
+      for (const f of facts) if (f.messageId === id) f.labels = { ...f.labels, [label]: add }
+    }),
   } as unknown as Harness['provider']
   const returned = vi.fn(async (targets: { accountId: string; threadId: string }[]) => ({
     handled: targets,
@@ -91,9 +99,9 @@ function harness(
     undoId: 'undo-1' as string | undefined,
   }))
   const engine = new ReminderEngine({
-    accounts: () => [account],
+    accounts: () => [owner],
     settings: () => settings,
-    provider: (id) => (id === account.id ? provider : undefined),
+    provider: (id) => (id === owner.id ? provider : undefined),
     returnToInbox: returned,
     emit: (event) => events.push(event),
     store: {
@@ -102,8 +110,9 @@ function harness(
       write: async (key, value) => void stored.set(key, value),
     },
     now: () => clock.now,
+    log,
   })
-  return { engine, provider, facts, checks, events, returned, stored, clock, settings }
+  return { engine, provider, facts, checks, events, returned, stored, clock, settings, log }
 }
 
 let current: Harness | undefined
@@ -343,6 +352,146 @@ describe('ReminderEngine', () => {
     h.engine.invalidate('a1')
     await h.engine.due('a1')
     expect(h.provider.reminderFacts).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('ReminderEngine choices saved as labels', () => {
+  const sent = (over: Partial<Parameters<ReminderEngine['afterSend']>[0]> = {}) => ({
+    accountId: 'a1',
+    messageId: 'm1@example.com',
+    sentCopy: 'filed',
+    html: '<p>Here is the file.</p>',
+    text: 'Here is the file.',
+    ...over,
+  })
+  it('labels a follow-up she asked for on mail with no question', async () => {
+    const h = make()
+    await h.engine.afterSend(sent({ followUp: true }))
+    expect(h.provider.setAskChecks).toHaveBeenCalledWith(account, [
+      { messageId: 'm1@example.com', asks: false },
+    ])
+    expect(h.provider.labelMessage).toHaveBeenCalledWith(
+      account,
+      'followUp',
+      'm1@example.com',
+      true,
+    )
+  })
+  it('labels no reminder when she turned the switch off on a question', async () => {
+    const h = make()
+    await h.engine.afterSend(
+      sent({
+        followUp: false,
+        html: '<p>Can you send it?</p>',
+        text: 'Can you send it?',
+        sentCopy: 'server',
+      }),
+    )
+    expect(h.provider.setAskChecks).toHaveBeenCalledWith(account, [
+      { messageId: 'm1@example.com', asks: true },
+    ])
+    expect(h.provider.labelMessage).toHaveBeenCalledWith(
+      account,
+      'noReminder',
+      'm1@example.com',
+      true,
+    )
+  })
+  it('writes no label when her choice matches the guess, or there was no switch', async () => {
+    const h = make()
+    await h.engine.afterSend(sent({ followUp: false }))
+    await h.engine.afterSend(sent({ messageId: 'm2@example.com' }))
+    expect(h.provider.setAskChecks).toHaveBeenCalledTimes(2)
+    expect(h.provider.labelMessage).not.toHaveBeenCalled()
+  })
+  it('does nothing until the Sent copy is filed', async () => {
+    const h = make()
+    for (const sentCopy of ['failed', 'uncertain', 'pending', undefined])
+      await h.engine.afterSend(sent({ followUp: true, sentCopy }))
+    expect(h.provider.setAskChecks).not.toHaveBeenCalled()
+    expect(h.provider.labelMessage).not.toHaveBeenCalled()
+  })
+  it('does nothing while reminders or follow-ups are off, or for a JMAP account', async () => {
+    for (const options of [
+      { settings: { reminders: { enabled: false } } },
+      { settings: { reminders: { followUp: false } } },
+      { account: { ...account, protocol: 'jmap' } as Account },
+    ]) {
+      const h = make(options)
+      await h.engine.afterSend(sent({ followUp: true }))
+      expect(h.provider.setAskChecks).not.toHaveBeenCalled()
+      expect(h.provider.labelMessage).not.toHaveBeenCalled()
+      h.engine.dispose()
+    }
+  })
+  it('labels the Sent copy once it is indexed, and never throws', async () => {
+    const h = make()
+    h.provider.labelMessage.mockRejectedValueOnce(
+      new ProviderError('notFound', 'This email is no longer on the server.'),
+    )
+    h.engine.start()
+    await settle()
+    await expect(h.engine.afterSend(sent({ followUp: true }))).resolves.toBeUndefined()
+    expect(h.log).toHaveBeenCalledWith('reminders-label-failed')
+    expect(h.log.mock.calls.flat().join(' ')).not.toContain('example')
+    // The sync that indexes it announces a change.
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(2)
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(2)
+  })
+  it('stops retrying a label after a few changes', async () => {
+    const h = make()
+    h.provider.labelMessage.mockRejectedValue(new ProviderError('notFound', 'Gone.'))
+    h.engine.start()
+    await settle()
+    await h.engine.afterSend(sent({ followUp: true }))
+    for (let i = 0; i < 10; i++) {
+      h.engine.invalidate('a1')
+      await settle()
+    }
+    expect(h.provider.labelMessage.mock.calls.length).toBeLessThanOrEqual(6)
+  })
+  it('dismisses a reminder with a label, and restore brings it back', async () => {
+    const h = make({ facts: [incoming()], now: addWorkingDays(receivedMs, 2) })
+    const target = { accountId: 'a1', threadId: 't1', messageId: 'm1@example.com' }
+    expect(await h.engine.due('a1')).toHaveLength(1)
+    await h.engine.dismiss(target)
+    expect(h.provider.labelMessage).toHaveBeenLastCalledWith(
+      account,
+      'noReminder',
+      'm1@example.com',
+      true,
+    )
+    expect(await h.engine.due('a1')).toEqual([])
+    await h.engine.restore(target)
+    expect(h.provider.labelMessage).toHaveBeenLastCalledWith(
+      account,
+      'noReminder',
+      'm1@example.com',
+      false,
+    )
+    expect(await h.engine.due('a1')).toHaveLength(1)
+  })
+  it('lets a failed dismiss reject, so the window can say so', async () => {
+    const h = make({ facts: [incoming()], now: addWorkingDays(receivedMs, 2) })
+    h.provider.labelMessage.mockRejectedValueOnce(new ProviderError('network', 'Offline.'))
+    const target = { accountId: 'a1', threadId: 't1', messageId: 'm1@example.com' }
+    await expect(h.engine.dismiss(target)).rejects.toMatchObject({ code: 'network' })
+    const jmap = make({ account: { ...account, protocol: 'jmap' } as Account })
+    await expect(jmap.engine.dismiss(target)).rejects.toThrow()
+  })
+  it('drops forgot-to-reply reminders once that kind is turned off', async () => {
+    const h = make({
+      facts: [incoming(), fact({ threadId: 't2', messageId: 'm2@example.com' })],
+      now: addWorkingDays(receivedMs, 5),
+    })
+    expect((await h.engine.due('a1')).map((r) => r.kind).sort()).toEqual(['followUp', 'reply'])
+    h.settings.reminders = { forgotToReply: false }
+    h.engine.invalidate()
+    expect((await h.engine.due('a1')).map((r) => r.kind)).toEqual(['followUp'])
   })
 })
 

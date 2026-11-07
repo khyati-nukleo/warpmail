@@ -555,6 +555,23 @@ describe('IMAP sending', () => {
     expect((await service.drafts())[0]).toMatchObject({ status: 'error', errorKind: 'certificate' })
     expect((await journal()).state).toBe('rejected')
   })
+  // Reminders
+  it('saves a follow-up switch turned off on a question as a label on the Sent copy', async () => {
+    const asking = { ...draft, html: '<p>Can you send it?</p>', text: 'Can you send it?' }
+    expect((await service.send({ ...asking, followUp: false })).status).toBe('sent')
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+    const { messageId } = await journal()
+    // The sync that indexes the Sent copy lets the label find it.
+    const provider = (service as any).provider(accountId).provider as ImapProvider
+    await (provider as any).syncPass('all')
+    await vi.waitFor(
+      () =>
+        expect(server.box('Warpmail/No reminder').messages.map((m) => m.input.messageId)).toEqual([
+          messageId,
+        ]),
+      { timeout: 3000 },
+    )
+  })
 })
 
 describe('IMAP drafts', () => {
@@ -865,5 +882,29 @@ describe('IMAP reading', () => {
     expect(inbox!.reminder).toMatchObject({ kind: 'reply', messageId: 'waiting@x' })
     const [all] = (await service.query({ view: 'all' })).items
     expect(all!.reminder).toBeUndefined()
+  })
+  it('lists a reply that came due while the app was closed on top of the first inbox', async () => {
+    const receivedMs = Date.now() - 10 * 86_400_000
+    server.deliver('INBOX', {
+      messageId: 'waiting@x',
+      subject: 'Question',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(receivedMs).toISOString(),
+      text: 'Can you send the file?',
+    })
+    // Newer than the question but older than its due time, and not addressed to me.
+    server.deliver('INBOX', {
+      messageId: 'newer@x',
+      subject: 'Lunch',
+      from: [{ name: 'Sam', email: 'sam@example.org' }],
+      to: [{ name: 'Team', email: 'team@example.org' }],
+      date: new Date(receivedMs + 60_000).toISOString(),
+      text: 'Lunch on Friday?',
+    })
+    await (provider() as any).syncPass('all')
+    await restart()
+    const items = (await service.query({ view: 'inbox' })).items
+    expect(items.map((c) => c.reminder?.messageId ?? null)).toEqual(['waiting@x', null])
   })
 })
