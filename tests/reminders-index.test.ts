@@ -399,44 +399,47 @@ const receivedIndex = (db: DatabaseSync) =>
     (c) => c.name,
   )
 
-describe('schema v5 and v6', () => {
+describe('schema v5', () => {
   it('migrates a v4 file and keeps its messages', async () => {
     await index.upsertMessages('a', [message(boxes.inbox, 1)])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec('DROP TABLE reminder_checks; PRAGMA user_version = 4')
+    db.exec(`DROP TABLE reminder_checks; DROP INDEX messages_mailbox_received;
+      CREATE INDEX messages_mailbox_received ON messages (account_id, mailbox_id, received_ms);
+      PRAGMA user_version = 4`)
     db.close()
     await open()
-    expect(SCHEMA_VERSION).toBe(6)
+    expect(SCHEMA_VERSION).toBe(5)
     const check = new DatabaseSync(path)
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
       expect(
         check.prepare("SELECT name FROM sqlite_master WHERE name = 'reminder_checks'").all(),
       ).toEqual([{ name: 'reminder_checks' }])
+      // The thread joins the received-date index, so recent threads read no rows.
+      expect(receivedIndex(check)).toEqual(['account_id', 'mailbox_id', 'received_ms', 'thread_id'])
     } finally {
       check.close()
     }
     expect(await facts()).toHaveLength(1)
   })
 
-  it('v6 adds the thread to the received-date index, so recent threads read no rows', async () => {
-    await index.upsertMessages('a', [message(boxes.inbox, 1)])
+  it('runs again over a file that already has v5, keeping its checks', async () => {
+    await index.upsertMessages('a', [sent(1)])
+    await index.setAskChecks('a', [{ messageId: 'm1@example.com', asks: true }])
     await index.close()
     const db = new DatabaseSync(path)
-    db.exec(`DROP INDEX messages_mailbox_received;
-      CREATE INDEX messages_mailbox_received ON messages (account_id, mailbox_id, received_ms);
-      PRAGMA user_version = 5`)
+    db.exec('PRAGMA user_version = 4')
     db.close()
     await open()
     const check = new DatabaseSync(path)
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
       expect(receivedIndex(check)).toEqual(['account_id', 'mailbox_id', 'received_ms', 'thread_id'])
     } finally {
       check.close()
     }
-    expect(await facts()).toHaveLength(1)
+    expect((await facts())[0]!.asks).toBe(true)
   })
 
   it('reads reminder facts and unchecked Sent mail through indexes', () => {

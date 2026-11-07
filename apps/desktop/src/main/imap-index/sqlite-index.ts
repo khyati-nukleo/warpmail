@@ -13,7 +13,7 @@ import {
   storedAutomation,
 } from './split-schema'
 import { addressesSeenQuery, splitFilter, tabCountQuery } from './split-sql'
-import { migrateToV5, migrateToV6 } from './reminder-schema'
+import { migrateToV5 } from './reminder-schema'
 import {
   ASK_CHECKS_NEEDED_SQL,
   boostedConversationPage,
@@ -84,7 +84,7 @@ const methodTable: Record<keyof MetadataIndex, true> = {
 }
 export const indexMethods = Object.keys(methodTable) as (keyof MetadataIndex)[]
 
-export const SCHEMA_VERSION = 6 // Reminders: v5 and v6
+export const SCHEMA_VERSION = 5
 export const UNCHECKED_HEADERS_SQL = `SELECT uid, uid_validity AS uidValidity FROM messages
   WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
   ORDER BY uid DESC LIMIT ?`
@@ -201,7 +201,6 @@ const migrations: (string | ((db: DatabaseSync) => void))[] = [
     ON messages (account_id, mailbox_id, received_ms);`,
   migrateToV4,
   migrateToV5,
-  migrateToV6,
 ]
 
 interface MailboxRow {
