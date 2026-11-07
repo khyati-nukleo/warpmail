@@ -24,12 +24,12 @@ export function FollowUpSwitch({
   const settings = useReminderSettings()
   const shortcuts = useShortcuts()
   const keys = useShortcutText()
-  const guessed = useFollowUpGuess(draft)
   const shown = followUpShown({
     protocol: account.protocol,
     settings,
     recipients: draft.to.length + draft.cc.length + draft.bcc.length,
   })
+  const guessed = useFollowUpGuess(draft, shown)
   const on = draft.followUp ?? guessed
   useShortcutHandlers(shortcuts.bindings, {
     toggleFollowUp: {

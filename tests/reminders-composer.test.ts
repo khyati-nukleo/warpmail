@@ -1,13 +1,31 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest'
-import { defaultReminderSettings } from '@inlark/core'
+import { createElement } from '../apps/desktop/node_modules/react'
+import { renderToStaticMarkup } from '../apps/desktop/node_modules/react-dom/server'
+import {
+  QueryClient,
+  QueryClientProvider,
+} from '../apps/desktop/node_modules/@tanstack/react-query'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { askCheck, defaultReminderSettings, type Draft, type Settings } from '@inlark/core'
 import {
   draftOwnText,
   followUpGuess,
   followUpLabel,
   followUpShown,
+  withFollowUp,
 } from '../apps/desktop/src/renderer/src/reminders/draft-text'
+import { FollowUpSwitch } from '../apps/desktop/src/renderer/src/reminders/FollowUpSwitch'
 import { defaultBindings, shortcutDefinitions } from '../apps/desktop/src/renderer/src/shortcuts'
+
+// Counts ask-checks, so a hidden switch can be shown to run none.
+vi.mock('@inlark/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@inlark/core')>()
+  return { ...actual, askCheck: vi.fn(actual.askCheck) }
+})
+vi.stubGlobal('location', { search: '', protocol: 'file:' })
+beforeEach(() => {
+  vi.mocked(askCheck).mockClear()
+})
 
 const quote = '<p>On Fri, Dana wrote:</p><blockquote><p>Can you send the file?</p></blockquote>'
 const htmlSignature = '<div data-inlark-signature><p>Sam Example?</p></div>'
@@ -65,5 +83,58 @@ describe('follow-up switch', () => {
       'Follow-up on or off',
     )
     expect(defaultBindings('toggleFollowUp')).toEqual([['Mod+Shift+O']])
+  })
+})
+
+describe('follow-up switch hidden', () => {
+  const draft = {
+    id: 'd1',
+    accountId: 'a1',
+    identityId: 'default',
+    to: [{ name: 'Pat', email: 'pat@example.com' }],
+    cc: [],
+    bcc: [],
+    subject: 'Plans',
+    html: '<p>Can you confirm?</p>',
+    text: 'Can you confirm?',
+    attachments: [],
+    updatedAt: '2026-11-02T15:00:00.000Z',
+    status: 'local',
+  } as Draft
+  const hidden: [string, Partial<Settings>, 'imap' | 'jmap', Draft][] = [
+    ['reminders off', { reminders: { enabled: false } }, 'imap', draft],
+    ['follow-ups off', { reminders: { followUp: false } }, 'imap', draft],
+    ['not IMAP', {}, 'jmap', draft],
+    ['no recipients', {}, 'imap', { ...draft, to: [] }],
+  ]
+  const render = (settings: Partial<Settings>, protocol: 'imap' | 'jmap', d: Draft) => {
+    const client = new QueryClient()
+    client.setQueryData(['bootstrap'], { settings })
+    return renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(FollowUpSwitch, { draft: d, account: { protocol }, onChange: () => {} }),
+      ),
+    )
+  }
+  it('runs no ask-check while hidden', () => {
+    for (const [, settings, protocol, d] of hidden) {
+      expect(render(settings, protocol, d)).toBe('')
+      expect(askCheck).not.toHaveBeenCalled()
+    }
+    expect(render({}, 'imap', draft)).toContain('Follow-up: on (asks a question)')
+    expect(askCheck).toHaveBeenCalled()
+  })
+  it('sends with nothing set on the draft while hidden, and the guess while shown', () => {
+    for (const [, settings, protocol, d] of hidden) {
+      expect(withFollowUp(d, protocol, settings)).toBe(d)
+      expect(askCheck).not.toHaveBeenCalled()
+    }
+    expect(withFollowUp(draft, 'imap', {}).followUp).toBe(true)
+    // Her own choice wins over the guess, which then never runs.
+    vi.mocked(askCheck).mockClear()
+    expect(withFollowUp({ ...draft, followUp: false }, 'imap', {}).followUp).toBe(false)
+    expect(askCheck).not.toHaveBeenCalled()
   })
 })

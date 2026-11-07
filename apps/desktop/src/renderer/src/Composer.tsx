@@ -37,7 +37,7 @@ import { localSaveDraft, localDeleteDraft } from './cache'
 import { RecipientField, type ChipSecurity } from './RecipientField'
 import { recipientProblems, useEncryption } from './encryption-ui'
 import { FollowUpSwitch } from './reminders/FollowUpSwitch'
-import { followUpGuess } from './reminders/draft-text'
+import { withFollowUp } from './reminders/draft-text'
 import { ContactKeyDialog, keysChanged, useUnlock } from './encryption-actions'
 import { ProtectionBar, ProtectionMenu, type Protection } from './ComposerProtection'
 import { ReadStatusSwitch } from './read-status/ReadStatusSwitch' // Read status
@@ -492,10 +492,7 @@ export function Composer({
       return
     }
     // The draft is safe on this device: sending carries on, and reports back, after closing.
-    latest.current = {
-      ...latest.current,
-      followUp: latest.current.followUp ?? followUpGuess(latest.current),
-    } // Reminders
+    latest.current = withFollowUp(latest.current, account.protocol, settings) // Reminders
     onSend(latest.current)
     onSaved()
     onClose()

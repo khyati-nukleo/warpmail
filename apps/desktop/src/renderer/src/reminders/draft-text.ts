@@ -1,5 +1,13 @@
 import { useDeferredValue, useMemo } from 'react'
-import { askCheck, ownText, type Draft, type Protocol, type ReminderSettings } from '@inlark/core'
+import {
+  askCheck,
+  ownText,
+  reminderSettingsOf,
+  type Draft,
+  type Protocol,
+  type ReminderSettings,
+  type Settings,
+} from '@inlark/core'
 import { textSignatureMarker } from '../composer-document'
 
 const dropped = `blockquote, .gmail_quote, [data-inlark-signature], [${textSignatureMarker}]`
@@ -34,12 +42,13 @@ export function followUpGuess(draft: Pick<Draft, 'html' | 'text'>): boolean {
 
 /**
  * The guess as the draft changes. Deferred, so the check runs behind typing rather than on
- * every keystroke; a plain-text draft has no HTML, so the text counts too.
+ * every keystroke; a plain-text draft has no HTML, so the text counts too. Nothing runs while
+ * the switch is hidden.
  */
-export function useFollowUpGuess(draft: Pick<Draft, 'html' | 'text'>): boolean {
+export function useFollowUpGuess(draft: Pick<Draft, 'html' | 'text'>, shown: boolean): boolean {
   const html = useDeferredValue(draft.html)
   const text = useDeferredValue(draft.text)
-  return useMemo(() => followUpGuess({ html, text }), [html, text])
+  return useMemo(() => shown && followUpGuess({ html, text }), [shown, html, text])
 }
 
 export function followUpLabel(on: boolean, guessed: boolean): string {
@@ -59,4 +68,18 @@ export function followUpShown(facts: {
     facts.settings.followUp &&
     facts.recipients > 0
   )
+}
+
+/** The draft as sent: her choice, else the guess, only where the switch shows; else unchanged. */
+export function withFollowUp(
+  draft: Draft,
+  protocol: Protocol | undefined,
+  settings: Pick<Settings, 'reminders'>,
+): Draft {
+  const shown = followUpShown({
+    protocol,
+    settings: reminderSettingsOf(settings),
+    recipients: draft.to.length + draft.cc.length + draft.bcc.length,
+  })
+  return shown ? { ...draft, followUp: draft.followUp ?? followUpGuess(draft) } : draft
 }
