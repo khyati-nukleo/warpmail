@@ -846,6 +846,34 @@ describe('IMAP reading', () => {
     expect(server.box('Archive').messages).toHaveLength(0)
     expect(server.box('INBOX').messages).toHaveLength(1)
   })
+  it('on Gmail with archive mapped to All Mail, moves only the All Mail copy', async () => {
+    server.addMailbox('[Gmail]/All Mail', '\\All')
+    await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
+    const sent = {
+      emailId: 'e1',
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: '2026-09-20T10:00:00Z',
+      text: 'Can you confirm?',
+    }
+    server.deliver('Sent', sent)
+    server.deliver('[Gmail]/All Mail', sent)
+    await (provider() as any).syncPass('all')
+    const { id } = (await service.query({ view: 'sent' })).items[0]!
+    const inbox = (await service.mailboxes(accountId)).find((b) => b.role === 'inbox')!
+    const result = await service.mutate({
+      targets: [{ accountId, threadId: id }],
+      action: 'move',
+      mailboxId: inbox.id,
+      fromRoles: ['archive'],
+    })
+    expect(result.changed).toBe(1)
+    expect(server.box('Sent').messages).toHaveLength(1)
+    expect(server.box('[Gmail]/All Mail').messages).toHaveLength(0)
+    expect(server.box('INBOX').messages.map((m) => m.input.messageId)).toEqual(['ask@x'])
+  })
   it('returns archived threads to the inbox with one undo for all of them', async () => {
     for (const n of [1, 2])
       server.deliver('Archive', {

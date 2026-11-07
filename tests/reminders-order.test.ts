@@ -67,6 +67,9 @@ function message(mailboxId: string, uid: number, extra: Partial<NewMessage> = {}
 }
 
 const uids = (rows: ConversationRow[]) => rows.map((r) => r.latest.uid)
+/** `from` down to `to`, both included. */
+const range = (from: number, to: number) =>
+  Array.from({ length: from - to + 1 }, (_, n) => from - n)
 
 describe('inbox order with due reminders (index)', () => {
   let index: SqliteMetadataIndex
@@ -84,7 +87,7 @@ describe('inbox order with due reminders (index)', () => {
       batch.push(
         message(inbox, uid, {
           // Every fifth is automated mail (left out of Important), and uid 2 is unread.
-          ...(uid % 5 === 0 ? { from: [{ name: '', email: 'no-reply@robot.example' }] } : {}),
+          ...(uid % 5 === 0 ? { from: [{ name: '', email: 'no-reply@example.com' }] } : {}),
           ...(uid === 2 ? { flags: [] } : {}),
         }),
       )
@@ -159,6 +162,52 @@ describe('inbox order with due reminders (index)', () => {
     )
     expect(offset).toEqual(keyset)
     expect(offset).toHaveLength(120)
+  })
+
+  it('lands a thread due mid-list on a later page, with keyset and offset paging across it', () => {
+    // Thread 10, due between threads 71 and 70: the fourth row of the second page.
+    const mid = { threadId: thread.get(10)!, sortMs: ms(70) + 1800_000 }
+    const due = [...boost, mid]
+    const order = [2, 3, 1, ...range(120, 71), 10, ...range(70, 11), ...range(9, 4)]
+    const keyset: number[][] = []
+    let after: { receivedAt: string; threadId: string; sortMs?: number } | undefined
+    for (;;) {
+      const page = index.conversations('a', filter({ boost: due }), {
+        limit: 50,
+        ...(after ? { after } : {}),
+      })
+      expect(page.total).toBe(120)
+      if (!page.items.length) break
+      keyset.push(uids(page.items))
+      const last = page.items.at(-1)!
+      after = { receivedAt: last.latest.receivedAt, threadId: last.threadId, sortMs: last.sortMs }
+    }
+    expect(keyset.flat()).toEqual(order)
+    expect(keyset[1]!.slice(0, 5)).toEqual([73, 72, 71, 10, 70])
+    const offset = [0, 50, 100].flatMap((o) =>
+      uids(index.conversations('a', filter({ boost: due }), { limit: 50, offset: o }).items),
+    )
+    expect(offset).toEqual(order)
+    // Pages of two that start just before it, on it, and just after it.
+    const row = (uid: number) =>
+      index
+        .conversations('a', filter({ boost: due }), { limit: 120 })
+        .items.find((r) => r.latest.uid === uid)!
+    const from = (uid: number) => {
+      const r = row(uid)
+      const cursor = { receivedAt: r.latest.receivedAt, threadId: r.threadId, sortMs: r.sortMs }
+      return uids(
+        index.conversations('a', filter({ boost: due }), { limit: 2, after: cursor }).items,
+      )
+    }
+    expect(row(10).sortMs).toBe(mid.sortMs)
+    expect(from(72)).toEqual([71, 10])
+    expect(from(71)).toEqual([10, 70])
+    expect(from(10)).toEqual([70, 69])
+    const at = order.indexOf(10)
+    expect(
+      uids(index.conversations('a', filter({ boost: due }), { limit: 2, offset: at - 1 }).items),
+    ).toEqual([71, 10])
   })
 
   it('never adds a boosted thread the filter leaves out', () => {
