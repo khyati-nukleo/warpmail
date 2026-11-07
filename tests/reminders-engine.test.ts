@@ -357,9 +357,9 @@ describe('ReminderEngine', () => {
     expect(await h.engine.due('a1')).toHaveLength(2)
     expect(h.returned).not.toHaveBeenCalled()
   })
-  it('leaves a follow-up that moved nothing due, unmarked, and retries it after a full sync', async () => {
+  it('leaves a follow-up whose move failed due, unmarked, and retries it after a full sync', async () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
-    // The archive folder holds none of the thread.
+    // The server refuses the move.
     h.returned.mockImplementation(async () => ({ moved: [], undoId: undefined }))
     let syncedAt = h.clock.now
     h.provider.readyForReminders = vi.fn((dueMs: number) => dueMs <= syncedAt)
@@ -387,6 +387,38 @@ describe('ReminderEngine', () => {
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(2)
+  })
+  it('never tries a follow-up with no archive copy, until one appears', async () => {
+    const h = make({
+      facts: [
+        fact({ inInbox: false, archived: false }),
+        // Due later, so the wake-up timer fires meanwhile.
+        fact({ threadId: 't2', messageId: 'm2@example.com', receivedAt: received, asks: false }),
+        fact({
+          threadId: 't3',
+          messageId: 'm3@example.com',
+          receivedAt: new Date(addWorkingDays(receivedMs, 2)).toISOString(),
+        }),
+      ],
+      now: addWorkingDays(receivedMs, 4),
+    })
+    h.engine.start()
+    await settle()
+    for (let i = 0; i < 5; i++) {
+      h.engine.invalidate('a1')
+      await settle()
+    }
+    for (let i = 0; i < 6; i++) {
+      h.clock.now += 3600_000
+      await vi.advanceTimersByTimeAsync(3600_000)
+      await settle()
+    }
+    expect(h.returned).not.toHaveBeenCalled()
+    // Its facts change: she filed it in the archive folder.
+    h.facts[0] = fact({ inInbox: false, archived: true })
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledWith([{ accountId: 'a1', threadId: 't1' }])
   })
   it('returns nothing until the provider has synced in full since connecting', async () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })

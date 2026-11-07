@@ -20,6 +20,8 @@ export interface ReminderFacts {
   fromEmail: string | null // lowercase
   to: string[] // lowercase addresses on its To line
   inInbox: boolean // any message of the thread is in INBOX
+  /** Any message of the thread is in the archive folder, where a return moves it from. */
+  archived?: boolean
   /** A copy with this Message-ID is in the label folder. */
   labels: { noReminder: boolean; followUp: boolean; returned: boolean }
   asks: boolean | null // stored ask-check of this message; null when never checked

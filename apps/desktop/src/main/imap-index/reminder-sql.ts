@@ -92,6 +92,8 @@ export function reminderFactsQuery(
       SELECT l.t AS thread_id, m.message_id, m.received_at, m.from_email, m.to_addr,
         EXISTS (SELECT 1 FROM messages i WHERE i.account_id = ${p(accountId)}
           AND i.mailbox_id = ${p(query.inboxId)} AND i.thread_id = l.t) AS in_inbox,
+        EXISTS (SELECT 1 FROM messages v WHERE v.account_id = ${p(accountId)}
+          AND v.mailbox_id = ${p(query.archiveId ?? null)} AND v.thread_id = l.t) AS archived,
         ${labelled('n', query.labelIds.noReminder)} AS no_reminder,
         ${labelled('f', query.labelIds.followUp)} AS follow_up,
         ${labelled('x', query.labelIds.returned)} AS returned,
@@ -118,6 +120,7 @@ export interface ReminderFactsRow {
   from_email: string | null
   to_addr: string
   in_inbox: number
+  archived: number
   no_reminder: number
   follow_up: number
   returned: number
@@ -141,6 +144,7 @@ export function toReminderFacts(row: ReminderFactsRow): ReminderFacts {
       .map((a) => a.email.trim().toLowerCase())
       .filter(Boolean),
     inInbox: row.in_inbox === 1,
+    archived: row.archived === 1,
     labels: {
       noReminder: row.no_reminder === 1,
       followUp: row.follow_up === 1,

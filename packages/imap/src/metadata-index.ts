@@ -301,6 +301,8 @@ export interface ConversationRow {
 // Reminders
 export interface ReminderFactsQuery {
   inboxId: string
+  /** The archive role's folder: returns move mail back from it. */
+  archiveId?: string
   /** Mailboxes whose messages count: not Drafts, Trash, Junk or the label folders. */
   mailboxIds: string[]
   labelIds: Partial<Record<ReminderLabel, string>>

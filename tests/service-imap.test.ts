@@ -1126,7 +1126,7 @@ describe('IMAP reading', () => {
     await new Promise((r) => setTimeout(r, 900))
     expect(server.box('INBOX').messages).toHaveLength(0)
   })
-  it('leaves a follow-up due when nothing moved, and tries again later, not on every change', async () => {
+  it('leaves a follow-up due while the archive folder holds none of it, and returns it once mapped', async () => {
     const start = Date.now()
     vi.useFakeTimers({ toFake: ['Date'], now: start })
     try {
@@ -1145,18 +1145,18 @@ describe('IMAP reading', () => {
       const mutate = vi.spyOn(service, 'mutate')
       ;(service as any).reminders.invalidate(accountId)
       await new Promise((r) => setTimeout(r, 900))
-      expect(mutate).toHaveBeenCalledTimes(1)
+      // Nothing in the archive folder: no move is even tried.
+      expect(mutate).not.toHaveBeenCalled()
       expect(server.box('INBOX').messages).toHaveLength(0)
       // Not marked handled, here or in Gmail.
       expect(await store.read('reminders-returned', [])).toEqual([])
       expect(server.boxes.has('Warpmail/Returned')).toBe(false)
       expect((await (service as any).reminders.due(accountId)).length).toBe(1)
-      // Not tried again on every change.
       for (let i = 0; i < 3; i++) {
         ;(service as any).reminders.invalidate(accountId)
         await new Promise((r) => setTimeout(r, 600))
       }
-      expect(mutate).toHaveBeenCalledTimes(1)
+      expect(mutate).not.toHaveBeenCalled()
       // She maps archive to All Mail; a while later, after a full pass, it comes back.
       await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
       vi.setSystemTime(start + 11 * 60_000)
@@ -1165,7 +1165,7 @@ describe('IMAP reading', () => {
       await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), {
         timeout: 3000,
       })
-      expect(mutate.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(mutate).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -1221,6 +1221,34 @@ describe('IMAP reading', () => {
     await service.undo(toast.undoId)
     expect(server.box('INBOX').messages).toHaveLength(0)
     expect(server.box('Archive').messages).toHaveLength(2)
+  })
+  it('leaves alone a follow-up with no copy in the archive folder, such as one only in Sent', async () => {
+    server.deliver('Sent', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    const mutate = vi.spyOn(service, 'mutate')
+    // The sync's own refresh settles first; the recompute it starts runs meanwhile.
+    await new Promise((r) => setTimeout(r, 700))
+    const emit = vi.spyOn(service as any, 'emit')
+    for (let i = 0; i < 3; i++) {
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 700))
+    }
+    // Still a follow-up, but nothing to bring back, and nothing announced.
+    expect((await (service as any).reminders.due(accountId)).length).toBe(1)
+    expect(mutate).not.toHaveBeenCalled()
+    const types = emit.mock.calls.map((c) => (c[0] as { type: string }).type)
+    expect(types).not.toContain('changed')
+    expect(types).not.toContain('remindersReturned')
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(await store.read('reminders-returned', [])).toEqual([])
   })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {

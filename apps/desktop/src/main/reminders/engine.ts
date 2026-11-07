@@ -57,6 +57,8 @@ export interface SentInput {
 type Derived = {
   reminder: Reminder
   inInbox: boolean
+  /** Has mail in the archive folder; without any, a return has nothing to move. */
+  archived: boolean
   ask?: { messageId: string; returned: boolean; skip: boolean }
 }[]
 type Waiting = ReturnTarget & { key: string; ask?: { messageId: string; returned: boolean } }
@@ -304,12 +306,13 @@ export class ReminderEngine {
       const reminder = deriveReminder(f, { own, settings, snooze })
       if (!reminder) return []
       const found = reminder.kind === 'followUp' ? followUpAsk(f) : null
-      if (!found) return [{ reminder, inInbox: f.inInbox }]
+      const archived = f.archived !== false
+      if (!found) return [{ reminder, inInbox: f.inInbox, archived }]
       // The label is shared and the snooze is not: a snooze that ends may bring it back again.
       const snoozed =
         !!snooze && reminder.dueMs > (deriveReminder(f, { own, settings })?.dueMs ?? 0)
       const ask = { ...found, skip: found.returned && !snoozed }
-      return [{ reminder, inInbox: f.inInbox, ask }]
+      return [{ reminder, inInbox: f.inInbox, archived, ask }]
     })
   }
 
@@ -342,8 +345,10 @@ export class ReminderEngine {
       // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
       // full sync that started after it came due, which announces itself and recomputes.
       let held = false
-      for (const { reminder, inInbox, ask } of derived) {
-        if (reminder.kind !== 'followUp' || inInbox || reminder.dueMs > now || ask?.skip) continue
+      // One with nothing in the archive folder (only in Sent, say) is tried once its facts change.
+      for (const { reminder, inInbox, archived, ask } of derived) {
+        if (reminder.kind !== 'followUp' || inInbox || !archived) continue
+        if (reminder.dueMs > now || ask?.skip) continue
         if (target.provider.readyForReminders?.(reminder.dueMs) === false) {
           held = true
           continue

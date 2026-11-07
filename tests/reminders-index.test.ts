@@ -143,6 +143,7 @@ describe('reminder facts', () => {
         fromEmail: 'ada@example.com',
         to: ['me@example.com'],
         inInbox: true,
+        archived: false,
         labels: { noReminder: false, followUp: false, returned: false },
         asks: null,
         ownAsk: null,
@@ -271,6 +272,16 @@ describe('reminder facts', () => {
     })
     await index.upsertMessages('a', [message(boxes.returned, 3, { from: me, to: ada })])
     expect((await facts({ own }))[0]!.labels.returned).toBe(true)
+  })
+
+  it('reports whether the thread has a copy in the archive folder', async () => {
+    await index.upsertMessages('a', [sent(1, { emailId: 'e1' })])
+    // Only in Sent, as on a server without All Mail.
+    expect((await facts({ archiveId: boxes.all }))[0]!.archived).toBe(false)
+    await index.upsertMessages('a', [message(boxes.all, 1, { emailId: 'e1', from: me, to: ada })])
+    expect((await facts({ archiveId: boxes.all }))[0]!.archived).toBe(true)
+    // No archive folder mapped: nothing to move back from.
+    expect((await facts())[0]!.archived).toBe(false)
   })
 
   it('drops my ask once someone else replied after it', async () => {
@@ -507,6 +518,7 @@ describe('schema v5', () => {
         sinceMs: 0,
         threadIds: ['t1'],
         draftsId: boxes.drafts,
+        archiveId: boxes.all,
       })!
       const details = [
         ...plan(query.sql, query.params),
@@ -520,7 +532,7 @@ describe('schema v5', () => {
         expect(detail).not.toMatch(/^SCAN m\b/)
         expect(detail).not.toMatch(/^SCAN messages\b/)
         // Nor any other read of messages or the checks that is not a lookup.
-        expect(detail).not.toMatch(/^SCAN (?:[rinfcxdop]|ta)\b/)
+        expect(detail).not.toMatch(/^SCAN (?:[rinfcxdopv]|ta)\b/)
       }
     } finally {
       db.close()

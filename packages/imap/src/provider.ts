@@ -1086,6 +1086,7 @@ export class ImapProvider implements MailProvider {
       .map((b) => b.id)
     return this.index.reminderFacts(this.accountId, {
       inboxId: inbox.id,
+      archiveId: boxes.find((b) => roles.get(b.path) === 'archive')?.id,
       mailboxIds,
       labelIds,
       important: query.important,
