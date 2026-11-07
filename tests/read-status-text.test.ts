@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { Message } from '../packages/core/src'
 import type { RecipientReadStatus } from '../packages/core/src/read-status'
 import {
   readStatusLine,
@@ -68,5 +69,41 @@ describe('readStatusSmallPrint', () => {
     expect(text).toContain('Blocked images')
     expect(text).toContain('Several devices')
     expect(text).toContain('forwarded')
+  })
+})
+
+describe('statusesByMessage', () => {
+  const sent = (id: string, messageId: string) =>
+    ({
+      id,
+      from: [{ name: '', email: 'me@example.com' }],
+      to: [{ name: '', email: 'alex@example.org' }],
+      cc: [],
+      bcc: [],
+      receivedAt: '2026-11-06T10:00:00.000Z',
+      messageId: [messageId],
+    }) as unknown as Message
+  const lookup = (at: number) => ({
+    recipients: [{ email: 'alex@example.org', fetches: [{ at, source: 'other' as const }] }],
+  })
+  it('matches lookups by Message-ID, so earlier results stay put while a new message loads', async () => {
+    vi.stubGlobal('location', { search: '', protocol: 'file:' })
+    vi.stubGlobal('window', {})
+    try {
+      const { statusesByMessage } =
+        await import('../apps/desktop/src/renderer/src/read-status/useReadStatus')
+      const first = sent('m1', 'one@example.com')
+      const second = sent('m2', 'two@example.com')
+      // The previous answer (for the first message only) while the new lookup is under way.
+      const previous = [{ messageId: 'one@example.com', lookup: lookup(1) }]
+      const out = statusesByMessage([second, first], previous, [first, second])
+      expect([...out.keys()]).toEqual(['m1'])
+      expect(out.get('m1')).toMatchObject([{ email: 'alex@example.org', state: 'opened' }])
+      const untracked = [{ messageId: 'one@example.com', lookup: null }]
+      expect(statusesByMessage([first], untracked, [first]).size).toBe(0)
+      expect(statusesByMessage([first], undefined, [first]).size).toBe(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
