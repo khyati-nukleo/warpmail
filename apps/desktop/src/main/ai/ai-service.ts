@@ -94,15 +94,20 @@ export class AiService {
     text: string
     style: ImproveStyle
   }): Promise<ImproveResult> => {
-    const apiKey = await this.apiKey()
-    if (!apiKey) return failure('noKey')
-    if (input.text.length > maxLength) return failure('tooLong')
-    if (!input.text.trim()) return failure('failed')
-    // Only the newest request may run.
+    // Register first, before any await, so cancel, removeKey and newer requests can find it.
     this.current?.controller.abort()
     const request = { id: input.id, controller: new AbortController() }
     this.current = request
     const { signal } = request.controller
+    const done = (early: ImproveResult) => {
+      if (this.current === request) this.current = undefined
+      return early
+    }
+    if (input.text.length > maxLength) return done(failure('tooLong'))
+    if (!input.text.trim()) return done(failure('failed'))
+    const apiKey = await this.apiKey()
+    if (signal.aborted) return done(failure('cancelled'))
+    if (!apiKey) return done(failure('noKey'))
     let result: ImproveResult
     try {
       const provider = this.createProvider(apiKey, (usage) => this.addUsage(usage))

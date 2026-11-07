@@ -157,6 +157,28 @@ describe('AiService', () => {
     expect(await running).toMatchObject({ ok: false, error: 'cancelled' })
   })
 
+  it('registers a request before reading the key', async () => {
+    const ai = service()
+    await ai.init()
+    await ai.setKey(key)
+    const cancelled = ai.improve(input('a'))
+    ai.cancel('a')
+    expect(await cancelled).toMatchObject({ ok: false, error: 'cancelled' })
+    expect(created).toBe(0)
+
+    const first = ai.improve(input('a'))
+    const second = ai.improve(input('b'))
+    expect(await first).toMatchObject({ ok: false, error: 'cancelled' })
+    expect(await second).toEqual({ ok: true, text: 'Hi there.' })
+    expect(created).toBe(1)
+
+    const removed = ai.improve(input('c'))
+    const status = ai.removeKey()
+    expect(await removed).toMatchObject({ ok: false, error: 'cancelled' })
+    expect((await status).hasKey).toBe(false)
+    expect(created).toBe(1)
+  })
+
   it('refuses blank and very long text without calling the provider', async () => {
     const ai = service()
     await ai.init()
