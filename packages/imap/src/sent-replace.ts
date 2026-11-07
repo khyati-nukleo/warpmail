@@ -1,4 +1,5 @@
 import { isProviderError, ProviderError } from '@inlark/core'
+import { messageIds } from './convert'
 import type { ImapPort } from './port'
 
 /**
@@ -7,7 +8,11 @@ import type { ImapPort } from './port'
  * filed for the one clean copy (no image). Every step is safe to repeat after a crash.
  */
 
-/** The folders the server's own copies can be in. Gmail needs All Mail (`\All`) and Trash. */
+/**
+ * flagged `\All` and `\Trash`: any other folder there is a label, and removing from it only
+ * flagged `\\All` and `\\Trash`: any other folder there is a label, and removing from it only
+ * removes the label.
+ */
 export interface SentCopyBoxes {
   sent: string
   allMail?: string
@@ -20,8 +25,18 @@ export type FindMessageId = (
   uidNext: number,
 ) => Promise<number[]>
 
-function onGmail(port: ImapPort, boxes: SentCopyBoxes): boxes is Required<SentCopyBoxes> {
-  return port.capabilities.has('X-GM-EXT-1') && !!boxes.allMail && !!boxes.trash
+/** A Message-ID that searches can only match exactly (no spaces, quotes or brackets). */
+const exactId = /^[^\s<>"]+@[^\s<>"]+$/
+
+/** Gmail's All Mail and Trash, or undefined on other servers. Without them nothing is deleted. */
+function gmailBoxes(port: ImapPort, boxes: SentCopyBoxes) {
+  if (!port.capabilities.has('X-GM-EXT-1')) return undefined
+  if (!boxes.allMail || !boxes.trash)
+    throw new ProviderError(
+      'filing',
+      "Gmail's All Mail and Trash folders must be shown in IMAP (Gmail settings → Labels) to replace the Sent copy.",
+    )
+  return { allMail: boxes.allMail, trash: boxes.trash }
 }
 /** Selects the folder where the server's copies are looked for and returns their UIDs there. */
 async function serverCopies(
@@ -30,11 +45,20 @@ async function serverCopies(
   messageId: string,
   find: FindMessageId,
 ): Promise<number[]> {
-  if (!onGmail(port, boxes)) return find(port, messageId, (await port.select(boxes.sent)).uidNext)
+  if (!exactId.test(messageId))
+    throw new ProviderError('filing', 'The sent message has no usable Message-ID.')
+  const gmail = gmailBoxes(port, boxes)
+  if (!gmail) return find(port, messageId, (await port.select(boxes.sent)).uidNext)
   // On Gmail every message is in All Mail; Gmail's own search and the header search can each lag.
-  const { uidNext } = await port.select(boxes.allMail)
-  const found = new Set(await port.search({ gmraw: 'rfc822msgid:' + messageId }))
-  for (const uid of await find(port, messageId, uidNext)) found.add(uid)
+  const { uidNext } = await port.select(gmail.allMail)
+  const found = new Set(await find(port, messageId, uidNext))
+  // Gmail's query language is not exact matching, so its matches are checked by envelope.
+  const loose = (await port.search({ gmraw: 'rfc822msgid:' + messageId })).filter(
+    (uid) => !found.has(uid),
+  )
+  if (loose.length)
+    for (const m of await port.fetch(loose.join(','), { envelope: true }))
+      if (messageIds(m.envelope?.messageId)[0] === messageId) found.add(m.uid)
   return [...found].sort((a, b) => a - b)
 }
 
@@ -57,14 +81,23 @@ export async function replaceSentCopy(
 ): Promise<void> {
   const uids = await serverCopies(port, boxes, messageId, find)
   const uidplus = port.capabilities.has('UIDPLUS')
-  if (onGmail(port, boxes)) {
+  const gmail = gmailBoxes(port, boxes)
+  if (gmail) {
     // Deleting from Sent only removes Gmail's Sent label; leaving All Mail removes every label.
-    if (uids.length && !(await port.move(uids, boxes.trash)))
+    if (uids.length && !(await port.move(uids, gmail.trash)))
       throw new ProviderError('filing', "The server's own Sent copy could not be replaced.")
     // Gmail's own search can skip Trash, so it is searched by header only.
-    const trashed = await find(port, messageId, (await port.select(boxes.trash)).uidNext)
+    const trashed = await find(port, messageId, (await port.select(gmail.trash)).uidNext)
     if (trashed.length && uidplus) await port.expunge(trashed)
-  } else if (uids.length && uidplus) await port.expunge(uids)
+  } else if (uids.length) {
+    // Never two Sent copies: without UID EXPUNGE the server's own copy can't be removed safely.
+    if (!uidplus)
+      throw new ProviderError(
+        'filing',
+        "The server saved its own Sent copy and can't safely delete it (no UIDPLUS), so it was kept.",
+      )
+    await port.expunge(uids)
+  }
   await appendSentCopy(port, boxes.sent, mime)
 }
 

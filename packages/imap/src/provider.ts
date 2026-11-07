@@ -1810,12 +1810,11 @@ export class ImapProvider implements MailProvider {
     if (message.replaceServerCopies) {
       // Read status: the server's own copy carries a recipient's image, so it is replaced.
       const mime = message.mime
+      const all = await this.index.listMailboxes(this.accountId)
       const boxes = {
         sent: sent.path,
-        allMail: (await this.index.listMailboxes(this.accountId)).find(
-          (b) => b.specialUse === '\\All',
-        )?.path,
-        trash: (await this.roleBox('trash'))?.path,
+        allMail: all.find((b) => b.specialUse === '\\All')?.path,
+        trash: all.find((b) => b.specialUse === '\\Trash')?.path,
       }
       const find = (port: ImapPort, id: string, uidNext: number) =>
         this.withMessageId(port, id, uidNext)

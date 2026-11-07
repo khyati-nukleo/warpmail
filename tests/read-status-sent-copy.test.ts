@@ -72,12 +72,20 @@ async function connected() {
   return p
 }
 /** A server laid out like Gmail: labels shown as folders, every message in All Mail. */
-function gmailServer() {
+function gmailServer({ allMail = true, trashUse = '\\Trash' as string | null } = {}) {
   for (const path of [...server.boxes.keys()]) if (path !== 'INBOX') server.boxes.delete(path)
   server.addMailbox(SENT, '\\Sent')
-  server.addMailbox(ALL, '\\All')
-  server.addMailbox(TRASH, '\\Trash')
+  if (allMail) server.addMailbox(ALL, '\\All')
+  server.addMailbox(TRASH, trashUse)
   server.gmail = true
+}
+/** Nothing was deleted or filed: the server's copy is still where it was. */
+function expectUntouched(path: string) {
+  expect(server.commands).not.toContain('MOVE')
+  expect(server.commands).not.toContain('UID EXPUNGE')
+  expect(server.commands).not.toContain('APPEND')
+  expect(withId(path)).toHaveLength(1)
+  expect(withId(path)[0].input.html).toContain('read.example.com')
 }
 const withId = (path: string) => server.box(path).messages.filter((m) => m.input.messageId === id)
 const decoded = (raw?: Uint8Array) => new TextDecoder().decode(raw)
@@ -141,6 +149,62 @@ describe('Read status: the Sent copy of a tracked email', () => {
     expectOneCleanCopy(SENT)
     expect(withId(ALL)).toHaveLength(1)
     expect(withId(TRASH)).toHaveLength(0)
+  })
+  it("only moves Gmail's matches whose Message-ID is exactly this one", async () => {
+    gmailServer()
+    const other = { ...serverCopy, messageId: 'unrelated@example.com', html: '<p>Other</p>' }
+    server.deliver(ALL, serverCopy)
+    const stray = server.deliver(ALL, other)
+    server.deliver(SENT, serverCopy)
+    server.deliver(SENT, other)
+    const p = await connected()
+    // Gmail's query language is not exact matching, so its search may return other messages.
+    const port = server.commandPorts.at(-1)!
+    const search = port.search.bind(port)
+    port.search = async (criteria) =>
+      criteria.gmraw ? [...(await search(criteria)), stray] : search(criteria)
+    expect(await p.fileSentCopy(account, message)).toBe('filed')
+    expect(
+      server.box(ALL).messages.filter((m) => m.input.messageId === other.messageId),
+    ).toHaveLength(1)
+    expect(
+      server.box(SENT).messages.filter((m) => m.input.messageId === other.messageId),
+    ).toHaveLength(1)
+    expect(withId(SENT)).toHaveLength(1)
+    expect(decoded(withId(SENT)[0].raw)).toBe(decoded(clean))
+  })
+  it('refuses a Message-ID that could widen the search', async () => {
+    gmailServer()
+    server.deliver(ALL, serverCopy)
+    server.deliver(SENT, serverCopy)
+    const p = await connected()
+    await expect(
+      p.fileSentCopy(account, { ...message, messageId: 'from:me' }),
+    ).rejects.toMatchObject({ code: 'filing' })
+    expectUntouched(SENT)
+  })
+  it('on Gmail without All Mail in IMAP it deletes nothing and says why', async () => {
+    gmailServer({ allMail: false })
+    server.deliver(SENT, serverCopy)
+    const p = await connected()
+    await expect(p.fileSentCopy(account, message)).rejects.toMatchObject({ code: 'filing' })
+    expectUntouched(SENT)
+  })
+  it('on Gmail with a Trash folder that is not \\Trash it deletes nothing', async () => {
+    gmailServer({ trashUse: null })
+    server.deliver(ALL, serverCopy)
+    server.deliver(SENT, serverCopy)
+    const p = await connected()
+    await expect(p.fileSentCopy(account, message)).rejects.toMatchObject({ code: 'filing' })
+    expectUntouched(SENT)
+    expectUntouched(ALL)
+  })
+  it('on a non-Gmail server without UIDPLUS it never files a second copy', async () => {
+    server.capabilities.delete('UIDPLUS')
+    server.deliver('Sent', serverCopy)
+    const p = await connected()
+    await expect(p.fileSentCopy(account, message)).rejects.toMatchObject({ code: 'filing' })
+    expectUntouched('Sent')
   })
   it('on a non-Gmail server with UIDPLUS it expunges its own copy in Sent and appends the clean one', async () => {
     server.deliver('Sent', serverCopy)
