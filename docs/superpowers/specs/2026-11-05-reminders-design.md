@@ -93,7 +93,7 @@ Each was decided, not forgotten. Revisit any of them later.
 | "Forgot to reply" for archived mail                  | Archiving counts as handled.                                                                             | Khyati             |
 | Reminders about automated mail                       | Same rule as Important.                                                                                  | Claude             |
 | Holidays as non-working days                         | Monday to Friday only for now.                                                                           | Claude             |
-| Syncing snoozes between laptops                      | Short-lived. Dismissals and switches do sync, through Gmail labels.                                      | Claude             |
+| Syncing snoozes between laptops                      | Short-lived. Dismissals, switches and returns do sync, through Gmail labels.                             | Claude             |
 | Reminders running while the app is closed            | The app is desktop-only, with no server. Missed reminders appear on the next launch.                     | Roadmap constraint |
 | Only replies from the To line cancelling a follow-up | A colleague answering for the client counts too: any reply except Khyati's cancels it.                   | Khyati             |
 
@@ -128,7 +128,7 @@ Builder-level calls by Claude (can be overridden):
 
 20. A second label, "Warpmail/Follow up", for follow-ups switched on by hand, so the other laptop doesn't re-guess them as off.
 21. Snoozes are stored locally, with the other settings.
-22. (2026-11-07) A third label, "Warpmail/Returned", on the ask whose follow-up came back to the inbox, so a returned follow-up comes back once across both laptops; archiving it afterwards means handled. Before, only the computer that moved it remembered, so the other laptop moved it back again. Created on first use and hidden like the other two.
+22. (2026-11-07) A third label, "Warpmail/Returned", on the ask whose follow-up came back to the inbox, so a returned follow-up comes back once across both laptops; archiving it afterwards means handled. Before, only the computer that moved it remembered, so the other laptop moved it back again. Created on first use; hidden from Warpmail's folder list; visible in Gmail on the web.
 
 ## How it's built (for the builder)
 
