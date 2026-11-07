@@ -1655,7 +1655,11 @@ export class ImapProvider implements MailProvider {
     draft: Draft,
     messageId: string,
     keepBcc: boolean,
-    override: { html?: string; date?: Date } = {}, // Read status
+    override: {
+      html?: string
+      date?: Date
+      attachments?: { name: string; type: string; cid?: string; content: Uint8Array }[]
+    } = {}, // Read status
   ) {
     const sender = this.sender(account, draft.identityId)
     return composeMime({
@@ -1670,16 +1674,19 @@ export class ImapProvider implements MailProvider {
       inReplyTo: draft.inReplyTo,
       references: draft.references,
       date: override.date ?? new Date(),
-      attachments: await Promise.all(
-        draft.attachments.map(async (a) => ({
-          name: a.name,
-          type: a.type,
-          cid: a.cid,
-          content: await this.options.readAttachment(a.id),
-        })),
-      ),
+      attachments: override.attachments ?? (await this.readAttachments(draft)),
       keepBcc,
     })
+  }
+  private readAttachments(draft: Draft) {
+    return Promise.all(
+      draft.attachments.map(async (a) => ({
+        name: a.name,
+        type: a.type,
+        cid: a.cid,
+        content: await this.options.readAttachment(a.id),
+      })),
+    )
   }
   /** On the sender's own domain, so a message from an alias doesn't name the account's. */
   private messageId(email: string) {
@@ -1740,14 +1747,20 @@ export class ImapProvider implements MailProvider {
     if (tracking && !precomposed) {
       // Read status: copies share one date so their headers are identical.
       const date = new Date()
-      const mime = await this.compose(account, draft, messageId, true, { date })
+      // Read once, so every copy carries the same bytes.
+      const attachments = await this.readAttachments(draft)
+      const mime = await this.compose(account, draft, messageId, true, { date, attachments })
       const copies = []
       for (const recipient of trackedRecipients(draft)) {
         const src = tracking.imageFor(recipient)
         const html = src ? addPixel(draft.html, src) : draft.html
         copies.push({
           recipient,
-          mime: await this.compose(account, draft, messageId, false, { html, date }),
+          mime: await this.compose(account, draft, messageId, false, {
+            html,
+            date,
+            attachments,
+          }),
         })
       }
       return { messageId, mime, copies, envelope: { from, to: recipients } }

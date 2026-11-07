@@ -16,10 +16,12 @@ const config: ImapConnectionConfig = {
   outgoingSameCredentials: true,
 }
 let directory: string
+let reads = 0
 let provider: ImapProvider
 let account: Account
 
 beforeEach(async () => {
+  reads = 0
   directory = await mkdtemp(join(tmpdir(), 'inlark-read-status-'))
   provider = new ImapProvider({
     connectionId: 'c1',
@@ -27,7 +29,10 @@ beforeEach(async () => {
     config,
     password: 'disposable',
     index: openInProcessIndex(join(directory, 'index.sqlite')),
-    readAttachment: async () => new Uint8Array(),
+    readAttachment: async () => {
+      reads++
+      return new TextEncoder().encode('attached bytes')
+    },
     background: false,
     ports: new FakeImapServer().port,
     timing: { sentCopyGraceMs: 0, initialBatch: 5, historicalBatch: 5, previews: 0 },
@@ -128,5 +133,31 @@ describe('read status copies', () => {
     const out = await provider.prepareSubmission(account, draft(), 'id1@example.com')
     expect(out.copies).toBeUndefined()
     expect(text(out.mime!)).not.toMatch(/^Bcc:/im)
+  })
+  it('reads each attachment once and every copy carries the same bytes', async () => {
+    const withFile: Draft = {
+      ...draft(),
+      attachments: [
+        {
+          id: 'a1',
+          name: 'note.txt',
+          type: 'text/plain',
+          size: 14,
+        } as Draft['attachments'][number],
+      ],
+    }
+    const out = await provider.prepareSubmission(
+      account,
+      withFile,
+      'id1@example.com',
+      undefined,
+      tracking,
+    )
+    expect(reads).toBe(1)
+    const parsed = await Promise.all(
+      [out.mime!, ...out.copies!.map((c) => c.mime)].map((m) => parseMime(m)),
+    )
+    for (const p of parsed) expect(text(p.attachments[0].content)).toBe('attached bytes')
+    expect(parsed).toHaveLength(4)
   })
 })
