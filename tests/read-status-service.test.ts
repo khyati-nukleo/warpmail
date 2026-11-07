@@ -91,8 +91,12 @@ let submit: ReturnType<typeof vi.fn<(...args: any[]) => Promise<SubmissionOutcom
 let submitCopies: ReturnType<typeof vi.fn<typeof submitSmtpCopies>>
 /** What each copy's transaction ends with, in order; accepted when not given. */
 let plan: CopyOutcome['result'][]
-const factory: ProviderFactory = (options) =>
-  new ImapProvider({
+/** Every provider's close, so cleanup waits until no service writes to the directory. */
+let closing: Promise<void>[] = []
+/** Every service started in a test, including ones a test treats as crashed. */
+let running: MailService[] = []
+const factory: ProviderFactory = (options) => {
+  const provider = new ImapProvider({
     connectionId: options.connectionId,
     name: options.name,
     config: options.config as typeof input.config & { protocol: 'imap' },
@@ -108,6 +112,20 @@ const factory: ProviderFactory = (options) =>
     smtp: { submit, verify: async () => {}, submitCopies },
     timing: { sentCopyGraceMs: 0, previews: 0 },
   })
+  const close = provider.close.bind(provider)
+  provider.close = () => {
+    const closed = close()
+    closing.push(closed)
+    return closed
+  }
+  return provider
+}
+/** Stops a service the way the app quits: nothing of it runs or writes afterwards. */
+async function stop(stopped: MailService) {
+  running = running.filter((s) => s !== stopped)
+  stopped.dispose()
+  await Promise.allSettled(closing)
+}
 const text = (bytes?: Uint8Array) => new TextDecoder().decode(bytes)
 /** Gmail files the first accepted copy in Sent itself, image included. */
 async function gmailFiles(copy: Copies[number]) {
@@ -137,6 +155,7 @@ async function start() {
       throw new Error('offline')
     },
   })
+  running.push(service)
   await service.init()
 }
 const connected = () => vi.waitFor(() => expect(service.accounts[0]?.status).toBe('connected'))
@@ -170,10 +189,13 @@ beforeEach(async () => {
   await service.readStatusSecret.set(password)
 })
 afterEach(async () => {
-  service.dispose()
+  for (const s of running) s.dispose()
+  running = []
+  await Promise.allSettled(closing)
+  closing = []
   vi.restoreAllMocks()
   await new Promise((r) => setTimeout(r, 20))
-  await rm(directory, { recursive: true, force: true })
+  await rm(directory, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('Read status: tracked sending', () => {
@@ -232,7 +254,7 @@ describe('Read status: tracked sending', () => {
     await midway
     const crashed = service
     await start()
-    crashed.dispose()
+    await stop(crashed)
     expect(await journal()).toMatchObject({
       state: 'partial',
       accepted: [alex],
@@ -259,7 +281,7 @@ describe('Read status: tracked sending', () => {
     await before
     const crashed = service
     await start()
-    crashed.dispose()
+    await stop(crashed)
     expect(await journal()).toMatchObject({ state: 'rejected', error: closed })
     expect(await localDraft()).toMatchObject({ status: 'error', error: closed, text: 'Hello' })
   })
@@ -348,7 +370,7 @@ describe('Read status: tracked sending', () => {
     expect((await service.send(draft)).status).toBe('sent')
     await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('appending'))
     expect(server.box(SENT).messages[0].input.html).toContain('read.example.com')
-    service.dispose()
+    await stop(service)
     await start()
     await connected()
     await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
