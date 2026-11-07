@@ -1,5 +1,6 @@
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
+import type { AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -566,6 +567,8 @@ export type AppEvent =
   | { type: 'progress'; completed: number; total: number }
   | { type: 'submissions'; submissions: SubmissionSummary[] }
   | { type: 'update'; status: UpdateStatus }
+  // Improve draft
+  | { type: 'improve'; id: string; text: string }
 export type UpdateStatus =
   | { phase: 'idle' }
   | { phase: 'downloading'; version: string; percent: number }
@@ -759,5 +762,12 @@ export interface DesktopMailAPI {
   settings(settings: Settings): Promise<Settings>
   restart(): Promise<void>
   diagnostics(): Promise<string>
+  // Improve draft
+  aiStatus(): Promise<AiStatus>
+  setAiKey(key: string): Promise<AiStatus>
+  removeAiKey(): Promise<AiStatus>
+  testAiKey(): Promise<AiTestResult>
+  improveDraft(input: { id: string; text: string; style: ImproveStyle }): Promise<ImproveResult>
+  cancelImprove(id: string): Promise<void>
   onEvent(listener: (event: AppEvent) => void): () => void
 }

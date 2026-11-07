@@ -334,4 +334,17 @@ export const ipcSchemas = {
   settings: z.tuple([settingsSchema]),
   restart: z.tuple([]),
   diagnostics: z.tuple([]),
+  // Improve draft
+  aiStatus: z.tuple([]),
+  setAiKey: z.tuple([z.string().max(500)]),
+  removeAiKey: z.tuple([]),
+  testAiKey: z.tuple([]),
+  improveDraft: z.tuple([
+    z.object({
+      id: z.string().max(100),
+      text: z.string().max(40_000),
+      style: z.enum(['polish', 'shorter', 'formal', 'friendly']),
+    }),
+  ]),
+  cancelImprove: z.tuple([z.string().max(100)]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>

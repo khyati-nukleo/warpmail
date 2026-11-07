@@ -17,6 +17,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { ipcSchemas, type AppEvent, type Settings } from '@inlark/core'
 import { JsonStore } from './storage'
 import { MailService } from './service'
+import { AiService } from './ai/ai-service'
 import { imapProviders } from './imap-accounts'
 import { openWorkerIndex } from './imap-index/open'
 import { discover } from './discovery-transport'
@@ -256,6 +257,9 @@ else {
         discover,
       })
       await service.init()
+      // Improve draft
+      const ai = new AiService(new JsonStore(join(app.getPath('userData'), 'ai')), send)
+      await ai.init()
       // Native surfaces such as the window controls and menus follow inlark's theme setting.
       nativeTheme.themeSource = service.settings.theme
       nativeTheme.on('updated', followTheme)
@@ -339,6 +343,13 @@ else {
           setImmediate(() => app.quit())
         },
         diagnostics: service.diagnostics,
+        // Improve draft
+        aiStatus: ai.status,
+        setAiKey: ai.setKey,
+        removeAiKey: ai.removeKey,
+        testAiKey: ai.testKey,
+        improveDraft: ai.improve,
+        cancelImprove: ai.cancel,
       }
       for (const [name, schema] of Object.entries(ipcSchemas))
         ipcMain.handle('mail:' + name, async (event, ...args: unknown[]) => {
