@@ -20,8 +20,24 @@ interface NodeLike {
   toJSON(): JSONContent
 }
 
-const quoteHeader = /^On .+wrote:\s*$/s
-const forwardHeaders = ['---------- Forwarded message ----------', '-----Original Message-----']
+/** "On … wrote:" and Gmail's French "Le … a écrit :", which may wrap over lines. */
+const attribution = [/^On .+wrote:\s*$/s, /^Le .+a écrit\s?:\s*$/s]
+
+/**
+ * Lines that start what is never sent, matched loosely because each mail app writes them
+ * differently: forward and original-message headers (Gmail, Thunderbird, Outlook, Apple Mail,
+ * in English and French), Outlook's underscore line and the `-- ` signature delimiter.
+ */
+const boundaryLines = [
+  /^-{2,}\s*(?:Forwarded message|Original message|Message transféré|Message d'origine)\s*-{2,}/i,
+  /^(?:Begin forwarded message|Début du message réexpédié)\s?:/i,
+  /^_{10,}\s*$/,
+  /^--\s*$/,
+  ...attribution,
+]
+/** Outlook's header block: "From: …" with "Sent: …" or "Date: …" on the next line. */
+const outlookFrom = /^(?:From|De)\s?: ./
+const outlookNext = /^(?:Sent|Date|Envoyé)\s?: /
 
 function inlineText(node: JSONContent): string {
   if (node.type === 'hardBreak') return '\n'
@@ -34,15 +50,29 @@ function isEmptyParagraph(node: JSONContent): boolean {
 }
 
 function isQuoteIntro(node: JSONContent | undefined): boolean {
-  return node?.type === 'paragraph' && quoteHeader.test(inlineText(node))
+  if (node?.type !== 'paragraph') return false
+  const text = inlineText(node).trim()
+  return attribution.some((pattern) => pattern.test(text))
+}
+
+/**
+ * A paragraph that has a header, quote line or signature delimiter on any of its lines is never
+ * sent, so a plain-text draft (one paragraph with hard breaks) can't leak what follows it.
+ */
+function hasBoundaryLine(text: string): boolean {
+  const lines = text.split('\n')
+  return lines.some(
+    (line, index) =>
+      boundaryLines.some((pattern) => pattern.test(line)) ||
+      (outlookFrom.test(line) && outlookNext.test(lines[index + 1] ?? '')),
+  )
 }
 
 function isBoundary(node: JSONContent): boolean {
   if (node.type === 'signature' || node.type === 'blockquote') return true
   if (node.type !== 'paragraph') return false
   if (node.attrs?.signature) return true
-  const text = inlineText(node)
-  return quoteHeader.test(text) || forwardHeaders.some((header) => text.startsWith(header))
+  return isQuoteIntro(node) || hasBoundaryLine(inlineText(node))
 }
 
 /** Where the leading blanks end and the own text ends, as indexes into the top-level nodes. */

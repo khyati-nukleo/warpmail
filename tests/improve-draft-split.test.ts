@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import { Editor, type JSONContent } from '../apps/desktop/node_modules/@tiptap/react'
 import StarterKit from '../apps/desktop/node_modules/@tiptap/starter-kit'
@@ -29,6 +30,32 @@ const textSignature: JSONContent = {
     { type: 'text', text: 'example.com' },
   ],
 }
+/** A document as the composer parses it from a resumed draft's HTML. */
+function parsed(html: string): JSONContent {
+  const editor = new Editor({
+    element: null,
+    // The composer's own StarterKit settings (Composer.tsx).
+    extensions: [
+      StarterKit.configure({ heading: false, codeBlock: false, horizontalRule: false }),
+      SignatureNode,
+      SignatureParagraph,
+    ],
+    content: html,
+  })
+  const json = editor.getJSON()
+  editor.destroy()
+  return json
+}
+
+/** The text sent keeps the user's sentence and none of the client's mail or the signature. */
+function expectOnlyOwn(html: string, own: string, others: string[]): void {
+  const { text } = splitDraft(parsed(html))
+  expect(text).toContain(own)
+  for (const other of others) expect(text).not.toContain(other)
+}
+
+const clientParts = ['Lee Client', 'lee@example.com', 'Budget', "The client's private text."]
+
 const list = (type: string, ...items: string[]): JSONContent => ({
   type,
   content: items.map((item) => ({ type: 'listItem', content: [p(item)] })),
@@ -194,5 +221,112 @@ describe('draft splitting', () => {
     const bare = make(doc(htmlSignature))
     expect(ownRange(bare.state.doc)).toBeUndefined()
     bare.destroy()
+  })
+
+  describe('resumed drafts written in other mail apps', () => {
+    it('stops at a Gmail forward header', () => {
+      expectOnlyOwn(
+        '<div dir="ltr">FYI, see below.</div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">---------- Forwarded message ---------<br>From: <strong class="gmail_sendername">Lee Client</strong> <span>&lt;lee@example.com&gt;</span><br>Date: Wed, Nov 5, 2026 at 9:12 AM<br>Subject: Budget<br>To: &lt;khyati@example.com&gt;<br></div><br><br><div dir="ltr">The client\'s private text.</div></div>',
+        'FYI, see below.',
+        [...clientParts, 'Forwarded message', 'khyati@example.com'],
+      )
+    })
+
+    it('stops at a Gmail reply line in English and in French', () => {
+      expectOnlyOwn(
+        '<div dir="ltr">Sounds good, thanks.</div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Wed, Nov 5, 2026 at 9:12 AM Lee Client &lt;lee@example.com&gt; wrote:<br></div><blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex">The client\'s private text.</blockquote></div>',
+        'Sounds good, thanks.',
+        [...clientParts, 'wrote:'],
+      )
+      expectOnlyOwn(
+        '<div dir="ltr">Merci, c’est parfait.</div><br><div class="gmail_quote"><div class="gmail_attr">Le mer. 5 nov. 2026, à 09 h 12, Lee Client &lt;lee@example.com&gt; a écrit&nbsp;:<br></div><blockquote class="gmail_quote">The client\'s private text.</blockquote></div>',
+        'Merci, c’est parfait.',
+        [...clientParts, 'a écrit'],
+      )
+    })
+
+    it('puts a French reply line back with its quote', () => {
+      const split = splitDraft(
+        doc(
+          p('Merci.'),
+          p('Le mer. 5 nov. 2026, Lee <lee@example.com> a écrit :'),
+          quote(p('Old')),
+        ),
+      )
+      expect(split.text).toBe('Merci.')
+      expect(split.rest).toHaveLength(2)
+    })
+
+    it('stops at a Gmail signature delimiter', () => {
+      expectOnlyOwn(
+        '<div>Sounds good.</div><br>-- <br><div dir="ltr" class="gmail_signature">Khyati Example<br>Example Studio</div>',
+        'Sounds good.',
+        ['--', 'Khyati Example', 'Example Studio'],
+      )
+      expectOnlyOwn(
+        '<div dir="ltr">Sounds good.<br clear="all"><div><br></div><span class="gmail_signature_prefix">-- </span><br><div dir="ltr" class="gmail_signature">Khyati Example<br>Example Studio</div></div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Wed, Nov 5, 2026 at 9:12 AM Lee Client &lt;<a href="mailto:lee@example.com">lee@example.com</a>&gt; wrote:<br></div><blockquote class="gmail_quote">The client\'s private text.</blockquote></div>',
+        'Sounds good.',
+        ['--', 'Khyati Example', 'Example Studio', ...clientParts],
+      )
+    })
+
+    it('stops at an Apple Mail forward, with or without a quote around it', () => {
+      expectOnlyOwn(
+        '<div>FYI, see below.</div><div><br><blockquote type="cite"><div>Begin forwarded message:</div><br><div><b>From: </b>Lee Client &lt;lee@example.com&gt;</div><div><b>Subject: </b>Budget</div><div>The client\'s private text.</div></blockquote></div>',
+        'FYI, see below.',
+        [...clientParts, 'Begin forwarded'],
+      )
+      expectOnlyOwn(
+        "<div>FYI, see below.</div><div><br></div><div>Begin forwarded message:</div><br><div><b>From: </b>Lee Client &lt;lee@example.com&gt;</div><div><b>Subject: </b>Budget</div><div>The client's private text.</div>",
+        'FYI, see below.',
+        [...clientParts, 'Begin forwarded'],
+      )
+    })
+
+    it('stops at an Outlook header block and an Outlook underscore line', () => {
+      expectOnlyOwn(
+        '<div>Thanks, will do.</div><hr style="display:inline-block;width:98%"><div id="divRplyFwdMsg" dir="ltr"><b>From:</b> Lee Client &lt;lee@example.com&gt;<br><b>Sent:</b> Wednesday, November 5, 2026 9:12 AM<br><b>To:</b> Khyati &lt;khyati@example.com&gt;<br><b>Subject:</b> Budget<div>&nbsp;</div></div><div>The client\'s private text.</div>',
+        'Thanks, will do.',
+        [...clientParts, 'Sent:'],
+      )
+      expectOnlyOwn(
+        "<div>Thanks, will do.</div><div>________________________________</div><div><b>From:</b> Lee Client &lt;lee@example.com&gt;<br><b>Date:</b> Wednesday, November 5, 2026 9:12 AM<br><b>Subject:</b> Budget</div><div>The client's private text.</div>",
+        'Thanks, will do.',
+        [...clientParts, '____'],
+      )
+      expectOnlyOwn(
+        "<div>Merci.</div><div><b>De&nbsp;:</b> Lee Client &lt;lee@example.com&gt;<br><b>Envoyé&nbsp;:</b> mercredi 5 novembre 2026 09:12<br><b>Objet&nbsp;:</b> Budget</div><div>The client's private text.</div>",
+        'Merci.',
+        clientParts,
+      )
+    })
+
+    it('stops at loose forward and original-message headers', () => {
+      for (const header of [
+        '---------- Forwarded message ---------',
+        '-------- Forwarded Message --------',
+        '---------- Message transféré ---------',
+        '-----Original Message-----',
+        '----- Original Message -----',
+        "-----Message d'origine-----",
+        'Début du message réexpédié :',
+      ]) {
+        const split = splitDraft(doc(p('Yes.'), p(header + '\nFrom: Lee Client'), p('Old')))
+        expect(split.text, header).toBe('Yes.')
+      }
+    })
+
+    it('never sends a paragraph that has a quote or signature further down it', () => {
+      // A plain-text draft becomes one paragraph with hard breaks.
+      expectOnlyOwn(
+        "<p>Hi there,<br>The report is ready.<br><br>On Wed, Nov 5, 2026, Lee Client &lt;lee@example.com&gt; wrote:<br>&gt; The client's private text.<br>-- <br>Khyati Example</p>",
+        '',
+        [...clientParts, 'Khyati Example'],
+      )
+      expectOnlyOwn('<p>Hi there,</p><p>Sounds good.<br>-- <br>Khyati Example</p>', 'Hi there,', [
+        'Sounds good.',
+        'Khyati Example',
+      ])
+    })
   })
 })
