@@ -67,7 +67,9 @@ describe('pixels', () => {
     expect(isWorkerImage('https://read.example.com./p/x.gif', base)).toBe(true)
     expect(isWorkerImage('https://READ.example.com.:443/p/x.gif', base)).toBe(true)
     expect(isWorkerImage('https://read.example.com.evil.example/p/x.gif', base)).toBe(false)
-    expect(isWorkerImage('http://read.example.com/p/x.gif', base)).toBe(false)
+    expect(isWorkerImage('http://read.example.com/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('https://read.example.com:8443/p/x.gif', base)).toBe(true)
+    expect(isWorkerImage('ftp://read.example.com/x', base)).toBe(false)
     expect(stripPixels('<p>a</p><img src="https://read.example.com./p/x.gif">', base)).toBe(
       '<p>a</p>',
     )
