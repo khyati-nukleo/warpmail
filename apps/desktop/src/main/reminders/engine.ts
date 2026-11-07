@@ -336,15 +336,22 @@ export class ReminderEngine {
   private async recompute(ids: string[]) {
     const waiting: Waiting[] = []
     const now = this.now()
+    const current = this.imapIds()
+    for (const id of this.firstSeen.keys())
+      if (!current.includes(id)) this.forgetReturns(id, new Map())
     for (const id of ids) {
       if (this.disposed) return
       const target = this.target(id)
       if (!target) {
         this.dropLabels(id)
+        // Reminders off or the account gone: a held return starts over when they come back.
+        this.forgetReturns(id, new Map())
         continue
       }
       if (this.labelsWaiting.some((w) => w.accountId === id)) await this.saveLabels(id)
       const derived = await this.derived(id)
+      // When this index was read: what first-seen means, not when the recompute began.
+      const read = this.now()
       // In the background: the inbox never waits for bodies to be read.
       if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)
       // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
@@ -360,7 +367,7 @@ export class ReminderEngine {
         // Once per ask and due time: a snooze that ends later may bring it back again.
         const askId = ask?.messageId ?? reminder.messageId
         const key = [id, reminder.threadId, askId, reminder.dueMs].join('|')
-        const first = seen.get(key) ?? now
+        const first = seen.get(key) ?? read
         stillSeen.set(key, first)
         if (target.provider.readyForReminders?.(Math.max(reminder.dueMs, first)) === false) {
           held = true
@@ -375,13 +382,19 @@ export class ReminderEngine {
         waiting.push({ accountId: id, threadId: reminder.threadId, key, ask })
       }
       // One back in the inbox, or no longer due, starts again if it is archived later.
-      this.firstSeen.set(id, stillSeen)
-      for (const key of this.unmoved.keys())
-        if (key.startsWith(id + '|') && !stillSeen.has(key)) this.unmoved.delete(key)
+      this.forgetReturns(id, stillSeen)
       if (held) target.provider.awaitFullSync?.()
     }
     if (waiting.length && !this.disposed) await this.returnDue(waiting)
     await this.arm()
+  }
+
+  /** Keeps an account's first-seen times and failed tries for these returns only. */
+  private forgetReturns(accountId: string, keep: Map<string, number>) {
+    if (keep.size) this.firstSeen.set(accountId, keep)
+    else this.firstSeen.delete(accountId)
+    for (const key of this.unmoved.keys())
+      if (key.startsWith(accountId + '|') && !keep.has(key)) this.unmoved.delete(key)
   }
 
   /** Wakes at the next reminder to come due, at most an hour away. */

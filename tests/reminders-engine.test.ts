@@ -463,6 +463,61 @@ describe('ReminderEngine', () => {
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(1)
   })
+  it('starts first-seen over after reminders were off, so an old full sync never counts', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    let syncedAt = h.clock.now - 1
+    h.provider.readyForReminders = vi.fn((t: number) => t <= syncedAt)
+    h.provider.awaitFullSync = vi.fn()
+    h.engine.start()
+    await settle()
+    expect(h.returned).not.toHaveBeenCalled()
+    // Reminders off; meanwhile it went back to the inbox and was archived again, with a reply
+    // filed into All Mail that only a later full sync would show.
+    h.settings.reminders = { enabled: false }
+    h.engine.invalidate('a1')
+    await settle()
+    syncedAt = h.clock.now + 1
+    h.clock.now += 3600_000
+    h.settings.reminders = {}
+    h.engine.invalidate('a1')
+    await settle()
+    // That full sync predates turning them back on.
+    expect(h.returned).not.toHaveBeenCalled()
+    syncedAt = h.clock.now
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+  })
+  it('takes first-seen from after the index was read, not from when the recompute began', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    const began = h.clock.now
+    // A full sync started while the index was being read.
+    const syncedAt = began + 30 * 60_000
+    h.provider.readyForReminders = vi.fn((t: number) => t <= syncedAt)
+    h.provider.awaitFullSync = vi.fn()
+    const read = h.provider.reminderFacts.getMockImplementation()!
+    h.provider.reminderFacts.mockImplementation(async (...args: unknown[]) => {
+      h.clock.now = began + 3600_000
+      return read(...args)
+    })
+    h.engine.start()
+    await settle()
+    expect(h.provider.readyForReminders).toHaveBeenCalledWith(began + 3600_000)
+    expect(h.returned).not.toHaveBeenCalled()
+  })
+  it('forgets held returns of an account that was removed', async () => {
+    let accounts = [account]
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    ;(h.engine as any).deps.accounts = () => accounts
+    h.provider.readyForReminders = vi.fn(() => false)
+    h.engine.start()
+    await settle()
+    expect((h.engine as any).firstSeen.size).toBe(1)
+    accounts = []
+    h.engine.invalidate()
+    await settle()
+    expect((h.engine as any).firstSeen.size).toBe(0)
+  })
   it('never returns a forgot-to-reply or one not yet due', async () => {
     const h = make({
       facts: [
