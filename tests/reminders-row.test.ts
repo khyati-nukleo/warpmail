@@ -71,7 +71,7 @@ describe('follow-up guess', () => {
       await import('../apps/desktop/src/renderer/src/reminders/draft-text')
     const seen: boolean[] = []
     function Probe({ html, text }: { html: string; text: string }): ReactNode {
-      seen.push(useFollowUpGuess({ html, text }))
+      seen.push(useFollowUpGuess({ html, text }, true))
       return null
     }
     root = createRoot(document.createElement('div'))
