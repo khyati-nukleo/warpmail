@@ -227,6 +227,7 @@ describe('claude provider', () => {
     [500, 'api_error', 'unavailable'],
     [529, 'overloaded_error', 'unavailable'],
     [400, 'invalid_request_error', 'failed'],
+    [404, 'not_found_error', 'modelUnavailable'],
   ])('maps HTTP %i to a kind', async (status, type, kind) => {
     const s = await startServer({ status, error: { type, message: 'secret server detail' } })
     const provider = createClaudeProvider({ apiKey, baseURL: s.baseURL, maxRetries: 0 })
@@ -236,6 +237,27 @@ describe('claude provider', () => {
     expect(err.kind).toBe(kind)
     expect(err.message).toBe(improveErrorMessages[kind])
     expect(err.message).not.toContain('secret server detail')
+  })
+
+  it('says the model is unavailable when the account needs data retention for it', async () => {
+    const s = await startServer({
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        message:
+          'In order to access this model, your organization or workspace must have data retention enabled.',
+      },
+    })
+    const provider = createClaudeProvider({
+      apiKey,
+      model: 'claude-fable-5-1',
+      baseURL: s.baseURL,
+      maxRetries: 0,
+    })
+    const err = await failureOf(
+      collect(provider.improve('x', 'polish', new AbortController().signal)),
+    )
+    expect(err.kind).toBe('modelUnavailable')
   })
 
   it('maps an error event in the middle of the stream', async () => {

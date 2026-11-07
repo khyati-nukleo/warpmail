@@ -206,6 +206,8 @@ export function AiSettings({ notify }: { notify: Notify }) {
               aria-label="Model"
               className="setting-select w-auto min-w-60 shrink-0"
               value={data.model}
+              // A test still running belongs to the current model.
+              disabled={testing}
               options={modelOptions}
               onValueChange={(model) => void chooseModel(model)}
             />

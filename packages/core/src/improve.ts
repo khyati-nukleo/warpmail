@@ -20,6 +20,7 @@ export type ImproveErrorKind =
   | 'unavailable'
   | 'refused'
   | 'tooLong'
+  | 'modelUnavailable'
   | 'failed'
   | 'cancelled'
 
@@ -33,6 +34,8 @@ export const improveErrorMessages: Record<ImproveErrorKind, string> = {
   unavailable: 'Claude is unavailable right now. Try again in a moment.',
   refused: 'Claude declined to rewrite this draft.',
   tooLong: 'This draft is too long to improve in one go.',
+  modelUnavailable:
+    'Your Anthropic account can’t use this model. Choose another one in Settings → AI.',
   failed: 'Improve didn’t work this time. Try again.',
   cancelled: '',
 }
@@ -57,6 +60,7 @@ export interface AiModelInfo {
   prices: { input: number; output: number; cacheWrite: number; cacheRead: number }
 }
 
+/** Haiku's higher price for prompts over 100,000 tokens never applies: drafts are capped well below. */
 export const aiModels: AiModelInfo[] = [
   {
     id: 'claude-haiku-5-5',
@@ -95,7 +99,7 @@ export interface AiStatus {
   /** Month of the counters, as YYYY-MM. */
   month: string
   improves: number
-  /** Estimated spend this month in USD. */
+  /** Estimated spend this month in USD, to a hundredth of a cent. */
   estimatedCost: number
 }
 

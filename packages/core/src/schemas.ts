@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { DesktopMailAPI } from './model'
+import { aiModels, type AiModel } from './improve'
 
 const id = z.string().min(1).max(2048)
 const address = z.object({ name: z.string().max(1000), email: z.string().max(320) })
@@ -338,9 +339,7 @@ export const ipcSchemas = {
   aiStatus: z.tuple([]),
   setAiKey: z.tuple([z.string().max(500)]),
   removeAiKey: z.tuple([]),
-  setAiModel: z.tuple([
-    z.enum(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']),
-  ]),
+  setAiModel: z.tuple([z.enum(aiModels.map((model) => model.id) as [AiModel, ...AiModel[]])]),
   testAiKey: z.tuple([]),
   improveDraft: z.tuple([
     z.object({

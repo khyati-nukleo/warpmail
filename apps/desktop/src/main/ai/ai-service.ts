@@ -85,7 +85,7 @@ export class AiService {
       model: await this.model(),
       month: usage.month,
       improves: usage.improves,
-      estimatedCost: Math.round(usage.cost * 100) / 100,
+      estimatedCost: Math.round(usage.cost * 10_000) / 10_000,
     }
   }
 

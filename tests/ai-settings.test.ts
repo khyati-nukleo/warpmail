@@ -10,6 +10,9 @@ describe('formatUsage', () => {
     expect(formatUsage(0, 0)).toBe('0 improves · about $0.00')
     expect(formatUsage(12, 0.1349)).toBe('12 improves · about $0.13')
   })
+  it('says less than a cent instead of $0.00 for a tiny spend', () => {
+    expect(formatUsage(3, 0.001)).toBe('3 improves · less than $0.01')
+  })
 })
 
 describe('formatPrices', () => {

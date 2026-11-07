@@ -3,7 +3,7 @@ import { defaultAiModel, type AiModel, type ImproveStyle } from '@inlark/core'
 import { cleanImprovedText, improveInstructions, improveRequestText } from './instructions'
 import { ImproveError, type ImproveProvider, type ImproveUsage } from './provider'
 
-/** Claude Haiku 5.5 has no server-side fallback and rejects the parameter. */
+/** Claude Haiku 5.5 has no server-side fallback; the API docs say not to send `fallbacks`. */
 const withFallback = (model: AiModel) => model !== 'claude-haiku-5-5'
 
 export interface ClaudeProviderOptions {
@@ -29,6 +29,10 @@ function toImproveError(err: unknown, signal?: AbortSignal): ImproveError {
     return new ImproveError('badKey')
   }
   if (err instanceof Anthropic.RateLimitError) return new ImproveError('rateLimit')
+  // The account can't use this model: unknown to it, or it needs data retention (Fable 5.1).
+  if (err instanceof Anthropic.NotFoundError) return new ImproveError('modelUnavailable')
+  if (err instanceof Anthropic.BadRequestError && /data retention/i.test(err.message))
+    return new ImproveError('modelUnavailable')
   if (err instanceof Anthropic.APIError) {
     if (err.status === 402) return new ImproveError('billing')
     if (err instanceof Anthropic.InternalServerError) return new ImproveError('unavailable')

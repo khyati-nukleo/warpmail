@@ -15,7 +15,7 @@ import { AiService } from '../apps/desktop/src/main/ai/ai-service'
 import { JsonStore } from '../apps/desktop/src/main/storage'
 import type { ImproveProvider, ImproveUsage } from '../apps/desktop/src/main/ai/provider'
 import { ImproveError } from '../apps/desktop/src/main/ai/provider'
-import { improveErrorMessages, ipcSchemas, type AppEvent } from '../packages/core/src'
+import { aiModels, improveErrorMessages, ipcSchemas, type AppEvent } from '../packages/core/src'
 
 const key = 'sk-ant-' + 'test'.repeat(8)
 const usage: ImproveUsage = {
@@ -201,11 +201,11 @@ describe('AiService', () => {
     report = usage
     await ai.improve(input())
     await ai.improve(input())
-    expect(await ai.status()).toMatchObject({ improves: 2, estimatedCost: 0.03 })
+    expect(await ai.status()).toMatchObject({ improves: 2, estimatedCost: 0.028 })
     fail = new ImproveError('unavailable')
     expect(await ai.improve(input())).toMatchObject({ ok: false, error: 'unavailable' })
     expect((await ai.status()).improves).toBe(2)
-    expect((await ai.status()).estimatedCost).toBe(0.04)
+    expect((await ai.status()).estimatedCost).toBe(0.042)
   })
 
   it('starts a new count each month', async () => {
@@ -301,7 +301,8 @@ describe('AiService', () => {
       ipcSchemas.improveDraft.safeParse([{ id: 'a', text: 'hi', style: 'other' }]).success,
     ).toBe(false)
     expect(ipcSchemas.setAiModel.safeParse(['gpt-5']).success).toBe(false)
-    expect(ipcSchemas.setAiModel.safeParse(['claude-haiku-5-5']).success).toBe(true)
+    for (const model of aiModels)
+      expect(ipcSchemas.setAiModel.safeParse([model.id]).success).toBe(true)
     expect(
       ipcSchemas.improveDraft.safeParse([{ id: 'a', text: 'hi', style: 'shorter' }]).success,
     ).toBe(true)

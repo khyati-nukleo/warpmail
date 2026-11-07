@@ -1,12 +1,13 @@
 import type { AiModelInfo } from '@inlark/core'
 
-/** "1 improve · about $0.01", "12 improves · about $0.13". */
+/** "1 improve · about $0.01", "12 improves · about $0.13", "3 improves · less than $0.01". */
 export function formatUsage(improves: number, estimatedCost: number): string {
   return (
     improves.toLocaleString('en-US') +
     (improves === 1 ? ' improve' : ' improves') +
-    ' · about $' +
-    estimatedCost.toFixed(2)
+    (estimatedCost > 0 && estimatedCost < 0.005
+      ? ' · less than $0.01'
+      : ' · about $' + estimatedCost.toFixed(2))
   )
 }
 
