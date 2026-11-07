@@ -11,11 +11,12 @@ export interface SnoozeOption {
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
 
-const detailOf = (until: number) =>
+/** The day and time something snoozed until `until` returns, e.g. “Nov 7, 9:00 AM”. */
+export const snoozeDetail = (until: number) =>
   shortDate(new Date(until).toISOString()) + ', ' + timeFormatter.format(new Date(until))
 
 export function snoozeOptions(now: number): SnoozeOption[] {
-  return snoozePresets(now).map((p) => ({ ...p, detail: detailOf(p.until) }))
+  return snoozePresets(now).map((p) => ({ ...p, detail: snoozeDetail(p.until) }))
 }
 
 /** `<input type="date">` value (yyyy-mm-dd) for the local day after `now`. */
