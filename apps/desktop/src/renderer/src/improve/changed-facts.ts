@@ -38,7 +38,11 @@ const dateWordPattern = new RegExp(
   'i',
 )
 // Where a sentence begins: start of text, after . ! ? and spaces, or after a newline (and a list dash).
-const sentenceStart = /(?:^|[.!?]\s+|\n[ \t]*(?:[-*•][ \t]+)?)$/
+// Also after a colon, an opening quote or bracket, or a dash.
+const sentenceStart = /(?:^|[.!?]\s+|\n[ \t]*(?:[-*•][ \t]+)?|[:"“'‘(\-–—]\s*)$/
+// "Dr. Smith": the period after a title does not end a sentence.
+const titleBefore = /\b(?:Dr|Mr|Mrs|Ms|Prof|St)\.\s+$/
+const titleWord = /^(?:Dr|Mr|Mrs|Ms|Prof|St)$/
 
 /** Finds every match of a pattern, then blanks it out so later kinds cannot reuse it. */
 function take(
@@ -59,9 +63,12 @@ function take(
 /** Capitalized words that look like names, with runs of adjacent ones joined ("Dana Lee"). */
 function findNames(text: string, found: Fact[]): void {
   const words = [...text.matchAll(wordPattern)].filter(
-    (m) => !/^I['’]/.test(m[0]) && !dateWordPattern.test(m[0]),
+    (m) => !/^I['’]/.test(m[0]) && !dateWordPattern.test(m[0]) && !titleWord.test(m[0]),
   )
-  const initial = (m: RegExpMatchArray): boolean => sentenceStart.test(text.slice(0, m.index))
+  const initial = (m: RegExpMatchArray): boolean => {
+    const prefix = text.slice(0, m.index)
+    return sentenceStart.test(prefix) && !titleBefore.test(prefix)
+  }
   const seenMidSentence = new Set(words.filter((m) => !initial(m)).map((m) => m[0]))
   const names = words.filter((m) => !initial(m) || seenMidSentence.has(m[0]))
 
@@ -90,18 +97,33 @@ function extract(text: string): Fact[] {
   const found: Fact[] = []
   let rest = take(text, emailPattern, 'email', found)
   rest = take(rest, linkPattern, 'link', found)
-  // A lone lowercase "may" is the verb, not the month.
-  rest = take(rest, datePattern, 'date', found, (v) => v !== 'may')
+  // A bare "may"/"May" is the verb or a sentence start ("May I join?"); the month needs a day or year.
+  rest = take(rest, datePattern, 'date', found, (v) => v.toLowerCase() !== 'may')
   rest = take(rest, numberPattern, 'number', found)
   findNames(rest, found)
   return found.sort((x, y) => x.index - y.index)
+}
+
+/**
+ * The form used to compare facts: times ignore case and spacing ("3 PM" = "3pm"),
+ * dates ignore ordinal suffixes ("March 3rd" = "March 3").
+ */
+function keyOf(f: Fact): string {
+  let v = f.value
+  if (f.kind === 'number') v = v.toLowerCase().replace(/\s+/g, '')
+  if (f.kind === 'date')
+    v = v
+      .toLowerCase()
+      .replace(/(\d)(?:st|nd|rd|th)\b/g, '$1')
+      .replace(/\s+/g, ' ')
+  return `${f.kind}\n${v}`
 }
 
 /** Unique facts (same kind and value counted once), in order of appearance. */
 function unique(facts: Fact[]): Fact[] {
   const seen = new Set<string>()
   return facts.filter((f) => {
-    const key = `${f.kind}\n${f.value}`
+    const key = keyOf(f)
     if (seen.has(key)) return false
     seen.add(key)
     return true
@@ -125,18 +147,18 @@ const mentions = (text: string, value: string): boolean =>
 export function changedFacts(before: string, after: string): FactChange[] {
   const b = unique(extract(before))
   const a = unique(extract(after))
-  const afterKeys = new Set(a.map((f) => `${f.kind}\n${f.value}`))
-  const beforeKeys = new Set(b.map((f) => `${f.kind}\n${f.value}`))
+  const afterKeys = new Set(a.map(keyOf))
+  const beforeKeys = new Set(b.map(keyOf))
   const beforeWords = new Set((before.match(/[\p{L}'’-]+/gu) ?? []).map((w) => w.toLowerCase()))
 
   const changes: FactChange[] = []
   for (const f of b) {
-    if (afterKeys.has(`${f.kind}\n${f.value}`)) continue
+    if (afterKeys.has(keyOf(f))) continue
     if (f.kind === 'name' && mentions(after, f.value)) continue
     changes.push({ kind: f.kind, value: f.value, change: 'missing' })
   }
   for (const f of a) {
-    if (beforeKeys.has(`${f.kind}\n${f.value}`)) continue
+    if (beforeKeys.has(keyOf(f))) continue
     if (f.kind === 'name') {
       const words = f.value.split(' ')
       if (words.every((w) => beforeWords.has(w.toLowerCase()))) continue

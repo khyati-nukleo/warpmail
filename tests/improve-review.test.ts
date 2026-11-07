@@ -92,6 +92,48 @@ describe('changedFacts', () => {
   })
 })
 
+describe('changedFacts false alarms', () => {
+  const names = (a: string, b: string) => changedFacts(a, b).filter((f) => f.kind === 'name')
+
+  it('treats words after a colon, quote, bracket or dash as sentence starts', () => {
+    expect(names('Quick question: Can you send it?', 'Quick question: Could you send it?')).toEqual(
+      [],
+    )
+    expect(names('Note: Please reply. "Thanks" he said.', 'Note: reply soon, he said.')).toEqual([])
+    expect(names('Done (Finally) today.', 'Done today.')).toEqual([])
+    expect(names('Done - Finally, it works.', 'It works.')).toEqual([])
+    expect(names('Done \u2014 Finally it works.', 'It works.')).toEqual([])
+  })
+
+  it('still reads a name after a title abbreviation', () => {
+    expect(names('Please ask Dr. Smith about it.', 'Please ask the doctor.')).toEqual([
+      { kind: 'name', value: 'Smith', change: 'missing' },
+    ])
+    expect(names('We met. Dr. Smith agreed.', 'We met and agreed.')).toEqual([
+      { kind: 'name', value: 'Smith', change: 'missing' },
+    ])
+  })
+
+  it('ignores spacing, case and ordinal suffixes', () => {
+    expect(changedFacts('Call at 3 pm', 'Call at 3pm')).toEqual([])
+    expect(changedFacts('Call at 3 PM', 'Call at 3pm')).toEqual([])
+    expect(changedFacts('Call at 3:30 pm', 'Call at 3:30pm')).toEqual([])
+    expect(changedFacts('Due March 3rd.', 'Due March 3.')).toEqual([])
+    expect(changedFacts('Call at 3pm', 'Call at 4pm')).toHaveLength(2)
+  })
+
+  it('reads May as a date only with a day or year', () => {
+    expect(changedFacts('May I join the call?', 'Can I join the call?')).toEqual([])
+    expect(changedFacts('See you on May 6', 'See you on May 7')).toEqual([
+      { kind: 'date', value: 'May 6', change: 'missing' },
+      { kind: 'date', value: 'May 7', change: 'added' },
+    ])
+    expect(changedFacts('Due 6 May.', 'Due soon.')).toEqual([
+      { kind: 'date', value: '6 May', change: 'missing' },
+    ])
+  })
+})
+
 describe('wordDiff', () => {
   it('diffs word by word', () => {
     const a = 'The report is ready'
