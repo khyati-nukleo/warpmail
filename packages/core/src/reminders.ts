@@ -1,4 +1,5 @@
 import type { Settings } from './model'
+import { isAutomatedAddress } from './split'
 import { addWorkingDays } from './working-days'
 
 export type ReminderKind = 'followUp' | 'reply'
@@ -88,6 +89,9 @@ export function deriveReminder(
     const ask =
       facts.labels.followUp || facts.asks === true ? facts.receivedAt : facts.ownAsk?.receivedAt
     if (!ask) return null
+    // Nobody would answer: every To recipient is me or a robot (a notification's reply address).
+    if (facts.to.length && facts.to.every((a) => own.includes(a) || isAutomatedAddress(a)))
+      return null
     from = ask
     kind = 'followUp'
     days = settings.followUpDays

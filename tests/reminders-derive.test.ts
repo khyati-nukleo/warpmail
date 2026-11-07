@@ -102,6 +102,16 @@ describe('deriveReminder', () => {
         }),
       ),
     ).toBeNull())
+  it('nothing when every To recipient is a robot or me', () => {
+    expect(derive(facts({ to: ['noreply@example.com'] }))).toBeNull()
+    expect(derive(facts({ to: ['no-reply@example.com', 'alias@example.org'] }))).toBeNull()
+    expect(derive(facts({ to: [me] }))).toBeNull()
+  })
+  it('follow-up when a person is on To beside a robot', () =>
+    expect(derive(facts({ to: ['noreply@example.com', 'pat@example.com'] }))?.kind).toBe(
+      'followUp',
+    ))
+
   const snooze = (messageId: string, until: number) => ({
     accountId: 'a1',
     threadId: 't1',
