@@ -34,6 +34,7 @@ import {
   type MutationInput,
   type MutationResult,
   type MutationTarget, // Reminders
+  type ReminderTarget, // Reminders
   type Draft,
   type DraftErrorKind,
   type Attachment,
@@ -92,7 +93,7 @@ import { ReadStatusSecret } from './read-status/secret'
 import { ReadStatusCollector } from './read-status/collector'
 import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
-import { ReminderEngine, type ReminderTarget } from './reminders/engine' // Reminders
+import { ReminderEngine } from './reminders/engine' // Reminders
 
 export type Connection = {
   id: string

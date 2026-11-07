@@ -28,6 +28,9 @@ export interface ReminderFacts {
   ownAsk?: { messageId: string; receivedAt: string } | null
 }
 
+/** The email a reminder is about, as dismissing and snoozing name it. */
+export type ReminderTarget = { accountId: string; threadId: string; messageId: string }
+
 export interface ReminderSettings {
   enabled: boolean
   followUp: boolean

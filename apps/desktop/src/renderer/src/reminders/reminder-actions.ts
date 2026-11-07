@@ -3,14 +3,12 @@ import {
   type Conversation,
   type DesktopMailAPI,
   type ReminderSnooze,
+  type ReminderTarget,
   type Settings,
 } from '@inlark/core'
 import type { Command } from '../CommandPalette'
 import type { ShortcutHandler, ShortcutId } from '../shortcuts'
 import { snoozeDetail } from '../snooze/snooze-model'
-
-/** The email a reminder is about, as `dismissReminder` and a snooze name it. */
-export type ReminderTarget = { accountId: string; threadId: string; messageId: string }
 
 /** Snoozes kept this long after they come back, so a late sync still finds them. */
 const keepDays = 30

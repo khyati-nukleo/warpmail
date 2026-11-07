@@ -1,6 +1,12 @@
 import { useState } from 'react'
 import { Calendar, Check } from '@inlark/ui/icons'
-import { reminderSettingsOf, type Bootstrap, type Conversation, type Settings } from '@inlark/core'
+import {
+  reminderSettingsOf,
+  type Bootstrap,
+  type Conversation,
+  type ReminderTarget,
+  type Settings,
+} from '@inlark/core'
 import { api } from '../api'
 import { queryClient } from '../cache'
 import type { Command } from '../CommandPalette'
@@ -13,7 +19,6 @@ import {
   reminderTarget,
   snoozeReminder,
   type ReminderDeps,
-  type ReminderTarget,
 } from './reminder-actions'
 import { reminderLabelOf } from './reminder-label-model'
 import type { ReminderBarProps } from './ReminderBar'

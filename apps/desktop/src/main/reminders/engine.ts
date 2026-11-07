@@ -13,6 +13,7 @@ import {
   type Message,
   type Reminder,
   type ReminderLabel,
+  type ReminderTarget,
   type Settings,
   type SplitScope,
 } from '@inlark/core'
@@ -40,7 +41,6 @@ export interface ReminderEngineDeps {
 }
 
 export type ReturnTarget = { accountId: string; threadId: string }
-export type ReminderTarget = { accountId: string; threadId: string; messageId: string }
 export interface SentInput {
   accountId: string
   /** The Sent copy's Message-ID, without angle brackets. */

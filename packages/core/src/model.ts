@@ -3,6 +3,7 @@ import type {
   ReminderKind,
   ReminderLabel,
   ReminderSettings,
+  ReminderTarget,
   ReminderSnooze,
 } from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
@@ -901,8 +902,8 @@ export interface DesktopMailAPI {
   testReadStatus(workerUrl: string, password?: string): Promise<{ ok: boolean; message: string }>
   // Reminders
   /** Hides a reminder on every device; rejects with a message to show when it can't. */
-  dismissReminder(target: { accountId: string; threadId: string; messageId: string }): Promise<void>
+  dismissReminder(target: ReminderTarget): Promise<void>
   /** Undoes `dismissReminder`. */
-  restoreReminder(target: { accountId: string; threadId: string; messageId: string }): Promise<void>
+  restoreReminder(target: ReminderTarget): Promise<void>
   onEvent(listener: (event: AppEvent) => void): () => void
 }
