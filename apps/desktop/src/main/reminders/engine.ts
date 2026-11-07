@@ -280,6 +280,7 @@ export class ReminderEngine {
     const facts = await provider.reminderFacts!(account, {
       important,
       sinceMs: this.now() - reminderLookbackDays * dayMs,
+      own,
       // A snoozed thread stays listed however old it gets.
       ...(snoozes.length ? { threadIds: [...new Set(snoozes.map((s) => s.threadId))] } : {}),
     })

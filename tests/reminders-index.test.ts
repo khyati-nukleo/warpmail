@@ -135,6 +135,7 @@ describe('reminder facts', () => {
         inInbox: true,
         labels: { noReminder: false, followUp: false },
         asks: null,
+        ownAsk: null,
       },
     ])
   })
@@ -166,6 +167,87 @@ describe('reminder facts', () => {
       // The thread's automated replies are in the inbox.
       inInbox: true,
     })
+  })
+
+  it('skips an auto-reply whose All Mail copy lacks the automation headers', async () => {
+    // Gmail: the Inbox copy had its headers read; the All Mail copy was indexed before that.
+    const reply = { inReplyTo: ['m1@example.com'], emailId: 'e2' }
+    await index.upsertMessages('a', [
+      sent(1, { emailId: 'e1' }),
+      message(boxes.all, 1, { from: me, to: ada, emailId: 'e1' }),
+      message(boxes.inbox, 2, {
+        ...reply,
+        automation: { listId: null, precedence: null, autoSubmitted: 'auto-replied' },
+      }),
+      message(boxes.all, 2, reply),
+    ])
+    const found = await facts()
+    expect(found.map((f) => [f.messageId, f.fromEmail])).toEqual([
+      ['m1@example.com', 'me@example.com'],
+    ])
+  })
+
+  it('skips an automated copy matched by Message-ID when there is no server identity', async () => {
+    const reply = { inReplyTo: ['m1@example.com'], messageId: 'auto2@example.com' }
+    await index.upsertMessages('a', [
+      sent(1),
+      message(boxes.inbox, 2, {
+        ...reply,
+        automation: { listId: null, precedence: null, autoSubmitted: 'auto-replied' },
+      }),
+      message(boxes.all, 2, reply),
+    ])
+    expect((await facts()).map((f) => f.messageId)).toEqual(['m1@example.com'])
+  })
+
+  it('keeps my earlier ask when my later message to the thread does not ask', async () => {
+    await index.upsertMessages('a', [
+      message(boxes.inbox, 1),
+      sent(2, { inReplyTo: ['m1@example.com'] }),
+      sent(3, { inReplyTo: ['m2@example.com'] }),
+      sent(4, { inReplyTo: ['m3@example.com'] }),
+    ])
+    const own = ['me@example.com']
+    // Nothing asks yet.
+    expect((await facts({ own }))[0]).toMatchObject({ messageId: 'm4@example.com', ownAsk: null })
+    await index.setAskChecks('a', [
+      { messageId: 'm2@example.com', asks: true },
+      { messageId: 'm3@example.com', asks: true },
+      { messageId: 'm4@example.com', asks: false },
+    ])
+    expect((await facts({ own }))[0]).toMatchObject({
+      messageId: 'm4@example.com',
+      asks: false,
+      ownAsk: { messageId: 'm3@example.com', receivedAt: hour(3) },
+    })
+    // An ask I dismissed doesn't count; the one before it still does.
+    await index.upsertMessages('a', [message(boxes.noReminder, 3, { from: me, to: ada })])
+    expect((await facts({ own }))[0]!.ownAsk).toEqual({
+      messageId: 'm2@example.com',
+      receivedAt: hour(2),
+    })
+    // A Follow up label makes my latest message the ask.
+    await index.upsertMessages('a', [message(boxes.followUp, 4, { from: me, to: ada })])
+    expect((await facts({ own }))[0]!.ownAsk).toEqual({
+      messageId: 'm4@example.com',
+      receivedAt: hour(4),
+    })
+  })
+
+  it('drops my ask once someone else replied after it', async () => {
+    await index.upsertMessages('a', [
+      sent(1),
+      message(boxes.inbox, 2, { from: bo, inReplyTo: ['m1@example.com'] }),
+      sent(3, { inReplyTo: ['m2@example.com'] }),
+    ])
+    await index.setAskChecks('a', [
+      { messageId: 'm1@example.com', asks: true },
+      { messageId: 'm3@example.com', asks: false },
+    ])
+    const own = ['me@example.com']
+    expect((await facts({ own }))[0]).toMatchObject({ messageId: 'm3@example.com', ownAsk: null })
+    // Without my addresses nothing is worked out.
+    expect((await facts())[0]!.ownAsk).toBeNull()
   })
 
   it('reports a colleague’s reply after my sent message', async () => {
@@ -312,7 +394,12 @@ describe('reminder facts', () => {
   })
 })
 
-describe('schema v5', () => {
+const receivedIndex = (db: DatabaseSync) =>
+  (db.prepare("PRAGMA index_info('messages_mailbox_received')").all() as { name: string }[]).map(
+    (c) => c.name,
+  )
+
+describe('schema v5 and v6', () => {
   it('migrates a v4 file and keeps its messages', async () => {
     await index.upsertMessages('a', [message(boxes.inbox, 1)])
     await index.close()
@@ -320,13 +407,32 @@ describe('schema v5', () => {
     db.exec('DROP TABLE reminder_checks; PRAGMA user_version = 4')
     db.close()
     await open()
-    expect(SCHEMA_VERSION).toBe(5)
+    expect(SCHEMA_VERSION).toBe(6)
     const check = new DatabaseSync(path)
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
       expect(
         check.prepare("SELECT name FROM sqlite_master WHERE name = 'reminder_checks'").all(),
       ).toEqual([{ name: 'reminder_checks' }])
+    } finally {
+      check.close()
+    }
+    expect(await facts()).toHaveLength(1)
+  })
+
+  it('v6 adds the thread to the received-date index, so recent threads read no rows', async () => {
+    await index.upsertMessages('a', [message(boxes.inbox, 1)])
+    await index.close()
+    const db = new DatabaseSync(path)
+    db.exec(`DROP INDEX messages_mailbox_received;
+      CREATE INDEX messages_mailbox_received ON messages (account_id, mailbox_id, received_ms);
+      PRAGMA user_version = 5`)
+    db.close()
+    await open()
+    const check = new DatabaseSync(path)
+    try {
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+      expect(receivedIndex(check)).toEqual(['account_id', 'mailbox_id', 'received_ms', 'thread_id'])
     } finally {
       check.close()
     }
@@ -361,11 +467,14 @@ describe('schema v5', () => {
         ...plan(ASK_CHECKS_NEEDED_SQL, ['a', boxes.sent, 0, 10]),
       ]
       expect(details.length).toBeGreaterThan(0)
+      expect(details).toContain(
+        'SEARCH r USING COVERING INDEX messages_mailbox_received (account_id=? AND mailbox_id=? AND received_ms>?)',
+      )
       for (const detail of details) {
         expect(detail).not.toMatch(/^SCAN m\b/)
         expect(detail).not.toMatch(/^SCAN messages\b/)
         // Nor any other read of messages or the checks that is not a lookup.
-        expect(detail).not.toMatch(/^SCAN (?:[rinfcxd]|ta)\b/)
+        expect(detail).not.toMatch(/^SCAN (?:[rinfcxdop]|ta)\b/)
       }
     } finally {
       db.close()

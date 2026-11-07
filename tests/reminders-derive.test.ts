@@ -73,6 +73,35 @@ describe('deriveReminder', () => {
   it('uses the configured days', () =>
     expect(derive(facts(), { followUpDays: 5 })?.dueMs).toBe(addWorkingDays(receivedMs, 5)))
 
+  // My earlier ask stands when my own later message doesn't ask.
+  const earlier = '2026-10-30T15:00:00.000Z' // the Friday before
+  it('follow-up from my earlier ask when my latest message does not ask', () =>
+    expect(
+      derive(
+        facts({
+          asks: false,
+          ownAsk: { messageId: 'm0@example.com', receivedAt: earlier },
+        }),
+      ),
+    ).toEqual({
+      kind: 'followUp',
+      threadId: 't1',
+      // Any new message still resets a dismissal or snooze.
+      messageId: 'm1@example.com',
+      dueMs: addWorkingDays(Date.parse(earlier), 3),
+    }))
+  it('nothing when no message of mine since the last reply asks', () =>
+    expect(derive(facts({ asks: false, ownAsk: null }))).toBeNull())
+  it('the no-reminder label on my latest message still wins over an earlier ask', () =>
+    expect(
+      derive(
+        facts({
+          asks: false,
+          labels: { noReminder: true, followUp: false },
+          ownAsk: { messageId: 'm0@example.com', receivedAt: earlier },
+        }),
+      ),
+    ).toBeNull())
   const snooze = (messageId: string, until: number) => ({
     accountId: 'a1',
     threadId: 't1',

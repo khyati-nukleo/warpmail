@@ -19,6 +19,12 @@ export interface ReminderFacts {
   inInbox: boolean // any message of the thread is in INBOX
   labels: { noReminder: boolean; followUp: boolean } // a copy with this Message-ID is in the label folder
   asks: boolean | null // stored ask-check of this message; null when never checked
+  /**
+   * My latest message since anyone else last wrote that asks (stored ask-check or Follow up
+   * label, and no No reminder label); it may be this message or an earlier one. Undefined when
+   * the provider doesn't work it out: then this message alone decides.
+   */
+  ownAsk?: { messageId: string; receivedAt: string } | null
 }
 
 export interface ReminderSettings {
@@ -73,12 +79,16 @@ export function deriveReminder(
 ): Reminder | null {
   const { own, settings, snooze } = context
   if (!settings.enabled || !facts.messageId || facts.labels.noReminder) return null
-  const received = Date.parse(facts.receivedAt)
-  if (!Number.isFinite(received)) return null
+  let from = facts.receivedAt
   let kind: ReminderKind
   let days: number
   if (facts.fromEmail && own.includes(facts.fromEmail)) {
-    if (!settings.followUp || !(facts.labels.followUp || facts.asks === true)) return null
+    if (!settings.followUp) return null
+    // Only someone else's reply ends an ask: my own later note ("here's the file") keeps it.
+    const ask =
+      facts.labels.followUp || facts.asks === true ? facts.receivedAt : facts.ownAsk?.receivedAt
+    if (!ask) return null
+    from = ask
     kind = 'followUp'
     days = settings.followUpDays
   } else {
@@ -87,6 +97,8 @@ export function deriveReminder(
     kind = 'reply'
     days = settings.replyDays
   }
+  const received = Date.parse(from)
+  if (!Number.isFinite(received)) return null
   const due = addWorkingDays(received, days)
   const snoozed = snooze && snooze.messageId === facts.messageId ? snooze.until : 0
   return {

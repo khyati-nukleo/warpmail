@@ -651,6 +651,8 @@ export interface MailProvider {
       important: Extract<SplitScope, { kind: 'important' }>
       sinceMs: number
       threadIds?: string[]
+      /** My addresses, lowercase, so an ask of mine survives my own later messages. */
+      own?: string[]
     },
   ): Promise<ReminderFacts[]>
   /** Sent mail since `sinceMs` whose ask-check isn't stored yet, newest first. */

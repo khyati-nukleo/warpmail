@@ -1028,6 +1028,7 @@ export class ImapProvider implements MailProvider {
       important: Extract<SplitScope, { kind: 'important' }>
       sinceMs: number
       threadIds?: string[]
+      own?: string[]
     },
   ): Promise<ReminderFacts[]> {
     const boxes = (await this.index.listMailboxes(this.accountId)).filter((b) => !b.noSelect)
@@ -1054,6 +1055,7 @@ export class ImapProvider implements MailProvider {
       sinceMs: query.sinceMs,
       threadIds: query.threadIds,
       draftsId: boxes.find((b) => roles.get(b.path) === 'drafts')?.id,
+      own: query.own,
     })
   }
   async askChecksNeeded(

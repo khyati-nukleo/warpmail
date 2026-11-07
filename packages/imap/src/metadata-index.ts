@@ -310,4 +310,6 @@ export interface ReminderFactsQuery {
   threadIds?: string[]
   /** Emails with a copy here are unsent drafts (Gmail lists them in All Mail too). */
   draftsId?: string
+  /** My addresses, lowercase: what tells my messages from everyone else's. */
+  own?: string[]
 }

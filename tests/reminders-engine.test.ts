@@ -147,6 +147,7 @@ describe('ReminderEngine', () => {
       expect.objectContaining({
         important: expect.objectContaining({ kind: 'important' }),
         sinceMs: due - 60_000 - 30 * 86_400_000,
+        own: [me],
       }),
     )
   })
