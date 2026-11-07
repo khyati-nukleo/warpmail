@@ -123,6 +123,11 @@ export class ReminderEngine {
   private labelling = new Set<string>()
   /** Returns that moved nothing, by key, with when they were tried. */
   private unmoved = new Map<string, number>()
+  /**
+   * When each waiting return was first seen due and archived, per account. A restart starts
+   * again, which only delays it.
+   */
+  private firstSeen = new Map<string, Map<string, number>>()
 
   constructor(private deps: ReminderEngineDeps) {}
 
@@ -343,19 +348,24 @@ export class ReminderEngine {
       // In the background: the inbox never waits for bodies to be read.
       if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)
       // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
-      // full sync that started after it came due, which announces itself and recomputes.
+      // full sync that started after it came due and after it was first seen archived (a reply
+      // filed away from the Inbox shows only on a full sync). That sync announces itself.
       let held = false
+      const seen = this.firstSeen.get(id) ?? new Map<string, number>()
+      const stillSeen = new Map<string, number>()
       // One with nothing in the archive folder (only in Sent, say) is tried once its facts change.
       for (const { reminder, inInbox, archived, ask } of derived) {
         if (reminder.kind !== 'followUp' || inInbox || !archived) continue
         if (reminder.dueMs > now || ask?.skip) continue
-        if (target.provider.readyForReminders?.(reminder.dueMs) === false) {
-          held = true
-          continue
-        }
         // Once per ask and due time: a snooze that ends later may bring it back again.
         const askId = ask?.messageId ?? reminder.messageId
         const key = [id, reminder.threadId, askId, reminder.dueMs].join('|')
+        const first = seen.get(key) ?? now
+        stillSeen.set(key, first)
+        if (target.provider.readyForReminders?.(Math.max(reminder.dueMs, first)) === false) {
+          held = true
+          continue
+        }
         const tried = this.unmoved.get(key)
         if (
           tried !== undefined &&
@@ -364,6 +374,10 @@ export class ReminderEngine {
           continue
         waiting.push({ accountId: id, threadId: reminder.threadId, key, ask })
       }
+      // One back in the inbox, or no longer due, starts again if it is archived later.
+      this.firstSeen.set(id, stillSeen)
+      for (const key of this.unmoved.keys())
+        if (key.startsWith(id + '|') && !stillSeen.has(key)) this.unmoved.delete(key)
       if (held) target.provider.awaitFullSync?.()
     }
     if (waiting.length && !this.disposed) await this.returnDue(waiting)
@@ -482,7 +496,6 @@ export class ReminderEngine {
       this.unmoved.delete(w.key)
       if (!done.includes(w)) this.unmoved.set(w.key, this.now())
     }
-    while (this.unmoved.size > returnedLimit) this.unmoved.delete(this.unmoved.keys().next().value!)
     if (done.length < due.length) this.log('reminders-return-failed')
     if (done.length)
       await this.deps.store.write(

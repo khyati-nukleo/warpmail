@@ -430,13 +430,38 @@ describe('ReminderEngine', () => {
     // Shown from the index as it was, but nothing moves on it.
     expect(await h.engine.due('a1')).toHaveLength(1)
     expect(h.returned).not.toHaveBeenCalled()
-    // Asked about its own due time; the provider runs a full sync and announces it.
-    expect(h.provider.readyForReminders).toHaveBeenCalledWith(addWorkingDays(receivedMs, 3))
+    // Asked about when it was first seen due and archived, here after its due time; the
+    // provider runs a full sync and announces it.
+    expect(h.provider.readyForReminders).toHaveBeenCalledWith(h.clock.now)
     expect(h.provider.awaitFullSync).toHaveBeenCalledTimes(1)
     ready = true
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenCalledWith([{ accountId: 'a1', threadId: 't1' }])
+  })
+  it('waits for a full sync since it was last seen archived, after a spell back in the inbox', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    let syncedAt = h.clock.now - 1
+    h.provider.readyForReminders = vi.fn((t: number) => t <= syncedAt)
+    h.provider.awaitFullSync = vi.fn()
+    h.engine.start()
+    await settle()
+    expect(h.returned).not.toHaveBeenCalled()
+    // She moves it back to the inbox, then archives it again an hour later.
+    h.facts[0] = fact({ inInbox: true })
+    h.engine.invalidate('a1')
+    await settle()
+    syncedAt = h.clock.now + 1
+    h.clock.now += 3600_000
+    h.facts[0] = fact({ inInbox: false })
+    h.engine.invalidate('a1')
+    await settle()
+    // That full sync predates the second archive.
+    expect(h.returned).not.toHaveBeenCalled()
+    syncedAt = h.clock.now
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
   })
   it('never returns a forgot-to-reply or one not yet due', async () => {
     const h = make({
