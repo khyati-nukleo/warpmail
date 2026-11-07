@@ -8,6 +8,8 @@ For each fetch of an image: a random code, the time, and a source type (`apple`,
 
 It does **not** store IP addresses, names, email addresses, subjects or anything else. The visitor's address is read only at the moment of the fetch, to recognise Apple's and Google's published networks, and is then dropped. The Worker never logs. Records are deleted automatically after 90 days.
 
+Cloudflare keeps its own request logs apart from this Worker, and those include IP addresses. For the no-IP promise to hold, Workers Logs (observability), Logpush and Tail must stay off for this Worker. Workers Logs may be on by default, so check that it is off (step 7 below; `wrangler.toml` turns it off for the command-line path).
+
 ## Endpoints
 
 - `GET /p/<code>.gif` returns the image (never cached) and records the fetch.
@@ -32,6 +34,7 @@ You need a free Cloudflare account. Pick one of the two paths.
 4. Open the Worker's **Settings → Bindings → Add → D1 database**. Set the variable name to `DB` and choose `read-status`.
 5. In **Settings → Variables and Secrets**, add a **Secret** named `PASSWORD` with your password.
 6. In **Settings → Trigger Events → Cron Triggers**, add the cron `17 3 * * *`. This runs the daily clean-up.
+7. In **Settings → Observability**, turn **Workers Logs** off. It may be on by default; check it's off. Leave Logpush and Tail off too: Cloudflare's own logs would keep readers' IP addresses.
 
 ### B. From the command line
 

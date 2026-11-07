@@ -10,3 +10,7 @@ database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
 
 [triggers]
 crons = ["17 3 * * *"]
+
+# Cloudflare's own request logs would keep readers' IP addresses; keep them off.
+[observability]
+enabled = false
