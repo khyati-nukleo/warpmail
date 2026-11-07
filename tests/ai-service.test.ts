@@ -301,6 +301,10 @@ describe('AiService', () => {
       ipcSchemas.improveDraft.safeParse([{ id: 'a', text: 'hi', style: 'other' }]).success,
     ).toBe(false)
     expect(ipcSchemas.setAiModel.safeParse(['gpt-5']).success).toBe(false)
+    expect(
+      ipcSchemas.improveDraft.safeParse([{ id: '', text: 'hi', style: 'polish' }]).success,
+    ).toBe(false)
+    expect(ipcSchemas.cancelImprove.safeParse(['']).success).toBe(false)
     for (const model of aiModels)
       expect(ipcSchemas.setAiModel.safeParse([model.id]).success).toBe(true)
     expect(

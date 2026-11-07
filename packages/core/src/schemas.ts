@@ -343,10 +343,10 @@ export const ipcSchemas = {
   testAiKey: z.tuple([]),
   improveDraft: z.tuple([
     z.object({
-      id: z.string().max(100),
+      id: z.string().min(1).max(100),
       text: z.string().max(40_000),
       style: z.enum(['polish', 'shorter', 'formal', 'friendly']),
     }),
   ]),
-  cancelImprove: z.tuple([z.string().max(100)]),
+  cancelImprove: z.tuple([z.string().min(1).max(100)]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>
