@@ -1,5 +1,5 @@
 import { Eye } from '@inlark/ui/icons'
-import { conversationOpened, type Conversation } from '@inlark/core'
+import { conversationOpened, isDraft, type Conversation } from '@inlark/core'
 import { useReadStatus, useReadStatusSetup } from './useReadStatus'
 
 /**
@@ -8,7 +8,8 @@ import { useReadStatus, useReadStatusSetup } from './useReadStatus'
  */
 export function ReadStatusEye({ conversation: c }: { conversation: Conversation }) {
   const { configured } = useReadStatusSetup()
-  const statuses = [...useReadStatus(c.accountId, c.messages, c.messages).values()].flat()
+  const sent = c.messages.filter((m) => !isDraft(m)) // the same messages, and key, as the Reader
+  const statuses = [...useReadStatus(c.accountId, sent, sent).values()].flat()
   if (!configured) return null
   const opened = statuses.filter((s) => s.state === 'opened')
   const names = opened.map((s) => {

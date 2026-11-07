@@ -1040,6 +1040,7 @@ export function Composer({
             <ReadStatusSwitch
               draft={draft}
               protection={protection}
+              locked={locked}
               onChange={(readStatus) => update({ readStatus })}
             />
             <span className="compose-account flex-1 text-right text-muted text-[11px] max-[700px]:text-[10px]">

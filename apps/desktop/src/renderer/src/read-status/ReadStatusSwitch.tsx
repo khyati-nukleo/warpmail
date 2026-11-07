@@ -15,10 +15,13 @@ const notTracked = {
 export function ReadStatusSwitch({
   draft,
   protection,
+  locked,
   onChange,
 }: {
   draft: Draft
   protection: Protection
+  /** While sending (or otherwise locked) the draft must not change. */
+  locked?: boolean
   onChange: (readStatus: boolean) => void
 }) {
   const { settings, accounts, own } = useReadStatusSetup()
@@ -46,8 +49,9 @@ export function ReadStatusSwitch({
       className="compose-read-status text-muted"
       aria-disabled={reason ? true : undefined}
       title={reason}
+      disabled={locked}
       onClick={() => {
-        if (!reason) onChange(!on)
+        if (!reason && !locked) onChange(!on)
       }}
     >
       {on ? 'Read status: on' : 'Read status: off'}
