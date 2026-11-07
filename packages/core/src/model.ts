@@ -1,4 +1,4 @@
-import type { ReminderSettings, ReminderSnooze } from './reminders'
+import type { ReminderKind, ReminderSettings, ReminderSnooze } from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -169,6 +169,9 @@ export interface Conversation {
   hasAttachment: boolean
   count: number
   messages: Message[]
+  // Reminders
+  /** A due reminder: the conversation sorts by `dueAt` (ISO) in the inbox. */
+  reminder?: { kind: ReminderKind; dueAt: string; messageId: string }
 }
 export interface Identity {
   id: string
@@ -516,6 +519,9 @@ export interface ProviderEvent {
 /** A query as providers see it: the main process has already resolved `tab` into `split`. */
 export interface ProviderQuery extends MailQuery {
   split?: SplitScope
+  // Reminders
+  /** Due reminders, which lift their conversations to the top of the inbox and its tabs. */
+  reminders?: { threadId: string; kind: ReminderKind; dueAt: string; messageId: string }[]
 }
 export interface MailProvider {
   readonly capabilities: ProviderCapabilities

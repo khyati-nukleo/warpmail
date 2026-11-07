@@ -13,7 +13,8 @@ const list = (values: readonly unknown[]) => JSON.stringify(values)
 
 // Filter keys whose absence keeps every inbox row of a thread in its group. Any other key set,
 // including one added later, sends Important to the EXISTS form, which is right for any filter.
-const groupSafe = new Set(['mailboxIds', 'split'])
+// Reminders: `boost` only reorders.
+const groupSafe = new Set(['mailboxIds', 'split', 'boost'])
 
 /**
  * The tab as conditions on the inbox messages `m` of a query grouped by `m.thread_id`, or

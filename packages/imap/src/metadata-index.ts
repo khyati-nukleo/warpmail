@@ -274,11 +274,17 @@ export interface ConversationFilter {
   before?: string
   /** Only conversations in this tab. Needs exactly one `mailboxIds` entry: the inbox. */
   split?: SplitScope
+  // Reminders
+  /** Threads in the result sort by `sortMs` (ms) instead of their latest date; adds none. */
+  boost?: { threadId: string; sortMs: number }[]
 }
 
 export interface ConversationCursor {
   receivedAt: string
   threadId: string
+  // Reminders
+  /** The row's boosted sort time, when it had one. */
+  sortMs?: number
 }
 
 export interface ConversationRow {
@@ -287,6 +293,9 @@ export interface ConversationRow {
   latest: IndexedMessage
   /** Emails in the whole conversation, matching or not, counting each server identity once. */
   count: number
+  // Reminders
+  /** Set only when a boost moved the row: the time it sorts by. */
+  sortMs?: number
 }
 
 // Reminders

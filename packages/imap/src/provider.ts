@@ -1027,6 +1027,20 @@ export class ImapProvider implements MailProvider {
       ...(query.before ? { before: query.before } : {}),
       ...(query.split && inboxOnly ? { split: query.split } : {}),
     }
+    // Reminders: due ones lift their threads to the top of the inbox and its tabs, nowhere else.
+    const due = new Map<
+      string,
+      NonNullable<ProviderQuery['reminders']>[number] & { sortMs: number }
+    >()
+    for (const r of inboxOnly ? (query.reminders ?? []) : []) {
+      const sortMs = Date.parse(r.dueAt),
+        seen = due.get(r.threadId)
+      // One per thread, the latest, as the index sorts it.
+      if (Number.isFinite(sortMs) && (!seen || sortMs > seen.sortMs))
+        due.set(r.threadId, { ...r, sortMs })
+    }
+    if (due.size)
+      filter.boost = [...due.values()].map(({ threadId, sortMs }) => ({ threadId, sortMs }))
     let incomplete = scope.boxes.some((b) => !b.complete)
     if (search) {
       const found = await this.search(query, scope.boxes)
@@ -1068,6 +1082,14 @@ export class ImapProvider implements MailProvider {
       c.subject = row.latest.subject || '(No subject)'
       c.preview = toMessage(account.id, row.latest).preview
       c.count = row.count
+      const reminder = due.get(row.threadId)
+      // As ISO from the time it sorted by, so lists merge it in the same order.
+      if (reminder)
+        c.reminder = {
+          kind: reminder.kind,
+          dueAt: new Date(reminder.sortMs).toISOString(),
+          messageId: reminder.messageId,
+        }
       return c
     })
     const end = position + items.length
@@ -1076,6 +1098,7 @@ export class ImapProvider implements MailProvider {
       this.cursors.set(key + '@' + end, {
         receivedAt: last.latest.receivedAt,
         threadId: last.threadId,
+        ...(last.sortMs !== undefined ? { sortMs: last.sortMs } : {}),
       })
       if (this.cursors.size > 500) this.cursors.delete(this.cursors.keys().next().value!)
     }

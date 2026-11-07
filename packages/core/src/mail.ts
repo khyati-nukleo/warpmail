@@ -61,13 +61,21 @@ export function conversationFromMessages(
     messages,
   }
 }
+// Reminders
+/** What a list sorts by: a due reminder's time, else the latest message's (both ISO). */
+export function conversationSortKey(c: Conversation): string {
+  return c.reminder?.dueAt ?? c.receivedAt
+}
 export function mergePages(
   pages: { accountId: string; page: ProviderPage; position: number }[],
   limit: number,
 ): QueryPage {
   const all = pages
     .flatMap((p) => p.page.items)
-    .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt) || a.key.localeCompare(b.key))
+    .sort(
+      (a, b) =>
+        conversationSortKey(b).localeCompare(conversationSortKey(a)) || a.key.localeCompare(b.key),
+    )
   const items = all.slice(0, limit)
   const next: Record<string, number> = {}
   for (const p of pages) {

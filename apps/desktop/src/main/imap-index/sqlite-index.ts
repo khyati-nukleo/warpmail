@@ -16,6 +16,8 @@ import { addressesSeenQuery, splitFilter, tabCountQuery } from './split-sql'
 import { migrateToV5 } from './reminder-schema'
 import {
   ASK_CHECKS_NEEDED_SQL,
+  boostedConversationPage,
+  boostTimes,
   reminderFactsQuery,
   SET_ASK_CHECK_SQL,
   toReminderFacts,
@@ -1032,7 +1034,7 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   }
 
   /** The grouped, filtered conversation set, or `null` when the filter cannot match. */
-  private conversationSource(accountId: string, filter: ConversationFilter) {
+  private conversationSource(accountId: string, filter: ConversationFilter, threads?: string[]) {
     const mailboxIds = filter.mailboxIds && [...new Set(filter.mailboxIds)]
     if (filter.split && mailboxIds?.length !== 1) throw new Error('A tab needs the inbox scope.')
     if (mailboxIds?.length === 0 || filter.ids?.length === 0) return null
@@ -1084,6 +1086,11 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       where.push(split.where.sql)
       params.push(...split.where.params)
     }
+    // Reminders: whole threads, so tabs judge them as usual; read through the thread indexes.
+    if (threads) {
+      where.push('m.thread_id IN (SELECT value FROM json_each(?))')
+      params.push(list(threads))
+    }
     if (split?.having) params.push(...split.having.params)
     // With a single max() aggregate, SQLite takes the bare `seq` from the row holding the max.
     return {
@@ -1094,13 +1101,26 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     }
   }
 
-  conversations(
+  /** The total and page statement for `conversations`, or `null` when the filter cannot match. */
+  private conversationPage(
     accountId: string,
     filter: ConversationFilter,
     page: { limit: number; offset?: number; after?: ConversationCursor },
   ) {
     const source = this.conversationSource(accountId, filter)
-    if (!source) return { items: [], total: 0 }
+    if (!source) return null
+    const limit = Math.max(0, Math.floor(page.limit))
+    const offset = page.after ? 0 : Math.max(0, Math.floor(page.offset ?? 0))
+    // Reminders: without a boost, the plain statement below runs unchanged.
+    const boost = boostTimes(filter.boost)
+    if (boost) {
+      const after = page.after && {
+        k: page.after.sortMs ?? time(page.after.receivedAt),
+        threadId: page.after.threadId,
+      }
+      const boosted = this.conversationSource(accountId, filter, [...boost.keys()])!
+      return boostedConversationPage(source, boosted, boost, { limit, offset, after })
+    }
     const params = [...source.params]
     let keyset = ''
     if (page.after) {
@@ -1108,16 +1128,26 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
       keyset = 'WHERE r < ? OR (r = ? AND t > ?)'
       params.push(r, r, page.after.threadId)
     }
-    params.push(Math.max(0, Math.floor(page.limit)))
-    params.push(page.after ? 0 : Math.max(0, Math.floor(page.offset ?? 0)))
-    const row = this.get<{ total: number; page: string }>(
-      `WITH g AS MATERIALIZED (${source.sql})
+    params.push(limit, offset)
+    return {
+      sql: `WITH g AS MATERIALIZED (${source.sql})
         SELECT (SELECT count(*) FROM g) AS total,
           (SELECT json_group_array(json_array(t, s) ORDER BY r DESC, t) FROM (
             SELECT t, r, s FROM g ${keyset} ORDER BY r DESC, t LIMIT ? OFFSET ?)) AS page`,
-      ...params,
-    )!
-    const picked = JSON.parse(row.page) as [string, number][]
+      params,
+    }
+  }
+
+  conversations(
+    accountId: string,
+    filter: ConversationFilter,
+    page: { limit: number; offset?: number; after?: ConversationCursor },
+  ) {
+    const query = this.conversationPage(accountId, filter, page)
+    if (!query) return { items: [], total: 0 }
+    const row = this.get<{ total: number; page: string }>(query.sql, ...query.params)!
+    // A boosted page adds each row's sort time, null where it is the latest date.
+    const picked = JSON.parse(row.page) as [string, number, (number | null)?][]
     if (!picked.length) return { items: [], total: row.total }
     const latest = new Map(
       this.all<MessageRow>(
@@ -1134,17 +1164,27 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
         list(picked.map(([thread]) => thread)),
       ).map((count) => [count.thread_id, count.n]),
     )
-    const items: ConversationRow[] = picked.map(([threadId, seq]) => ({
+    const items: ConversationRow[] = picked.map(([threadId, seq, sortMs]) => ({
       threadId,
       latest: latest.get(seq)!,
       count: counts.get(threadId) ?? 1,
+      ...(sortMs != null ? { sortMs } : {}),
     }))
     return { items, total: row.total }
   }
 
-  /** `EXPLAIN QUERY PLAN` details for a conversation filter; used to keep queries indexed. */
-  explainConversations(accountId: string, filter: ConversationFilter) {
-    const source = this.conversationSource(accountId, filter)
+  /**
+   * `EXPLAIN QUERY PLAN` details for a conversation filter; used to keep queries indexed. With
+   * `page`, the whole page statement, boost included; without, the grouped set alone.
+   */
+  explainConversations(
+    accountId: string,
+    filter: ConversationFilter,
+    page?: { after?: ConversationCursor },
+  ) {
+    const source = page
+      ? this.conversationPage(accountId, filter, { limit: 50, ...page })
+      : this.conversationSource(accountId, filter)
     if (!source) return []
     return this.all<{ detail: string }>('EXPLAIN QUERY PLAN ' + source.sql, ...source.params).map(
       (row) => row.detail,

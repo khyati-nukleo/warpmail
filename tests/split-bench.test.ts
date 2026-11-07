@@ -6,7 +6,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { domainKey, type SplitScope } from '@inlark/core'
 import { SqliteMetadataIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
-import type { FolderListing, NewMessage } from '@inlark/imap'
+import type {
+  ConversationCursor,
+  ConversationFilter,
+  FolderListing,
+  NewMessage,
+} from '@inlark/imap'
 
 // Run with INLARK_BENCH=1. Prints timings only: never addresses or subjects.
 const RUNS = 20
@@ -116,6 +121,7 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
   let directory: string
   let index: SqliteMetadataIndex
   let inbox: string
+  let mailboxIds: string[]
 
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), 'inlark-bench-'))
@@ -126,6 +132,7 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
       folder('Sent'),
     ])
     inbox = i!.id
+    mailboxIds = [inbox, archive!.id, sent!.id]
     for (let start = 0; start < MESSAGES; start += 1000) {
       const batch: NewMessage[] = []
       for (let uid = start + 1; uid <= start + 1000; uid++)
@@ -182,6 +189,49 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
     results.migrationV3toV4 = await migrationMedian(directory, 'bench.sqlite')
     index = new SqliteMetadataIndex(join(directory, 'bench.sqlite'))
     console.log(`split bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
+  }, 600_000)
+
+  // Reminders
+  it('keeps the inbox page with due reminders near the plain one', () => {
+    const important: SplitScope = { kind: 'important', always: [], never: [] }
+    const all = index.conversations('a', { mailboxIds: [inbox] }, { limit: 100_000 })
+    // 50 threads spread through the inbox, due after all of its mail.
+    const due = Date.parse(all.items[0]!.latest.receivedAt) + 3600_000
+    const boost = all.items
+      .filter((_, n) => n % 300 === 7)
+      .slice(0, 50)
+      .map((row, n) => ({ threadId: row.threadId, sortMs: due + n * 60_000 }))
+    expect(boost).toHaveLength(50)
+    const page = (filter: ConversationFilter, after?: ConversationCursor) =>
+      index.conversations('a', filter, { limit: 50, after })
+    const first = page({ mailboxIds: [inbox], boost })
+    expect(first.items.map((r) => r.threadId)).toEqual(boost.map((b) => b.threadId).reverse())
+    const last = first.items.at(-1)!
+    const cursor = {
+      receivedAt: last.latest.receivedAt,
+      threadId: last.threadId,
+      sortMs: last.sortMs,
+    }
+    const sinceMs = Date.parse(all.items[0]!.latest.receivedAt) - 30 * 86_400_000
+    const facts = () =>
+      index.reminderFacts('a', {
+        inboxId: inbox,
+        mailboxIds,
+        labelIds: {},
+        important: { kind: 'important', always: [], never: [] },
+        sinceMs,
+      })
+    expect(facts().length).toBeGreaterThan(0)
+    const results: Record<string, number> = {
+      inboxPage: median(() => page({ mailboxIds: [inbox] })),
+      inboxBoostedPage: median(() => page({ mailboxIds: [inbox], boost })),
+      inboxBoostedNextPage: median(() => page({ mailboxIds: [inbox], boost }, cursor)),
+      importantPage: median(() => page({ mailboxIds: [inbox], split: important })),
+      importantBoostedPage: median(() => page({ mailboxIds: [inbox], split: important, boost })),
+      reminderFacts30d: median(facts),
+    }
+    console.log(`reminders bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
+    expect(results.inboxBoostedPage).toBeLessThan(results.inboxPage * 1.2)
   }, 600_000)
 })
 

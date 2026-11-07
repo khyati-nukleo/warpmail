@@ -1,3 +1,4 @@
+import type { SQLInputValue } from 'node:sqlite'
 import type { ReminderFacts } from '@inlark/core'
 import type { ReminderFactsQuery } from '@inlark/imap'
 import { parseAddresses } from './split-schema'
@@ -120,3 +121,55 @@ export const ASK_CHECKS_NEEDED_SQL = `SELECT m.id, m.message_id AS messageId FRO
 
 export const SET_ASK_CHECK_SQL = `INSERT INTO reminder_checks (account_id, message_id, asks)
   VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET asks = excluded.asks`
+
+/** Each boosted thread once, at its latest time; `null` when none is usable. */
+export function boostTimes(boost: { threadId: string; sortMs: number }[] | undefined) {
+  const times = new Map<string, number>()
+  for (const { threadId, sortMs } of boost ?? [])
+    if (Number.isFinite(sortMs))
+      times.set(threadId, Math.max(sortMs, times.get(threadId) ?? sortMs))
+  return times.size ? times : null
+}
+
+/**
+ * The `conversations` page with due reminders on top: boosted threads sort by their time `k`
+ * instead of their latest message `r`. `g` is the plain grouped set, so filters, tabs and totals
+ * are unchanged; `x` is the same set read for the boosted threads alone (`boosted`, through the
+ * thread index), so a boost never adds a thread. Giving every thread of `g` a `k` costs each of
+ * them a lookup (at 100k messages, five times the plain page with a LEFT JOIN, a fifth more with
+ * `IN`); instead the plain top rows by `r`, padded by the boosted count and then rid of boosted
+ * threads, merge with `x`.
+ * Each page entry is `[thread, seq, k]`, with `k` null where it equals `r`; the keyset cursor is
+ * the last row's `k` and thread.
+ */
+export function boostedConversationPage(
+  source: { sql: string; params: SQLInputValue[] },
+  boosted: { sql: string; params: SQLInputValue[] },
+  boost: Map<string, number>,
+  page: { limit: number; offset: number; after?: { k: number; threadId: string } },
+) {
+  const params: SQLInputValue[] = [...source.params, list([...boost]), ...boosted.params]
+  let keysetK = '',
+    keysetR = ''
+  if (page.after) {
+    const { k, threadId } = page.after
+    keysetK = 'WHERE k < ? OR (k = ? AND t > ?)'
+    keysetR = 'WHERE r < ? OR (r = ? AND t > ?)'
+    params.push(k, k, threadId, k, k, threadId)
+  }
+  params.push(page.limit + page.offset, page.limit, page.offset)
+  return {
+    sql: `WITH g AS MATERIALIZED (${source.sql}),
+        b AS MATERIALIZED (SELECT value ->> 0 AS t, value ->> 1 AS k FROM json_each(?)),
+        x AS MATERIALIZED (SELECT q.t, q.r, q.s, b.k FROM (${boosted.sql}) q JOIN b ON b.t = q.t),
+        h AS (SELECT t, r, s, k FROM x ${keysetK}
+          UNION ALL
+          SELECT t, r, s, r FROM (
+            SELECT t, r, s FROM g ${keysetR} ORDER BY r DESC, t LIMIT ? + (SELECT count(*) FROM x))
+          WHERE t NOT IN (SELECT t FROM x))
+        SELECT (SELECT count(*) FROM g) AS total,
+          (SELECT json_group_array(json_array(t, s, nullif(k, r)) ORDER BY k DESC, t) FROM (
+            SELECT t, r, s, k FROM h ORDER BY k DESC, t LIMIT ? OFFSET ?)) AS page`,
+    params,
+  }
+}
