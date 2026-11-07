@@ -13,6 +13,14 @@ import {
   storedAutomation,
 } from './split-schema'
 import { addressesSeenQuery, splitFilter, tabCountQuery } from './split-sql'
+import { migrateToV5 } from './reminder-schema'
+import {
+  ASK_CHECKS_NEEDED_SQL,
+  reminderFactsQuery,
+  SET_ASK_CHECK_SQL,
+  toReminderFacts,
+  type ReminderFactsRow,
+} from './reminder-sql'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -24,6 +32,7 @@ import type {
   MessageLocation,
   MetadataIndex,
   NewMessage,
+  ReminderFactsQuery,
   SourceCandidateFilter,
   SourceLocation,
 } from '@inlark/imap'
@@ -60,6 +69,10 @@ const methodTable: Record<keyof MetadataIndex, true> = {
   conversations: true,
   tabCounts: true,
   addressesSeen: true,
+  // Reminders
+  reminderFacts: true,
+  askChecksNeeded: true,
+  setAskChecks: true,
   counts: true,
   getMeta: true,
   setMeta: true,
@@ -69,7 +82,7 @@ const methodTable: Record<keyof MetadataIndex, true> = {
 }
 export const indexMethods = Object.keys(methodTable) as (keyof MetadataIndex)[]
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 export const UNCHECKED_HEADERS_SQL = `SELECT uid, uid_validity AS uidValidity FROM messages
   WHERE account_id = ? AND mailbox_id = ? AND headers_checked = 0
   ORDER BY uid DESC LIMIT ?`
@@ -185,6 +198,7 @@ const migrations: (string | ((db: DatabaseSync) => void))[] = [
   CREATE INDEX IF NOT EXISTS messages_mailbox_received
     ON messages (account_id, mailbox_id, received_ms);`,
   migrateToV4,
+  migrateToV5,
 ]
 
 interface MailboxRow {
@@ -348,8 +362,8 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
           PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY;
           PRAGMA secure_delete = ON`,
       )
-      // A pre-release v4 file has the v4 version but not all of v4: it runs v4 again.
-      const start = version === SCHEMA_VERSION && needsV4Again(db) ? SCHEMA_VERSION - 1 : version
+      // A pre-release v4 file has the v4 version but not all of v4: it runs v4 again, then v5.
+      const start = version === 4 && needsV4Again(db) ? 3 : version
       if (start > 0 && start < SCHEMA_VERSION) options.onMigrate?.()
       for (let from = start; from < SCHEMA_VERSION; from++) {
         db.exec('BEGIN IMMEDIATE')
@@ -1158,6 +1172,32 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
     ).map((row): AddressSeen =>
       row.name ? { ...row, name: row.name } : { email: row.email, count: row.count },
     )
+  }
+
+  // Reminders
+  reminderFacts(accountId: string, query: ReminderFactsQuery) {
+    const sql = reminderFactsQuery(accountId, query)
+    if (!sql) return []
+    return this.all<ReminderFactsRow>(sql.sql, ...sql.params).map(toReminderFacts)
+  }
+
+  askChecksNeeded(accountId: string, sentId: string, sinceMs: number, limit: number) {
+    return this.all<{ id: string; messageId: string }>(
+      ASK_CHECKS_NEEDED_SQL,
+      accountId,
+      sentId,
+      sinceMs,
+      Math.max(0, Math.floor(limit)),
+    )
+  }
+
+  setAskChecks(accountId: string, rows: { messageId: string; asks: boolean }[]) {
+    this.tx(() => {
+      for (const row of rows) {
+        const [id] = messageIds([row.messageId])
+        if (id) this.run(SET_ASK_CHECK_SQL, accountId, id, row.asks ? 1 : 0)
+      }
+    })
   }
 
   counts(accountId: string) {

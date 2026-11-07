@@ -66,7 +66,7 @@ export function needsV4Again(db: DatabaseSync) {
   )
 }
 
-function parseAddresses(text: string): { email: string }[] {
+export function parseAddresses(text: string): { email: string }[] {
   try {
     const value = JSON.parse(text)
     return Array.isArray(value) ? value.filter((a) => a && typeof a.email === 'string') : []

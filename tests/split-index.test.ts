@@ -120,8 +120,8 @@ describe('schema v4', () => {
     index = openInProcessIndex(path)
     await index.close()
 
-    expect(read('PRAGMA user_version')).toEqual([{ user_version: 4 }])
-    expect(SCHEMA_VERSION).toBe(4)
+    expect(read('PRAGMA user_version')).toEqual([{ user_version: 5 }])
+    expect(SCHEMA_VERSION).toBe(5)
     expect(
       read<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'messages_mailbox_%' ORDER BY name",
@@ -342,7 +342,8 @@ describe('schema v4', () => {
     const db = new DatabaseSync(path)
     db.exec(`DROP TABLE thread_participants; DROP TABLE participants;
       CREATE TABLE participants (account_id TEXT NOT NULL, message_seq INTEGER NOT NULL,
-        address TEXT NOT NULL, domain TEXT NOT NULL, role TEXT NOT NULL)`)
+        address TEXT NOT NULL, domain TEXT NOT NULL, role TEXT NOT NULL);
+      DROP TABLE reminder_checks; PRAGMA user_version = 4`)
     db.close()
     const migrating: string[] = []
     new SqliteMetadataIndex(path, { onMigrate: () => migrating.push('v4') }).close()
@@ -351,6 +352,9 @@ describe('schema v4', () => {
       { n: 2 },
     ])
     expect(read('SELECT count(*) AS n FROM thread_participants')).toEqual([{ n: 2 }])
+    // Then v5.
+    expect(read("SELECT name FROM sqlite_master WHERE name = 'reminder_checks'")).toHaveLength(1)
+    expect(read('PRAGMA user_version')).toEqual([{ user_version: 5 }])
     // A current file opens without migrating.
     new SqliteMetadataIndex(path, { onMigrate: () => migrating.push('again') }).close()
     expect(migrating).toEqual(['v4'])

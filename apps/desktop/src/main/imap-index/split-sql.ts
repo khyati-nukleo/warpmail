@@ -98,7 +98,7 @@ function ruleThreads(
  * `messages_mailbox_person`, so it is read by `seq`, and only for always senders with words.
  * Every list is one JSON parameter, so the expression is the same size for 1 sender or 500.
  */
-function person(scope: Important, alias: string): SqlFragment {
+export function person(scope: Important, alias: string): SqlFragment {
   const params: SQLInputValue[] = []
   const terms = [`${alias}.automated = 0`]
   // `from_email` is one of `addresses`. One address, the usual case, is a plain comparison: an

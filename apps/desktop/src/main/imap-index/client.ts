@@ -169,6 +169,16 @@ export class WorkerMetadataIndex implements MetadataIndex {
   addressesSeen(...args: Args<'addressesSeen'>) {
     return this.call('addressesSeen', args)
   }
+  // Reminders
+  reminderFacts(...args: Args<'reminderFacts'>) {
+    return this.call('reminderFacts', args)
+  }
+  askChecksNeeded(...args: Args<'askChecksNeeded'>) {
+    return this.call('askChecksNeeded', args)
+  }
+  setAskChecks(...args: Args<'setAskChecks'>) {
+    return this.call('setAskChecks', args)
+  }
   counts(...args: Args<'counts'>) {
     return this.call('counts', args)
   }
