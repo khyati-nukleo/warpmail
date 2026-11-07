@@ -1,4 +1,3 @@
-import { useMemo } from 'react'
 import { Button } from '@inlark/ui'
 import type { Account, Draft } from '@inlark/core'
 import {
@@ -7,7 +6,7 @@ import {
   useShortcuts,
   useShortcutText,
 } from '../shortcuts'
-import { followUpGuess, followUpLabel, followUpShown } from './draft-text'
+import { followUpLabel, followUpShown, useFollowUpGuess } from './draft-text'
 import { useReminderSettings } from './ReminderLabel'
 
 /** Shows the ask-check's guess for the draft; a click or Mod+Shift+O overrides it. */
@@ -25,7 +24,7 @@ export function FollowUpSwitch({
   const settings = useReminderSettings()
   const shortcuts = useShortcuts()
   const keys = useShortcutText()
-  const guessed = useMemo(() => followUpGuess({ html: draft.html, text: draft.text }), [draft.html])
+  const guessed = useFollowUpGuess(draft)
   const shown = followUpShown({
     protocol: account.protocol,
     settings,

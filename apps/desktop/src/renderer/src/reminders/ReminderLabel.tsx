@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { reminderSettingsOf, type Conversation, type ReminderSettings } from '@inlark/core'
 import { api } from '../api'
@@ -17,8 +18,9 @@ export function ReminderLabel({
   )
 }
 
-/** Reminder settings from the cached bootstrap, so rows need no extra props. */
+/** Reminder settings from the cached bootstrap; the same object until the settings change. */
 export function useReminderSettings(): ReminderSettings {
   const { data } = useQuery({ queryKey: ['bootstrap'], queryFn: () => api.bootstrap() })
-  return reminderSettingsOf(data?.settings ?? {})
+  const settings = data?.settings
+  return useMemo(() => reminderSettingsOf(settings ?? {}), [settings])
 }

@@ -20,6 +20,14 @@ describe('draftOwnText', () => {
     expect(own).toContain('Here it is.')
     expect(own).not.toMatch(/Dana|file|Sam|\?/)
   })
+  it('keeps my own paragraph right above a quote when it is not an attribution', () => {
+    const own = draftOwnText('<p>Can you check the part below?</p><blockquote>Old</blockquote>', '')
+    expect(own).toBe('Can you check the part below?')
+  })
+  it('drops a French attribution before a quote', () => {
+    const html = '<p>Voici.</p><p>Le ven., Dana a écrit :</p><blockquote>Pourquoi ?</blockquote>'
+    expect(draftOwnText(html, '')).toBe('Voici.')
+  })
   it('drops a gmail_quote block', () => {
     const own = draftOwnText('<p>Done.</p><div class="gmail_quote">Why?</div>', '')
     expect(own).toBe('Done.')

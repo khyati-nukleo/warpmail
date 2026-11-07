@@ -10,11 +10,12 @@ import {
 } from 'react'
 import type { Ref, RefObject } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { Account, Conversation, MailAction, View } from '@inlark/core'
+import type { Account, Conversation, MailAction, ReminderSettings, View } from '@inlark/core'
 import { Spinner } from '@inlark/ui'
 import { ConversationRow, senderLabel } from './ConversationRow'
 import { listRows } from './list-rows'
 import { offersAction } from './view-actions'
+import { useReminderSettings } from './reminders/ReminderLabel' // Reminders
 
 export type ConversationListHandle = {
   scrollToConversation: (key: string) => void
@@ -32,6 +33,7 @@ const ListConversationRow = memo(function ListConversationRow({
   onFocus,
   onSelect,
   onAction,
+  reminderSettings, // Reminders
 }: {
   conversation: Conversation
   account?: Account
@@ -44,9 +46,11 @@ const ListConversationRow = memo(function ListConversationRow({
   onFocus: (key: string) => void
   onSelect: (key: string, range: boolean) => void
   onAction: (action: MailAction, conversation: Conversation) => void
+  reminderSettings: ReminderSettings // Reminders
 }) {
   return (
     <ConversationRow
+      reminderSettings={reminderSettings}
       conversation={conversation}
       account={account}
       selected={selected}
@@ -122,6 +126,7 @@ export function ConversationList({
     [accounts],
   )
   const rows = useMemo(() => listRows(conversations), [conversations])
+  const reminderSettings = useReminderSettings() // Reminders: once for every row
   const senderCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const conversation of conversations) {
@@ -299,6 +304,7 @@ export function ConversationList({
                   onFocus={onFocus}
                   onSelect={onSelect}
                   onAction={onAction}
+                  reminderSettings={reminderSettings}
                 />
               )}
             </div>

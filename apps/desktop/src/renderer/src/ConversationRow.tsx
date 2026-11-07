@@ -1,7 +1,7 @@
 import { cn } from '@inlark/ui'
 import { Archive, Lock, Mail, MailOpen, Paperclip, Star, Trash2 } from '@inlark/ui/icons'
 import { Checkbox, IconButton } from '@inlark/ui'
-import { isDraft, type Account, type Conversation } from '@inlark/core'
+import { isDraft, type Account, type Conversation, type ReminderSettings } from '@inlark/core'
 import { shortDate } from './mail-date'
 import { SenderAvatar } from './SenderAvatar'
 import { AccountMark } from './AccountMark'
@@ -9,7 +9,7 @@ import { HintIconButton } from './HintIconButton'
 import { actionLimit } from './account-limits'
 import { useShortcutText } from './shortcuts'
 import { ReadStatusEye } from './read-status/ReadStatusEye' // Read status
-import { ReminderLabel, useReminderSettings } from './reminders/ReminderLabel'
+import { ReminderLabel } from './reminders/ReminderLabel'
 
 export function senderLabel(conversation: Conversation) {
   return conversation.from.map((sender) => sender.name || sender.email.split('@')[0]).join(', ')
@@ -29,6 +29,7 @@ export function ConversationRow({
   onArchive,
   onTrash,
   onToggleRead,
+  reminderSettings, // Reminders
 }: {
   conversation: Conversation
   account?: Account
@@ -43,9 +44,10 @@ export function ConversationRow({
   onArchive?: () => void
   onTrash?: () => void
   onToggleRead: () => void
+  /** Reminders: from the list, so a row runs no query of its own. */
+  reminderSettings: ReminderSettings
 }) {
   const keys = useShortcutText()
-  const reminderSettings = useReminderSettings()
   const moveLimit = actionLimit(a, 'move')
   const subject = c.subject || '(No subject)'
   // An unsent reply is flagged rather than counted, so it never reads as sent.

@@ -1,8 +1,11 @@
+import { useDeferredValue, useMemo } from 'react'
 import { askCheck, ownText, type Draft, type Protocol, type ReminderSettings } from '@inlark/core'
 import { textSignatureMarker } from '../composer-document'
 
 const dropped = `blockquote, .gmail_quote, [data-inlark-signature], [${textSignatureMarker}]`
 const blocks = 'p, div, li, br, h1, h2, h3, h4, h5, h6, pre, tr'
+/** "On Fri, Dana wrote:" or "Le ven., Dana a écrit :". */
+const attribution = /wrote:\s*$|a\s+[ée]crit\s*:?\s*$/i
 
 /** What the sender wrote: no quoted reply or its attribution line, no signature. */
 export function draftOwnText(html: string, text: string): string {
@@ -11,7 +14,12 @@ export function draftOwnText(html: string, text: string): string {
   for (const quote of Array.from(doc.body.querySelectorAll('blockquote'))) {
     // "On Fri, Dana wrote:" sits just before the quote.
     const before = quote.previousElementSibling
-    if (before?.tagName === 'P' && !before.matches(dropped)) before.remove()
+    if (
+      before?.tagName === 'P' &&
+      !before.matches(dropped) &&
+      attribution.test((before.textContent ?? '').trim())
+    )
+      before.remove()
   }
   doc.body.querySelectorAll(dropped).forEach((el) => el.remove())
   // A newline per block, so the closing and name lines stay on their own lines.
@@ -22,6 +30,16 @@ export function draftOwnText(html: string, text: string): string {
 /** The ask-check's guess for a draft: whether it asks the reader for something. */
 export function followUpGuess(draft: Pick<Draft, 'html' | 'text'>): boolean {
   return askCheck(draftOwnText(draft.html, draft.text)).asks
+}
+
+/**
+ * The guess as the draft changes. Deferred, so the check runs behind typing rather than on
+ * every keystroke; a plain-text draft has no HTML, so the text counts too.
+ */
+export function useFollowUpGuess(draft: Pick<Draft, 'html' | 'text'>): boolean {
+  const html = useDeferredValue(draft.html)
+  const text = useDeferredValue(draft.text)
+  return useMemo(() => followUpGuess({ html, text }), [html, text])
 }
 
 export function followUpLabel(on: boolean, guessed: boolean): string {
