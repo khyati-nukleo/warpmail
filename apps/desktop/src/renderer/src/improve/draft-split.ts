@@ -26,18 +26,23 @@ const attribution = [/^On .+wrote:\s*$/s, /^Le .+a écrit\s?:\s*$/s]
 /**
  * Lines that start what is never sent, matched loosely because each mail app writes them
  * differently: forward and original-message headers (Gmail, Thunderbird, Outlook, Apple Mail,
- * in English and French), Outlook's underscore line and the `-- ` signature delimiter.
+ * in English and French), Outlook's underscore line, the `-- ` signature delimiter and `>` quotes.
  */
 const boundaryLines = [
   /^-{2,}\s*(?:Forwarded message|Original message|Message transféré|Message d'origine)\s*-{2,}/i,
   /^(?:Begin forwarded message|Début du message réexpédié)\s?:/i,
   /^_{10,}\s*$/,
   /^--\s*$/,
+  // Plain-text quoting, with or without a reply line above it.
+  /^>/,
   ...attribution,
 ]
-/** Outlook's header block: "From: …" with "Sent: …" or "Date: …" on the next line. */
-const outlookFrom = /^(?:From|De)\s?: ./
-const outlookNext = /^(?:Sent|Date|Envoyé)\s?: /
+/**
+ * Outlook's header block: "From: …" with "Sent: …" or "Date: …" on the next line. The space after
+ * each colon may be a non-breaking one.
+ */
+const outlookFrom = /^(?:From|De)\s?:\s+\S/
+const outlookNext = /^(?:Sent|Date|Envoyé)\s?:\s/
 
 function inlineText(node: JSONContent): string {
   if (node.type === 'hardBreak') return '\n'

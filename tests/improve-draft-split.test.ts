@@ -301,6 +301,34 @@ describe('draft splitting', () => {
       )
     })
 
+    it('stops at an Outlook header with non-breaking spaces after the colons', () => {
+      expectOnlyOwn(
+        '<div>Thanks.</div><hr><div id="divRplyFwdMsg"><b>From:</b>&nbsp;Lee Client &lt;lee@example.com&gt;<br><b>Sent:</b>&nbsp;Wednesday, November 5, 2026 9:12 AM<br><b>To:</b>&nbsp;Khyati<br><b>Subject:</b>&nbsp;Budget</div><div>The client\'s private text.</div>',
+        'Thanks.',
+        clientParts,
+      )
+    })
+
+    it('stops at plain-text quote lines, with a wrapped reply line or none', () => {
+      const lines = (...texts: string[]): JSONContent => ({
+        type: 'paragraph',
+        content: texts.flatMap((text, index): JSONContent[] =>
+          index ? [{ type: 'hardBreak' }, { type: 'text', text }] : [{ type: 'text', text }],
+        ),
+      })
+      const wrapped = splitDraft(
+        doc(
+          p('Thanks, sounds good.'),
+          lines('On Wed, Nov 5, 2026 at 9:12 AM Lee Client <', 'lee@example.com> wrote:'),
+          p('> SECRET client text.'),
+        ),
+      )
+      expect(wrapped.text).not.toContain('SECRET')
+      expect(wrapped.text).toBe('Thanks, sounds good.')
+      const bare = splitDraft(doc(p('Thanks.'), lines('> quoted', '> SECRET client text.')))
+      expect(bare.text).toBe('Thanks.')
+    })
+
     it('stops at loose forward and original-message headers', () => {
       for (const header of [
         '---------- Forwarded message ---------',
