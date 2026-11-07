@@ -1,3 +1,4 @@
+import type { ReminderSettings, ReminderSnooze } from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -264,6 +265,9 @@ export interface Settings {
   important?: ImportantSettings
   // Read status: absent is treated as `{ enabled: true }`.
   readStatus?: ReadStatusSettings
+  // Reminders
+  reminders?: Partial<ReminderSettings>
+  reminderSnoozes?: ReminderSnooze[]
 }
 export interface ReadStatusSettings {
   enabled: boolean

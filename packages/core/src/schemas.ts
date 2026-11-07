@@ -243,6 +243,27 @@ export const settingsSchema = z.object({
       previousWorkerUrls: z.array(z.string().max(2048)).max(10).optional(),
     })
     .optional(),
+  // Reminders
+  reminders: z
+    .object({
+      enabled: z.boolean().optional(),
+      followUp: z.boolean().optional(),
+      forgotToReply: z.boolean().optional(),
+      followUpDays: z.number().int().min(1).max(30).optional(),
+      replyDays: z.number().int().min(1).max(30).optional(),
+    })
+    .optional(),
+  reminderSnoozes: z
+    .array(
+      z.object({
+        accountId: id,
+        threadId: id,
+        messageId: z.string().max(998),
+        until: z.number().int(),
+      }),
+    )
+    .max(500)
+    .optional(),
 })
 export const ipcSchemas = {
   encryptionStatus: z.tuple([]),
