@@ -47,6 +47,16 @@ function toImproveError(err: unknown, signal?: AbortSignal): ImproveError {
   return new ImproveError('failed')
 }
 
+type TokenCount =
+  'input_tokens' | 'output_tokens' | 'cache_creation_input_tokens' | 'cache_read_input_tokens'
+
+/** The token counts of one entry in `usage.iterations`. */
+type IterationUsage = Partial<Record<TokenCount, number | null>>
+
+function sum(iterations: readonly IterationUsage[], key: TokenCount): number {
+  return iterations.reduce((total, iteration) => total + (iteration[key] ?? 0), 0)
+}
+
 export function createClaudeProvider(options: ClaudeProviderOptions): ImproveProvider {
   const client = new Anthropic({
     apiKey: options.apiKey,
@@ -73,7 +83,16 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
       output_tokens?: number | null
       cache_creation_input_tokens?: number | null
       cache_read_input_tokens?: number | null
+      iterations?: readonly IterationUsage[] | null
     }): void => {
+      if (u.iterations?.length) {
+        // A server-side fallback bills the declined attempt too; only iterations show it.
+        usage.inputTokens = sum(u.iterations, 'input_tokens')
+        usage.outputTokens = sum(u.iterations, 'output_tokens')
+        usage.cacheWriteTokens = sum(u.iterations, 'cache_creation_input_tokens')
+        usage.cacheReadTokens = sum(u.iterations, 'cache_read_input_tokens')
+        return
+      }
       if (u.input_tokens != null) usage.inputTokens = u.input_tokens
       if (u.output_tokens != null) usage.outputTokens = u.output_tokens
       if (u.cache_creation_input_tokens != null)

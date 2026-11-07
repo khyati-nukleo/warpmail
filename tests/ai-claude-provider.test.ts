@@ -297,6 +297,53 @@ describe('claude provider', () => {
     expect(seen2).toHaveLength(1)
   })
 
+  it('counts every attempt of a declined-then-continued request', async () => {
+    const seen: ImproveUsage[] = []
+    const events = okReply(['Hi']).events
+    const delta = events.find((step) => step.event === 'message_delta')!
+    delta.data = {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: {
+        input_tokens: 130,
+        output_tokens: 40,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 10,
+        iterations: [
+          {
+            type: 'message',
+            model: 'claude-opus-5-5',
+            input_tokens: 120,
+            output_tokens: 5,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_creation: null,
+          },
+          {
+            type: 'fallback_message',
+            model: 'claude-opus-4-8',
+            input_tokens: 130,
+            output_tokens: 40,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 10,
+            cache_creation: null,
+          },
+        ],
+      },
+    }
+    const s = await startServer({ events })
+    const provider = createClaudeProvider({
+      apiKey,
+      baseURL: s.baseURL,
+      maxRetries: 0,
+      onUsage: (u) => seen.push(u),
+    })
+    await collect(provider.improve('x', 'polish', new AbortController().signal))
+    expect(seen).toEqual([
+      { inputTokens: 250, outputTokens: 45, cacheWriteTokens: 10, cacheReadTokens: 10 },
+    ])
+  })
+
   it('checks a key without sending any draft', async () => {
     const s = await startServerRaw(200, {
       type: 'model',
