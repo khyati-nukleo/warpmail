@@ -1,4 +1,4 @@
-import type { Draft, ReadStatusSettings } from './model'
+import type { Address, Draft, ReadStatusSettings } from './model'
 import { isAutomatedAddress } from './split'
 
 export const readStatusLimits = { recipients: 25 }
@@ -173,4 +173,80 @@ export function trackingBlock(input: {
   if (!recipients.some((email) => !isAutomatedAddress(email))) return 'automated'
   if (recipients.length > readStatusLimits.recipients) return 'tooMany'
   return undefined
+}
+
+/** A fetch counts as a new open when it is at least this long after the previous counted one. */
+const openGapMs = 60_000
+
+/** Counts opens from non-Apple fetches; Apple fetches (mail privacy proxy) never count. */
+export function countOpens(fetches: FetchRecord[]): {
+  opens: number
+  firstAt?: number
+  lastAt?: number
+  apple: boolean
+} {
+  const apple = fetches.some((f) => f.source === 'apple')
+  const times = fetches
+    .filter((f) => f.source !== 'apple')
+    .map((f) => f.at)
+    .sort((x, y) => x - y)
+  let opens = 0
+  let firstAt: number | undefined
+  let lastAt: number | undefined
+  for (const at of times) {
+    if (lastAt === undefined || at - lastAt >= openGapMs) {
+      opens++
+      firstAt ??= at
+      lastAt = at
+    }
+  }
+  return { opens, firstAt, lastAt, apple }
+}
+
+export type RecipientState = 'opened' | 'apple' | 'none'
+export interface RecipientReadStatus {
+  email: string
+  state: RecipientState
+  opens: number
+  firstAt?: string
+  lastAt?: string
+  repliedAt?: string
+}
+
+export function recipientStatus(
+  email: string,
+  fetches: FetchRecord[],
+  repliedAt?: string,
+): RecipientReadStatus {
+  const { opens, firstAt, lastAt, apple } = countOpens(fetches)
+  const state: RecipientState = opens > 0 || repliedAt ? 'opened' : apple ? 'apple' : 'none'
+  const status: RecipientReadStatus = { email, state, opens }
+  if (firstAt !== undefined) status.firstAt = new Date(firstAt).toISOString()
+  if (lastAt !== undefined) status.lastAt = new Date(lastAt).toISOString()
+  if (repliedAt) status.repliedAt = repliedAt
+  return status
+}
+
+/** Lowercase sender email to the earliest time they wrote after the sent email. */
+export function replyTimes(
+  sent: { receivedAt: string },
+  later: { from: Address[]; receivedAt: string }[],
+): Map<string, string> {
+  const sentAt = Date.parse(sent.receivedAt)
+  const out = new Map<string, string>()
+  for (const message of later) {
+    const at = Date.parse(message.receivedAt)
+    if (!(at > sentAt)) continue
+    for (const from of message.from) {
+      const email = from.email.trim().toLowerCase()
+      const known = out.get(email)
+      if (email && (known === undefined || at < Date.parse(known)))
+        out.set(email, message.receivedAt)
+    }
+  }
+  return out
+}
+
+export function conversationOpened(statuses: RecipientReadStatus[]): boolean {
+  return statuses.some((s) => s.state === 'opened')
 }
