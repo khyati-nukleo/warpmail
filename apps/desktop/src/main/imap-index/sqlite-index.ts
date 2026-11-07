@@ -1234,8 +1234,9 @@ export class SqliteMetadataIndex implements SyncMetadataIndex {
   setAskChecks(accountId: string, rows: { messageId: string; asks: boolean }[]) {
     this.tx(() => {
       for (const row of rows) {
-        const [id] = messageIds([row.messageId])
-        if (id) this.run(SET_ASK_CHECK_SQL, accountId, id, row.asks ? 1 : 0)
+        // As listed by askChecksNeeded (the stored column), so the check always matches it.
+        const id = row.messageId.trim()
+        if (id && id.length <= 998) this.run(SET_ASK_CHECK_SQL, accountId, id, row.asks ? 1 : 0)
       }
     })
   }

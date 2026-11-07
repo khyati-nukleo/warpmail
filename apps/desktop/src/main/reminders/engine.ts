@@ -20,8 +20,13 @@ export interface ReminderEngineDeps {
   accounts(): Account[]
   settings(): Settings
   provider(accountId: string): MailProvider | undefined
-  /** Moves the thread's archived mail back to the inbox; the undo id when anything moved. */
-  returnToInbox(accountId: string, threadId: string): Promise<string | undefined>
+  /**
+   * Moves these threads' archived mail back to the inbox, with one undo for all of them.
+   * `handled` lists the threads that moved or had nothing to move; failed ones are left out.
+   */
+  returnToInbox(
+    targets: ReturnTarget[],
+  ): Promise<{ handled: ReturnTarget[]; moved: number; undoId?: string }>
   emit(event: AppEvent): void
   store: {
     read<T>(key: string, fallback: T): Promise<T>
@@ -32,10 +37,13 @@ export interface ReminderEngineDeps {
   log?: (event: string) => void
 }
 
+export type ReturnTarget = { accountId: string; threadId: string }
 type Derived = { reminder: Reminder; inInbox: boolean }[]
 type Target = { account: Account; provider: MailProvider }
 
 const debounceMs = 500
+/** A steady stream of changes still recomputes this often. */
+const debounceMaxMs = 5000
 /** The wake-up timer never waits longer, so a sleeping laptop or a clock change catches up. */
 const maxWaitMs = 60 * 60_000
 const scanLimit = 25
@@ -43,6 +51,7 @@ const returnedKey = 'reminders-returned'
 const returnedLimit = 500
 const dayMs = 86_400_000
 
+const background = { background: true }
 const offline = (error: unknown) =>
   error instanceof ProviderError && connectionErrorCodes.includes(error.code)
 
@@ -56,10 +65,14 @@ export class ReminderEngine {
   private pending = new Set<string>()
   private pendingAll = false
   private debounce?: ReturnType<typeof setTimeout>
+  private debounceMax?: ReturnType<typeof setTimeout>
   private wake?: ReturnType<typeof setTimeout>
   private wakeAt = 0
-  /** Sent mail whose body couldn't be read, per account: left unchecked until next launch. */
-  private skipped = new Map<string, Set<string>>()
+  /**
+   * Sent mail read by the scan this session, per account, checked or not: never read twice.
+   * One whose body couldn't be read stays unchecked in the index, so a later session retries it.
+   */
+  private scanned = new Map<string, Set<string>>()
   private scanning = new Set<string>()
   /** Recomputes run one at a time, so a follow-up is never returned twice. */
   private queue: Promise<void> = Promise.resolve()
@@ -104,6 +117,7 @@ export class ReminderEngine {
     if (!this.started || this.disposed) return
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = setTimeout(() => this.flush(), debounceMs)
+    this.debounceMax ??= setTimeout(() => this.flush(), debounceMaxMs)
   }
 
   /** Catches up on launch: reminders that came due while the app was closed. */
@@ -116,6 +130,7 @@ export class ReminderEngine {
   dispose(): void {
     this.disposed = true
     if (this.debounce) clearTimeout(this.debounce)
+    if (this.debounceMax) clearTimeout(this.debounceMax)
     if (this.wake) clearTimeout(this.wake)
   }
 
@@ -162,7 +177,9 @@ export class ReminderEngine {
   }
 
   private flush() {
-    this.debounce = undefined
+    if (this.debounce) clearTimeout(this.debounce)
+    if (this.debounceMax) clearTimeout(this.debounceMax)
+    this.debounce = this.debounceMax = undefined
     const ids = this.pendingAll ? this.imapIds() : [...this.pending]
     this.pending.clear()
     this.pendingAll = false
@@ -172,15 +189,24 @@ export class ReminderEngine {
   }
 
   private async recompute(ids: string[]) {
+    const waiting: (ReturnTarget & { key: string })[] = []
+    const now = this.now()
     for (const id of ids) {
       if (this.disposed) return
       const target = this.target(id)
       if (!target) continue
       const derived = await this.derived(id)
       // In the background: the inbox never waits for bodies to be read.
-      void this.scan(target)
-      await this.returnDue(id, derived)
+      if (reminderSettingsOf(this.deps.settings()).followUp) void this.scan(target)
+      for (const { reminder, inInbox } of derived)
+        if (reminder.kind === 'followUp' && !inInbox && reminder.dueMs <= now)
+          waiting.push({
+            accountId: id,
+            threadId: reminder.threadId,
+            key: [id, reminder.threadId, reminder.messageId].join('|'),
+          })
     }
+    if (waiting.length && !this.disposed) await this.returnDue(waiting)
     await this.arm()
   }
 
@@ -214,11 +240,13 @@ export class ReminderEngine {
     if (!provider.askChecksNeeded || !provider.setAskChecks || this.scanning.has(account.id)) return
     this.scanning.add(account.id)
     try {
-      let skipped = this.skipped.get(account.id)
-      if (!skipped) this.skipped.set(account.id, (skipped = new Set()))
+      let scanned = this.scanned.get(account.id)
+      if (!scanned) this.scanned.set(account.id, (scanned = new Set()))
       const since = this.now() - reminderLookbackDays * dayMs
-      const rows = (await provider.askChecksNeeded(account, since, scanLimit + skipped.size))
-        .filter((r) => !skipped.has(r.id))
+      // Mail read before but still listed (unreadable, or a check that didn't store) comes
+      // back first, so ask for that many more.
+      const rows = (await provider.askChecksNeeded(account, since, scanLimit + scanned.size))
+        .filter((r) => !scanned.has(r.id))
         .slice(0, scanLimit)
       if (!rows.length) return
       const read = await this.bodies(
@@ -227,14 +255,14 @@ export class ReminderEngine {
       )
       const checks: { messageId: string; asks: boolean }[] = []
       for (const row of rows) {
+        scanned.add(row.id)
         const message = read.get(row.id)
-        if (!message || (message.html === undefined && message.text === undefined))
-          skipped.add(row.id)
-        else checks.push({ messageId: row.messageId, asks: mainAskCheck(message) })
+        if (message && (message.html !== undefined || message.text !== undefined))
+          checks.push({ messageId: row.messageId, asks: mainAskCheck(message) })
       }
       if (!checks.length) return
       await provider.setAskChecks(account, checks)
-      // Recompute, which also checks the next batch.
+      // Recompute, which also checks the next batch; it ends once every row was read.
       this.invalidate(account.id)
       if (checks.some((c) => c.asks)) this.deps.emit({ type: 'changed', accountId: account.id })
     } catch {
@@ -244,51 +272,58 @@ export class ReminderEngine {
     }
   }
 
-  /** Bodies by id. One unreadable email doesn't fail the others; being offline stops the scan. */
+  /**
+   * Bodies by id, read behind the user's own work. One unreadable email doesn't fail the
+   * others; being offline stops the scan.
+   */
   private async bodies({ account, provider }: Target, ids: string[]) {
     const read = new Map<string, Message>()
     try {
-      for (const m of await provider.messages(account, ids, true)) read.set(m.id, m)
+      for (const m of await provider.messages(account, ids, true, background)) read.set(m.id, m)
       return read
     } catch (error) {
       if (offline(error) || ids.length === 1) throw error
     }
     for (const id of ids)
       try {
-        for (const m of await provider.messages(account, [id], true)) read.set(m.id, m)
+        for (const m of await provider.messages(account, [id], true, background)) read.set(m.id, m)
       } catch (error) {
         if (offline(error)) throw error
       }
     return read
   }
 
-  /** Brings each archived due follow-up back to the inbox, once per email. */
-  private async returnDue(accountId: string, derived: Derived) {
-    const now = this.now()
-    const waiting = derived.filter(
-      (d) => d.reminder.kind === 'followUp' && !d.inInbox && d.reminder.dueMs <= now,
-    )
-    if (!waiting.length) return
+  /** Brings archived due follow-ups back to the inbox in one move, once per email. */
+  private async returnDue(waiting: (ReturnTarget & { key: string })[]) {
     const stored = await this.deps.store.read<unknown>(returnedKey, [])
-    let keys = Array.isArray(stored) ? stored.filter((k): k is string => typeof k === 'string') : []
-    let count = 0
-    let undoId: string | undefined
-    for (const { reminder } of waiting) {
-      const key = [accountId, reminder.threadId, reminder.messageId].join('|')
-      if (this.disposed) break
-      if (keys.includes(key)) continue
-      try {
-        const undo = await this.deps.returnToInbox(accountId, reminder.threadId)
-        keys = [...keys, key].slice(-returnedLimit)
-        await this.deps.store.write(returnedKey, keys)
-        if (undo) {
-          count++
-          undoId = undo
-        }
-      } catch {
-        this.log('reminders-return-failed')
-      }
+    const keys = Array.isArray(stored)
+      ? stored.filter((k): k is string => typeof k === 'string')
+      : []
+    const known = new Set(keys)
+    const due = waiting.filter((w) => !known.has(w.key))
+    if (!due.length) return
+    let result: Awaited<ReturnType<ReminderEngineDeps['returnToInbox']>>
+    try {
+      result = await this.deps.returnToInbox(
+        due.map(({ accountId, threadId }) => ({ accountId, threadId })),
+      )
+    } catch {
+      this.log('reminders-return-failed')
+      return
     }
-    if (count) this.deps.emit({ type: 'remindersReturned', count, ...(undoId ? { undoId } : {}) })
+    const handled = new Set(result.handled.map((t) => t.accountId + '|' + t.threadId + '|'))
+    const done = due.filter((w) => handled.has(w.accountId + '|' + w.threadId + '|'))
+    if (done.length < due.length) this.log('reminders-return-failed')
+    if (done.length)
+      await this.deps.store.write(
+        returnedKey,
+        [...keys, ...done.map((w) => w.key)].slice(-returnedLimit),
+      )
+    if (result.moved)
+      this.deps.emit({
+        type: 'remindersReturned',
+        count: result.moved,
+        ...(result.undoId ? { undoId: result.undoId } : {}),
+      })
   }
 }

@@ -884,6 +884,44 @@ describe('IMAP read-ahead', () => {
     // UID 9 is the message the user opened; only the read-ahead message in progress precedes it.
     expect(read.indexOf(9)).toBe(1)
   })
+  // Reminders
+  it('reads message bodies in the background without counting as the user’s own open', async () => {
+    for (let i = 1; i <= 3; i++)
+      server.deliver('Sent', {
+        messageId: 's' + i + '@x',
+        subject: 'S' + i,
+        date: at(i),
+        text: 'Hi ' + i,
+      })
+    server.deliver('INBOX', { messageId: 'other@x', subject: 'Other', date: at(20), text: 'Hi' })
+    const p = await connected()
+    await sync(p)
+    const sent = (await p.query(account, { view: 'sent' })).items.map((c) => c.messages[0]!.id)
+    const [other] = (await p.query(account, { view: 'inbox' })).items
+    const source = FakePort.prototype.source
+    let release!: () => void
+    const busy = new Promise<void>((resolve) => (release = resolve))
+    const read: string[] = []
+    vi.spyOn(FakePort.prototype, 'source').mockImplementation(async function (
+      this: FakePort,
+      uid,
+      max,
+    ) {
+      if (!read.length) await busy
+      read.push((this as any).selected + ':' + uid)
+      return source.call(this, uid, max)
+    })
+    const scan = p.messages(account, sent, true, { background: true })
+    await new Promise((r) => setTimeout(r, 20))
+    expect((p as any).lastOpened).toBe(0)
+    const open = p.conversation(account, other!.id)
+    await new Promise((r) => setTimeout(r, 20))
+    release()
+    const [bodies] = await Promise.all([scan, open])
+    expect(bodies.map((m) => m.text?.trim()).sort()).toEqual(['Hi 1', 'Hi 2', 'Hi 3'])
+    // One background message at a time: the user's open comes right after the first.
+    expect(read.indexOf('INBOX:1')).toBe(1)
+  })
 })
 
 describe('IMAP mail stored ahead of time', () => {

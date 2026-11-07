@@ -570,7 +570,13 @@ export interface MailProvider {
     expectedState?: string,
   ): Promise<{ updated: string[]; failures: string[] }>
   conversationMetadata(account: Account, threadIds: string[]): Promise<Message[]>
-  messages(account: Account, ids: string[], bodies?: boolean): Promise<Message[]>
+  /** `background` reads run behind the user's own work (Reminders: the Sent ask scan). */
+  messages(
+    account: Account,
+    ids: string[],
+    bodies?: boolean,
+    options?: { background?: boolean },
+  ): Promise<Message[]>
   folder(
     account: Account,
     operation: 'create' | 'rename' | 'delete',

@@ -85,7 +85,11 @@ function harness(
         .map((s) => ({ id: s.id, html: s.html, text: s.text })),
     ),
   } as unknown as Harness['provider']
-  const returned = vi.fn(async () => 'undo-1' as string | undefined)
+  const returned = vi.fn(async (targets: { accountId: string; threadId: string }[]) => ({
+    handled: targets,
+    moved: targets.length,
+    undoId: 'undo-1' as string | undefined,
+  }))
   const engine = new ReminderEngine({
     accounts: () => [account],
     settings: () => settings,
@@ -103,7 +107,9 @@ function harness(
 }
 
 let current: Harness | undefined
-beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
+beforeEach(() =>
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] }),
+)
 afterEach(() => {
   current?.engine.dispose()
   current = undefined
@@ -144,12 +150,50 @@ describe('ReminderEngine', () => {
     h.engine.start()
     await settle()
     expect(h.provider.askChecksNeeded).toHaveBeenCalledWith(account, expect.any(Number), 25)
-    expect(h.provider.messages).toHaveBeenCalledWith(account, ['s1'], true)
+    // Behind the user's own reading.
+    expect(h.provider.messages).toHaveBeenCalledWith(account, ['s1'], true, { background: true })
     expect(h.provider.setAskChecks).toHaveBeenCalledWith(account, [
       { messageId: 'm1@example.com', asks: true },
     ])
     expect((await h.engine.due('a1')).map((r) => r.kind)).toEqual(['followUp'])
     expect(h.events).toContainEqual({ type: 'changed', accountId: 'a1' })
+  })
+  it('never reads an email twice in a session, even when its check didn’t store', async () => {
+    const h = make({
+      sent: [{ id: 's1', messageId: 'odd', text: 'Can you?' }],
+    })
+    // The index refuses the write, so the email stays listed as needing a check.
+    h.provider.setAskChecks.mockImplementation(async () => {})
+    h.engine.start()
+    await settle()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(h.provider.messages).toHaveBeenCalledTimes(1)
+    expect(h.provider.setAskChecks).toHaveBeenCalledTimes(1)
+    // One more pass found nothing new, and nothing scheduled another.
+    expect(h.provider.askChecksNeeded).toHaveBeenCalledTimes(2)
+  })
+  it('skips the scan while follow-ups are off', async () => {
+    const h = make({
+      settings: { reminders: { followUp: false } },
+      sent: [{ id: 's1', messageId: 'm1@example.com', text: 'Can you?' }],
+    })
+    h.engine.start()
+    await settle()
+    expect(h.provider.reminderFacts).toHaveBeenCalled()
+    expect(h.provider.askChecksNeeded).not.toHaveBeenCalled()
+  })
+  it('recomputes at least every 5 seconds under a steady stream of changes', async () => {
+    const h = make()
+    h.engine.start()
+    const stream = setInterval(() => h.engine.invalidate('a1'), 400)
+    try {
+      await vi.advanceTimersByTimeAsync(4900)
+      expect(h.provider.reminderFacts).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(h.provider.reminderFacts).toHaveBeenCalledTimes(1)
+    } finally {
+      clearInterval(stream)
+    }
   })
   it('skips a body it can’t read for the rest of the session', async () => {
     const h = make({
@@ -175,13 +219,40 @@ describe('ReminderEngine', () => {
     h.engine.start()
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(1)
-    expect(h.returned).toHaveBeenCalledWith('a1', 't1')
+    expect(h.returned).toHaveBeenCalledWith([{ accountId: 'a1', threadId: 't1' }])
     expect(h.events).toContainEqual({ type: 'remindersReturned', count: 1, undoId: 'undo-1' })
     expect(h.stored.get('reminders-returned')).toEqual(['a1|t1|m1@example.com'])
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(1)
     expect(h.events.filter((e) => e.type === 'remindersReturned')).toHaveLength(1)
+  })
+  it('returns several in one move, so one undo covers them, and retries one that failed', async () => {
+    const h = make({
+      facts: [
+        fact({ inInbox: false }),
+        fact({ threadId: 't2', messageId: 'm2@example.com', inInbox: false }),
+        fact({ threadId: 't3', messageId: 'm3@example.com', inInbox: false }),
+      ],
+      now: addWorkingDays(receivedMs, 4),
+    })
+    h.returned.mockImplementationOnce(async (targets) => ({
+      handled: targets.filter((t) => t.threadId !== 't3'),
+      moved: 2,
+      undoId: 'undo-2',
+    }))
+    h.engine.start()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    expect(h.returned.mock.calls[0]![0].map((t) => t.threadId)).toEqual(['t1', 't2', 't3'])
+    expect(h.events).toContainEqual({ type: 'remindersReturned', count: 2, undoId: 'undo-2' })
+    expect(h.stored.get('reminders-returned')).toEqual([
+      'a1|t1|m1@example.com',
+      'a1|t2|m2@example.com',
+    ])
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenLastCalledWith([{ accountId: 'a1', threadId: 't3' }])
   })
   it('never returns a forgot-to-reply or one not yet due', async () => {
     const h = make({

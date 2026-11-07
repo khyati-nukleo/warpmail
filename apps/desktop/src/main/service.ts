@@ -33,6 +33,7 @@ import {
   type MailAction,
   type MutationInput,
   type MutationResult,
+  type MutationTarget, // Reminders
   type Draft,
   type DraftErrorKind,
   type Attachment,
@@ -340,19 +341,7 @@ export class MailService {
         const account = this.accounts.find((a) => a.id === accountId)
         return account && this.providers.get(account.connectionId)
       },
-      returnToInbox: async (accountId, threadId) => {
-        const { provider, account } = this.provider(accountId)
-        const inbox = (await provider.mailboxes(account)).find((b) => b.role === 'inbox')
-        if (!inbox) return undefined
-        const result = await this.mutate({
-          targets: [{ accountId, threadId }],
-          action: 'move',
-          mailboxId: inbox.id,
-          fromRoles: ['archive'],
-        })
-        if (result.failures.length && !result.changed) throw new Error(result.failures[0])
-        return result.changed ? result.undoId : undefined
-      },
+      returnToInbox: (targets) => this.returnToInbox(targets),
       emit: (event) => this.emit(event),
       store: this.store,
       log: (event) => this.log(event),
@@ -437,9 +426,8 @@ export class MailService {
     }
     await this.persistDrafts()
     await this.persistJournal()
-    void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id))).then(
-      () => this.reminders.start(), // Reminders: catch up once the accounts are connected
-    )
+    void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id)))
+    this.reminders.start() // Reminders: catch up; accounts that connect later invalidate
     this.timer = setInterval(() => void this.refresh(), 60_000)
     this.collector.start() // Read status
   }
@@ -837,6 +825,7 @@ export class MailService {
       // Historical indexing adds older mail; only live changes may produce notifications.
       if (!event.historical) void this.refreshConnection(id)
     })
+    for (const a of accounts) this.reminders.invalidate(a.id) // Reminders
     this.status(id, 'connected')
     if (!reconnecting) this.outgoing(id, undefined)
     void this.refreshConnection(id)
@@ -1211,6 +1200,45 @@ export class MailService {
       if (this.undos.size > 20) this.undos.delete(this.undos.keys().next().value!)
     }
     return result
+  }
+  // Reminders
+  /**
+   * Moves each thread's archived mail back to its account's inbox, with one undo for all.
+   * One move per thread: each account's inbox differs, and a thread that fails stays out of
+   * `handled`, so it is tried again later.
+   */
+  private async returnToInbox(targets: MutationTarget[]) {
+    const handled: MutationTarget[] = [],
+      undo: UndoEntry[] = []
+    let moved = 0
+    for (const target of targets)
+      try {
+        const { provider, account } = this.provider(target.accountId)
+        const inbox = (await provider.mailboxes(account)).find((b) => b.role === 'inbox')
+        if (!inbox) continue
+        const result = await this.mutate({
+          targets: [target],
+          action: 'move',
+          mailboxId: inbox.id,
+          fromRoles: ['archive'],
+        })
+        if (result.undoId) {
+          if (result.changed) undo.push(...(this.undos.get(result.undoId) || []))
+          this.undos.delete(result.undoId)
+        }
+        if (result.failures.length) continue
+        handled.push(target)
+        if (result.changed) moved++
+      } catch {
+        // Disconnected: tried again on a later pass.
+      }
+    let undoId: string | undefined
+    if (undo.length) {
+      undoId = randomUUID()
+      this.undos.set(undoId, undo)
+      if (this.undos.size > 20) this.undos.delete(this.undos.keys().next().value!)
+    }
+    return { handled, moved, undoId }
   }
   mutateAll = async (query: MailQuery, action: MailAction): Promise<MutationResult> => {
     if (!['archive', 'trash', 'spam', 'read', 'unread', 'star', 'unstar'].includes(action))

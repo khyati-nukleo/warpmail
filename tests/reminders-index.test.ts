@@ -231,6 +231,17 @@ describe('reminder facts', () => {
     expect((await byId()).get('m1@example.com')).toBe(false)
   })
 
+  it('stores an ask-check under the Message-ID exactly as listed, even without an @', async () => {
+    await index.upsertMessages('a', [sent(1, { messageId: 'bare-id-1234' })])
+    const since = Date.parse(hour(0))
+    const [needed] = await index.askChecksNeeded('a', boxes.sent, since, 10)
+    expect(needed!.messageId).toBe('bare-id-1234')
+    await index.setAskChecks('a', [{ messageId: needed!.messageId, asks: false }])
+    expect(await index.askChecksNeeded('a', boxes.sent, since, 10)).toEqual([])
+    // Nothing usable to store under.
+    await index.setAskChecks('a', [{ messageId: '  ', asks: true }])
+  })
+
   it('leaves out threads older than sinceMs unless they are listed', async () => {
     await index.upsertMessages('a', [
       message(boxes.inbox, 1),

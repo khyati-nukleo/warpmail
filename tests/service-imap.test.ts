@@ -829,6 +829,28 @@ describe('IMAP reading', () => {
     expect(server.box('Archive').messages).toHaveLength(0)
     expect(server.box('INBOX').messages).toHaveLength(1)
   })
+  it('returns archived threads to the inbox with one undo for all of them', async () => {
+    for (const n of [1, 2])
+      server.deliver('Archive', {
+        messageId: 'ask' + n + '@x',
+        subject: 'Plans ' + n,
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: '2026-09-20T10:0' + n + ':00Z',
+        text: 'Can you confirm?',
+      })
+    await (provider() as any).syncPass('all')
+    const threads = (await service.query({ view: 'archive' })).items.map((c) => c.id)
+    const back = await (service as any).returnToInbox(
+      threads.map((threadId) => ({ accountId, threadId })),
+    )
+    expect(back).toMatchObject({ moved: 2, undoId: expect.any(String) })
+    expect(back.handled).toHaveLength(2)
+    expect(server.box('INBOX').messages).toHaveLength(2)
+    await service.undo(back.undoId)
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(server.box('Archive').messages).toHaveLength(2)
+  })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {
       messageId: 'waiting@x',

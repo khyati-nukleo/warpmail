@@ -1249,10 +1249,15 @@ export class ImapProvider implements MailProvider {
     const rows = await this.index.threadMessages(this.accountId, threadIds)
     return (await this.current(rows)).map((m) => toMessage(account.id, m))
   }
-  async messages(account: Account, ids: string[], bodies = false): Promise<Message[]> {
+  async messages(
+    account: Account,
+    ids: string[],
+    bodies = false,
+    options?: { background?: boolean },
+  ): Promise<Message[]> {
     const rows = await this.current(await this.index.messages(this.accountId, [...new Set(ids)]))
     if (!bodies) return rows.map((m) => toMessage(account.id, m))
-    return this.withBodies(account, rows)
+    return this.withBodies(account, rows, false, options?.background)
   }
   async conversation(
     account: Account,
