@@ -2983,6 +2983,12 @@ export class MailService {
       }
     }
   }
+  // Reminders
+  /** Waking from sleep: providers learn their index may be stale, then a refresh as before. */
+  async resume() {
+    for (const provider of this.providers.values()) provider.resumed?.()
+    await this.refresh()
+  }
   async refresh() {
     await Promise.allSettled(
       this.connections.map(async (c) => {

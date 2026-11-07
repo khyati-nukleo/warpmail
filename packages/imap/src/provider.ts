@@ -338,7 +338,9 @@ export class ImapProvider implements MailProvider {
     this.connecting ??= (async () => {
       const port = this.ports(this.imapSettings(), 'command')
       port.on('close', () => {
-        if (this.command === port) this.command = undefined
+        if (this.command !== port) return
+        this.command = undefined
+        this.connection++ // Reminders: changes may be missed until it reconnects
       })
       try {
         await port.connect()
@@ -1032,6 +1034,11 @@ export class ImapProvider implements MailProvider {
   /** Whether a full pass has run since connecting, so the index is current enough to act on. */
   readyForReminders(): boolean {
     return this.fullSince === this.connection
+  }
+  /** After sleep: mail may have changed meanwhile, so wait for a full pass again. */
+  resumed() {
+    this.connection++
+    this.requestSync('all')
   }
   /**
    * Counted mail is every selectable folder but Drafts, Trash, Junk and the Warpmail label

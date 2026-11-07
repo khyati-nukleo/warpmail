@@ -949,6 +949,78 @@ describe('IMAP reading', () => {
     await (provider() as any).syncPass('all')
     await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
   })
+  it('on launch, holds returns through a full pass that fails partway', async () => {
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await restart()
+    // The pass after launch loses the connection halfway through the folders.
+    server.hooks.set('STATUS:before', () => {
+      throw new ProviderError('network', 'Connection reset.')
+    })
+    await expect((provider() as any).syncPass('all')).rejects.toThrow('Connection reset.')
+    ;(service as any).reminders.invalidate(accountId)
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('all')
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+  })
+  it('after sleep, holds returns until mail has synced, and a reply sent meanwhile cancels it', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      // Asked an hour ago: due in three working days, so nothing moves before the laptop sleeps.
+      server.deliver('Archive', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 3600_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      await (provider() as any).syncPass('all')
+      expect(provider().readyForReminders()).toBe(true)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      // Asleep for ten days; Pat answers meanwhile.
+      vi.setSystemTime(start + 10 * 86_400_000)
+      server.deliver('INBOX', {
+        messageId: 'answer@x',
+        references: ['ask@x'],
+        subject: 'Re: Plans',
+        from: [{ name: 'Pat', email: 'pat@example.org' }],
+        to: [{ name: 'Me', email: 'me@example.com' }],
+        date: new Date(start + 86_400_000).toISOString(),
+        text: 'Confirmed.',
+      })
+      await service.resume()
+      // As the engine's wake-up timer firing late after the sleep would.
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      expect(server.box('INBOX').messages).toHaveLength(1)
+      // The first full pass sees the answer: nothing to return, and no follow-up (Pat's
+      // answer is now waiting on me instead).
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      expect(server.box('INBOX').messages).toHaveLength(1)
+      const due = await (service as any).reminders.due(accountId)
+      expect(due.map((r: { kind: string; messageId: string }) => [r.kind, r.messageId])).toEqual([
+        ['reply', 'answer@x'],
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {
       messageId: 'waiting@x',

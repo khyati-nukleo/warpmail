@@ -901,6 +901,25 @@ describe('IMAP read-ahead', () => {
     await sync(p)
     expect(p.readyForReminders()).toBe(true)
   })
+  it('is not ready for reminders after the command connection drops, until a full pass', async () => {
+    const p = await connected()
+    await sync(p)
+    expect(p.readyForReminders()).toBe(true)
+    for (const port of server.ports.filter((port) => port.purpose === 'command')) port.drop()
+    expect(p.readyForReminders()).toBe(false)
+    await sync(p)
+    expect(p.readyForReminders()).toBe(true)
+  })
+  it('is not ready for reminders after waking from sleep, until a full pass', async () => {
+    const p = await connected()
+    await sync(p)
+    p.resumed()
+    expect(p.readyForReminders()).toBe(false)
+    // It asks for one.
+    expect((p as any).pending).toBe('all')
+    await sync(p)
+    expect(p.readyForReminders()).toBe(true)
+  })
   it('reads message bodies in the background without counting as the user’s own open', async () => {
     for (let i = 1; i <= 3; i++)
       server.deliver('Sent', {

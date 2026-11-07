@@ -677,6 +677,8 @@ export interface MailProvider {
    * or a dismissal made elsewhere, and returning to the inbox would act on it. Omitted: ready.
    */
   readyForReminders?(): boolean
+  /** The computer woke from sleep: the index may predate what changed meanwhile. */
+  resumed?(): void
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }

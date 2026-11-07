@@ -389,7 +389,7 @@ else {
       } catch {
         tray = null
       }
-      powerMonitor.on('resume', () => void service.refresh())
+      powerMonitor.on('resume', () => void service.resume()) // Reminders: was refresh()
       if (!demo && !smoke) updates.start()
       app.on('activate', show)
       mailtoFromArgs(process.argv)
