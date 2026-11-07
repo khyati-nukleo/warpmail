@@ -6,6 +6,7 @@ import { SignatureParagraph } from '../apps/desktop/src/renderer/src/composer-do
 import { acceptImprovement } from '../apps/desktop/src/renderer/src/improve/apply-improvement'
 import { changedFacts } from '../apps/desktop/src/renderer/src/improve/changed-facts'
 import {
+  encryptionUndecided,
   improveAvailability,
   improveReducer,
   previewKeyAction,
@@ -96,6 +97,39 @@ describe('improve session', () => {
       available: false,
       reason: 'locked',
     })
+  })
+
+  it('waits while encryption for the recipients is still being decided', () => {
+    const base = { protection: 'none' as const, hasKey: true, ownText: 'Hello', locked: false }
+    expect(improveAvailability({ ...base, encryptionUndecided: true })).toEqual({
+      available: false,
+      reason: 'encryptionPending',
+    })
+    expect(
+      improveAvailability({ ...base, protection: 'encrypt', encryptionUndecided: true }),
+    ).toEqual({ available: false, reason: 'encrypted' })
+  })
+
+  it('treats encryption as undecided while the lookup runs or recommends it unchosen', () => {
+    const settled = {
+      hasRecipients: true,
+      lookup: 'done' as const,
+      recommend: false,
+      chosen: false,
+      protection: 'none' as const,
+    }
+    expect(encryptionUndecided(settled)).toBe(false)
+    // The lookup for these recipients hasn't answered yet.
+    expect(encryptionUndecided({ ...settled, lookup: 'pending' })).toBe(true)
+    // No recipients, or no lookup possible (an address is still invalid), or the lookup failed.
+    expect(encryptionUndecided({ ...settled, hasRecipients: false, lookup: 'pending' })).toBe(false)
+    expect(encryptionUndecided({ ...settled, lookup: 'off' })).toBe(false)
+    expect(encryptionUndecided({ ...settled, lookup: 'failed' })).toBe(false)
+    // Encryption is recommended and is about to be switched on.
+    expect(encryptionUndecided({ ...settled, recommend: true })).toBe(true)
+    // Khyati already chose, or it's already on.
+    expect(encryptionUndecided({ ...settled, recommend: true, chosen: true })).toBe(false)
+    expect(encryptionUndecided({ ...settled, recommend: true, protection: 'encrypt' })).toBe(false)
   })
 
   it('maps keys in each phase', () => {

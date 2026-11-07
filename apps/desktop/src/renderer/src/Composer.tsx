@@ -51,6 +51,7 @@ import { linkTarget } from './link-target'
 import { SignatureParagraph, hasDraftContent, replaceSignature } from './composer-document'
 import { serverSaves } from './draft-sync'
 import { useImprove } from './improve/useImprove'
+import { encryptionUndecided } from './improve/improve-session'
 import { ImproveControls, ImproveNotice } from './improve/ImproveControls'
 import { ImprovePreview } from './improve/ImprovePreview'
 import { ComposerCommandMenu } from './improve/ComposerCommandMenu'
@@ -281,7 +282,24 @@ export function Composer({
       link: editor?.isActive('link') || false,
     }),
   })
-  const improve = useImprove({ editor, protection, locked })
+  const improve = useImprove({
+    editor,
+    protection,
+    locked,
+    encryptionUndecided: encryptionUndecided({
+      hasRecipients: recipientEmails.length > 0,
+      lookup: !(!!draft.identityId && recipientEmails.every(validAddress))
+        ? 'off'
+        : encryptionReady.isError
+          ? 'failed'
+          : encryptionReady.data
+            ? 'done'
+            : 'pending',
+      recommend: !!encryptionReady.data?.recommend,
+      chosen: encryptionChoice.current,
+      protection,
+    }),
+  })
   const improveOpen = improve.session.phase !== 'closed'
   useEffect(() => {
     if (

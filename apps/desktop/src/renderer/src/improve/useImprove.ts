@@ -16,6 +16,7 @@ import { acceptImprovement } from './apply-improvement'
 export const unavailableLines: Partial<Record<ImproveUnavailableReason, string>> = {
   empty: 'Write something first, then improve it.',
   encrypted: 'Improve is off for encrypted messages.',
+  encryptionPending: 'Checking whether this message will be encrypted…',
   noKey: 'Improve needs an Anthropic API key.',
 }
 
@@ -26,10 +27,13 @@ export function useImprove({
   editor,
   protection,
   locked,
+  encryptionUndecided = false,
 }: {
   editor: Editor | null
   protection: Protection
   locked: boolean
+  /** Encryption may still switch on for these recipients; nothing is sent until it's settled. */
+  encryptionUndecided?: boolean
 }) {
   const queryClient = useQueryClient()
   const status = useQuery({ queryKey: ['ai-status'], queryFn: () => api.aiStatus() })
@@ -45,7 +49,13 @@ export function useImprove({
     hasKey,
     ownText: editor ? splitDraft(editor.getJSON()).text : '',
     locked,
+    encryptionUndecided,
   })
+  // The "checking encryption" line goes away by itself once the check has answered.
+  useEffect(() => {
+    if (!encryptionUndecided)
+      setNotice((current) => (current === 'encryptionPending' ? undefined : current))
+  }, [encryptionUndecided])
 
   const cancelPending = () => {
     const id = pending.current
@@ -56,7 +66,13 @@ export function useImprove({
   const start = (style: ImproveStyle) => {
     if (!editor) return
     const { text } = splitDraft(editor.getJSON())
-    const check = improveAvailability({ protection, hasKey, ownText: text, locked })
+    const check = improveAvailability({
+      protection,
+      hasKey,
+      ownText: text,
+      locked,
+      encryptionUndecided,
+    })
     if (!check.available) {
       if (check.reason !== 'locked') setNotice(check.reason)
       return

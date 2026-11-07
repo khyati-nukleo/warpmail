@@ -64,7 +64,8 @@ export function improveReducer(state: ImproveSession, action: ImproveAction): Im
   }
 }
 
-export type ImproveUnavailableReason = 'encrypted' | 'noKey' | 'empty' | 'locked'
+export type ImproveUnavailableReason =
+  'encrypted' | 'encryptionPending' | 'noKey' | 'empty' | 'locked'
 
 /** Whether Improve can run. `hasKey` is undefined while the key status is still loading. */
 export function improveAvailability(input: {
@@ -72,12 +73,33 @@ export function improveAvailability(input: {
   hasKey: boolean | undefined
   ownText: string
   locked: boolean
+  /** Encryption may still be switched on for these recipients: see `encryptionUndecided`. */
+  encryptionUndecided?: boolean
 }): { available: true } | { available: false; reason: ImproveUnavailableReason } {
   if (input.locked) return { available: false, reason: 'locked' }
   if (input.protection === 'encrypt') return { available: false, reason: 'encrypted' }
+  if (input.encryptionUndecided) return { available: false, reason: 'encryptionPending' }
   if (input.hasKey === false) return { available: false, reason: 'noKey' }
   if (!input.ownText.trim()) return { available: false, reason: 'empty' }
   return { available: true }
+}
+
+/**
+ * Whether the draft may still turn encrypted on its own. The composer switches encryption on
+ * when the recipients' keys recommend it, so text must not leave before that's settled.
+ * `lookup` is the recipients' encryption check: off when it can't run (an address is invalid).
+ */
+export function encryptionUndecided(input: {
+  hasRecipients: boolean
+  lookup: 'off' | 'pending' | 'done' | 'failed'
+  recommend: boolean
+  /** Khyati picked a protection mode herself, so no recommendation will override it. */
+  chosen: boolean
+  protection: 'none' | 'encrypt' | 'sign'
+}): boolean {
+  if (input.protection === 'encrypt' || input.chosen) return false
+  if (input.hasRecipients && input.lookup === 'pending') return true
+  return input.lookup === 'done' && input.recommend
 }
 
 /** What a key press means in each phase of the session. */
