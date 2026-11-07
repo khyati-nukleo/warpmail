@@ -123,6 +123,18 @@ describe('Read status: the Sent copy of a tracked email', () => {
     expect(withId(TRASH)).toHaveLength(0)
     expect(sync).toHaveBeenCalledWith('all')
   })
+  it("files the clean copy with the message's own date, so it stays before later replies", async () => {
+    gmailServer()
+    server.deliver(ALL, serverCopy)
+    server.deliver(SENT, serverCopy)
+    const p = await connected()
+    const dated = new TextEncoder().encode(
+      'Date: Thu, 05 Nov 2026 09:30:00 -0500\r\n' + decoded(clean),
+    )
+    expect(await p.fileSentCopy(account, { ...message, mime: dated })).toBe('filed')
+    const [filed] = server.box(SENT).messages
+    expect(filed.internalDate).toBe('2026-11-05T14:30:00.000Z')
+  })
   it('finds a late server copy after the grace period', async () => {
     gmailServer()
     const p = await connected()

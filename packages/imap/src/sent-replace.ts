@@ -97,13 +97,24 @@ export async function replaceSentCopy(
       )
     await port.expunge(uids)
   }
-  await appendSentCopy(port, boxes.sent, mime)
+  // Its own date, so a filing retried later still sorts before the replies.
+  await appendSentCopy(port, boxes.sent, mime, headerDate(mime))
+}
+
+/** The message's Date header, or undefined when it has none that parses. */
+function headerDate(mime: Uint8Array): Date | undefined {
+  const text = new TextDecoder().decode(mime.subarray(0, 64 * 1024))
+  const end = text.search(/\r?\n\r?\n/)
+  const head = (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, ' ')
+  const value = /^date:[ \t]*(.+)$/im.exec(head)?.[1]
+  const at = value ? Date.parse(value.trim()) : NaN
+  return Number.isNaN(at) ? undefined : new Date(at)
 }
 
 /** Files the copy in Sent, already read. A dropped connection leaves unknown whether it was. */
-export async function appendSentCopy(port: ImapPort, path: string, mime: Uint8Array) {
+export async function appendSentCopy(port: ImapPort, path: string, mime: Uint8Array, date?: Date) {
   try {
-    await port.append(path, mime, ['\\Seen'], new Date())
+    await port.append(path, mime, ['\\Seen'], date ?? new Date())
   } catch (error) {
     if (isProviderError(error, 'network'))
       throw new ProviderError(
