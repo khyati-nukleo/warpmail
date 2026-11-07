@@ -410,6 +410,34 @@ describe('Read status: the Sent copy of a tracked email', () => {
       expect(appends()).toBe(1)
     })
   })
+  describe('the follow-up sweep for a copy Gmail files late', () => {
+    const hosts = ['https://read.example.com']
+    it('removes a copy with an image filed after the clean one, and keeps the clean one', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      let uid: number | undefined
+      const filing = { ...message, replacement: { hosts, confirmed: (u: number) => (uid = u) } }
+      expect(await p.fileSentCopy(account, filing)).toBe('filed')
+      // Gmail files its merged copy only now.
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      await p.sweepSentCopies(account, { ...message, replacement: { hosts, uid } })
+      expectOneCleanCopy(SENT)
+      expect(withId(ALL)).toHaveLength(1)
+      expect(decoded(withId(ALL)[0].raw)).toBe(decoded(clean))
+      expect(withId(TRASH)).toHaveLength(0)
+    })
+    it('removes nothing when no clean copy is confirmed in Sent', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      await p.sweepSentCopies(account, { ...message, replacement: { hosts } })
+      expectUntouched(SENT)
+    })
+  })
   it("without replaceServerCopies it keeps today's behaviour", async () => {
     server.deliver('Sent', serverCopy)
     const p = await connected()

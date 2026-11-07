@@ -157,6 +157,34 @@ async function replaceOnGmail(
   return clean
 }
 
+/**
+ * Gmail may file its merged copy after the clean one was filed. Those copies (Worker image,
+ * exact Message-ID) leave All Mail for Trash and are deleted there. Nothing happens unless the
+ * clean copy is confirmed in Sent, so Sent is never left without one.
+ */
+export async function sweepServerCopies(
+  port: ImapPort,
+  boxes: SentCopyBoxes,
+  messageId: string,
+  find: FindMessageId,
+  replacement?: SentCopyReplacement,
+): Promise<void> {
+  if (!exactId.test(messageId))
+    throw new ProviderError('filing', 'The sent message has no usable Message-ID.')
+  const gmail = gmailBoxes(port, boxes)
+  const hosts = replacement?.hosts ?? []
+  if (!gmail || !hosts.length) return
+  if (!(await cleanCopy(port, boxes.sent, messageId, find, hosts, replacement?.uid))) return
+  const copies = await serverCopies(port, boxes, messageId, find)
+  const images = await withImage(port, copies, messageId, hosts)
+  if (!images.length) return
+  if (!(await port.move(images, gmail.trash)))
+    throw new ProviderError('filing', "The server's own Sent copy could not be removed.")
+  const trashed = await find(port, messageId, (await port.select(gmail.trash)).uidNext)
+  const withAnImage = await withImage(port, trashed, messageId, hosts)
+  if (withAnImage.length && port.capabilities.has('UIDPLUS')) await port.expunge(withAnImage)
+}
+
 /** Large enough for any tracked copy (see `readStatusLimits`). */
 const sourceLimit = 64 * 1024 * 1024
 

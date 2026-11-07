@@ -169,6 +169,8 @@ type Journal = {
   cleanOwed?: boolean
   /** The clean copy's UID in Sent, once confirmed there. */
   cleanUid?: number
+  /** When to look once more for a merged copy Gmail filed after the clean one. */
+  sweepAt?: string
 }
 /** Drafts are saved to the server only after this long without an edit; local saves are instant. */
 const draftIdleMs = 10_000
@@ -178,6 +180,8 @@ const closedWhileSending = 'The app closed during sending. Check delivery before
 const draftSaveWaitMs = 60_000
 /** Read status: how long the periodic retry keeps looking for an unconfirmed send's server copy. */
 const unconfirmedLookMs = 60 * 60_000
+/** Read status: Gmail may file its merged copy late; looked for once this long after filing. */
+const sweepDelayMs = 60_000
 /** Settles when `promise` does or after `ms`, whichever comes first. Never rejects. */
 const settledWithin = (promise: Promise<unknown>, ms: number) => {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -2136,7 +2140,11 @@ export class MailService {
         }
         journal.sentCopy = result
         journal.sentCopyError = undefined
-        journal.cleanOwed = undefined // Read status: the clean copy is confirmed in Sent
+        if (journal.tracked && result === 'filed') {
+          // Read status: the clean copy is confirmed in Sent; a late merged copy is swept later.
+          journal.cleanOwed = undefined
+          journal.sweepAt = new Date(Date.now() + sweepDelayMs).toISOString()
+        }
         await this.persistJournal()
         await this.removeMime(journal.draftId)
       } catch (error) {
@@ -2219,7 +2227,34 @@ export class MailService {
         // Even a dismissed send must not leave its old draft behind to be sent again.
         if (accepted || (journal.state === 'uncertain' && journal.dismissed))
           await this.removeReplacedDraft(journal)
+        if (journal.sweepAt) await this.sweepSentCopies(journal) // Read status
       }
+  }
+  /**
+   * Read status: once, about a minute after filing (and after a restart within the hour), removes
+   * a merged copy with an image that Gmail filed after the clean one. Kept for the next refresh
+   * if it fails; never resends anything.
+   */
+  private async sweepSentCopies(journal: Journal) {
+    const due = Date.parse(journal.sweepAt!)
+    if (Date.now() < due || this.filing.has(journal.draftId)) return
+    this.filing.add(journal.draftId)
+    try {
+      if (Date.now() - due < unconfirmedLookMs) {
+        const { provider, account } = this.provider(journal.accountId)
+        await provider.sweepSentCopies?.(account, {
+          messageId: journal.messageId!,
+          envelope: journal.envelope || { from: '', to: [] },
+          replacement: { hosts: this.workerHosts(), uid: journal.cleanUid },
+        })
+      }
+      journal.sweepAt = undefined
+      await this.persistJournal()
+    } catch {
+      this.log('sent-copy-sweep-failed')
+    } finally {
+      this.filing.delete(journal.draftId)
+    }
   }
   reconcile = async (id: string): Promise<SendResult> => {
     const journal = this.journals.get(id)

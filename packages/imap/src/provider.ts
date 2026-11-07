@@ -60,7 +60,13 @@ import type {
 } from './metadata-index'
 import { composeMime, parseMime } from './mime'
 import type { ImapPort, ImapServerOptions, PortFactory, SearchCriteria } from './port'
-import { appendSentCopy, hasServerCopy, readStatusServer, replaceSentCopy } from './sent-replace'
+import {
+  appendSentCopy,
+  hasServerCopy,
+  readStatusServer,
+  replaceSentCopy,
+  sweepServerCopies,
+} from './sent-replace'
 import { submitSmtp, submitSmtpCopies, verifySmtp, type SmtpSettings } from './smtp'
 import { SourceCache } from './source-cache'
 
@@ -1817,12 +1823,7 @@ export class ImapProvider implements MailProvider {
     if (message.replaceServerCopies) {
       // Read status: the server's own copy carries a recipient's image, so it is replaced.
       const mime = message.mime
-      const all = await this.index.listMailboxes(this.accountId)
-      const boxes = {
-        sent: sent.path,
-        allMail: all.find((b) => b.specialUse === '\\All')?.path,
-        trash: all.find((b) => b.specialUse === '\\Trash')?.path,
-      }
+      const boxes = await this.sentCopyBoxes(sent.path)
       const find = (port: ImapPort, id: string, uidNext: number) =>
         this.withMessageId(port, id, uidNext)
       const present = () => this.run((port) => hasServerCopy(port, boxes, message.messageId, find))
@@ -1854,6 +1855,32 @@ export class ImapProvider implements MailProvider {
       this.requestSync('all')
       return 'filed' as const
     })
+  }
+
+  // Read status
+  async sweepSentCopies(_account: Account, message: OutgoingMessage): Promise<void> {
+    const sent = await this.roleBox('sent')
+    if (!sent) return
+    const boxes = await this.sentCopyBoxes(sent.path)
+    await this.run((port) =>
+      sweepServerCopies(
+        port,
+        boxes,
+        message.messageId,
+        (p, id, uidNext) => this.withMessageId(p, id, uidNext),
+        message.replacement,
+      ),
+    )
+    this.requestSync('all')
+  }
+  /** Read status: Sent, plus Gmail's All Mail and Trash (flagged `\\All` and `\\Trash`). */
+  private async sentCopyBoxes(sent: string) {
+    const all = await this.index.listMailboxes(this.accountId)
+    return {
+      sent,
+      allMail: all.find((b) => b.specialUse === '\\All')?.path,
+      trash: all.find((b) => b.specialUse === '\\Trash')?.path,
+    }
   }
 
   subscribe(listener: (event: ProviderEvent) => void): () => void {

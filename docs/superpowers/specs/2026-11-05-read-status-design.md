@@ -166,6 +166,7 @@ Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one 
 - Before anything moves, the send journal records that a clean copy is owed. From then on every retry files it (after a restart too, and even for an unconfirmed send), until a clean copy is confirmed in Sent.
 - `APPEND` the clean copy to Sent with `\Seen` and confirm it is there: by the UID Gmail returns, else by a search in Sent for the `Message-ID`, with no Worker image in it. Gmail accepted it in the send test once the copies had left All Mail. If it isn't there (Gmail may refuse it while a copy with the same `Message-ID` sits in Trash), delete the trashed copies and file it again.
 - Only then delete the trashed copies for good. Find them in Trash with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
+- About a minute later, look once more: Gmail may file its merged copy after the clean one. Copies with this `Message-ID` and a Worker image go to Trash and are deleted there; the clean copy stays. The journal keeps this pending, so a restart within the hour still does it.
 
 Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. Dismissing the send never drops a clean copy still owed. The "Sending…" and "Sent" states from the speed work must stay accurate.
 

@@ -563,6 +563,54 @@ describe('Read status: tracked sending', () => {
       expect(await journal()).toMatchObject({ sentCopy: 'filed' })
     })
   })
+  describe('a merged copy Gmail files after the clean one', () => {
+    const later = async (minutes: number) => {
+      const at = Date.parse((await journal()).at)
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(at + minutes * 60_000)
+    }
+    const sentLate = async () => {
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      expect((await journal()).sweepAt).toBeDefined()
+      // Gmail files its merged copy, first recipient's image included, after the replacement.
+      await gmailFiles(submitCopies.mock.calls[0][2][0])
+      expect(server.box(SENT).messages).toHaveLength(2)
+    }
+    const expectOneClean = () => {
+      const sent = server.box(SENT).messages
+      expect(sent).toHaveLength(1)
+      expect(text(sent[0].raw)).not.toContain('read.example.com')
+      expect(text(sent[0].raw)).toMatch(/^Bcc:.*kim@example\.org/im)
+      expect(server.box('[Gmail]/Trash').messages).toHaveLength(0)
+    }
+    it('is removed by one sweep about a minute later', async () => {
+      await sentLate()
+      // Not before the minute is up.
+      await service.refresh()
+      expect(server.box(SENT).messages).toHaveLength(2)
+      await later(2)
+      await service.refresh()
+      expectOneClean()
+      expect((await journal()).sweepAt).toBeUndefined()
+    })
+    it('is removed after a restart before the sweep ran', async () => {
+      await sentLate()
+      await stop(service)
+      await later(2)
+      await start()
+      await connected()
+      await vi.waitFor(async () => expect((await journal()).sweepAt).toBeUndefined())
+      expectOneClean()
+    })
+    it('is no longer looked for an hour after filing', async () => {
+      await sentLate()
+      await later(70)
+      await service.refresh()
+      expect((await journal()).sweepAt).toBeUndefined()
+      expect(server.box(SENT).messages).toHaveLength(2)
+    })
+  })
   it('a journal write that fails before the first copy is a plain not-sent', async () => {
     const write = store.write.bind(store)
     vi.spyOn(store, 'write').mockImplementation((name, data, version) => {

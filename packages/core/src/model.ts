@@ -481,6 +481,8 @@ export interface SentCopyReplacement {
   owe?(): Promise<void>
   /** Told the clean copy's UID in Sent once it is confirmed there. */
   confirmed?(uid: number): void
+  /** For `sweepSentCopies`: the clean copy's UID in Sent, as `confirmed` reported it. */
+  uid?: number
 }
 /** What became of one recipient's copy: `uncertain` may have arrived; `notSent` never left the device. */
 export interface CopyOutcome {
@@ -605,6 +607,8 @@ export interface MailProvider {
    * completed without confirmation.
    */
   fileSentCopy?(account: Account, message: OutgoingMessage): Promise<'filed' | 'server' | 'absent'>
+  // Read status: removes copies with an image the server filed after the clean one, never that one.
+  sweepSentCopies?(account: Account, message: OutgoingMessage): Promise<void>
   folderMappings?(account: Account): Promise<FolderMappingReview>
   setFolderMappings?(account: Account, mappings: FolderMappings): Promise<FolderMappingReview>
   subscribe(listener: (event: ProviderEvent) => void): () => void
