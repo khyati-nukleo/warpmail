@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Account, ImapConnectionConfig, OutgoingMessage } from '../packages/core/src'
+import {
+  ProviderError,
+  type Account,
+  type ImapConnectionConfig,
+  type OutgoingMessage,
+} from '../packages/core/src'
 import { ImapProvider } from '../packages/imap/src'
 import { openInProcessIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
 import { FakeImapServer } from './support/fake-imap'
@@ -48,6 +53,7 @@ const message: OutgoingMessage = {
   mime: clean,
   envelope: { from: me.email, to: [alex.email, sam.email] },
   replaceServerCopies: true,
+  replacement: { hosts: ['https://read.example.com'] },
 }
 
 let directory: string
@@ -212,6 +218,10 @@ describe('Read status: the Sent copy of a tracked email', () => {
       p.fileSentCopy(account, { ...message, messageId: 'from:me' }),
     ).rejects.toMatchObject({ code: 'filing' })
     expectUntouched(SENT)
+    // Also when a clean copy is owed, so nothing is looked for first.
+    const owed = { ...message, messageId: 'from:me', replacement: { hosts: [], owed: true } }
+    await expect(p.fileSentCopy(account, owed)).rejects.toMatchObject({ code: 'filing' })
+    expect(server.commands).not.toContain('SEARCH')
   })
   it('on Gmail without All Mail in IMAP it deletes nothing and says why', async () => {
     gmailServer({ allMail: false })
@@ -277,6 +287,128 @@ describe('Read status: the Sent copy of a tracked email', () => {
     const unconfirmed = { ...message, replaceServerCopies: 'ifPresent' as const }
     expect(await p.fileSentCopy(account, unconfirmed)).toBe('filed')
     expectOneCleanCopy(SENT)
+  })
+  describe('on Gmail nothing is lost when the connection drops', () => {
+    const drop = () => {
+      throw new ProviderError('network', 'Connection closed.')
+    }
+    /** What the app's journal keeps: whether a clean copy is owed, and its UID once confirmed. */
+    function journal() {
+      const record: { owed: boolean; uid?: number; commandsAtOwe?: string[] } = { owed: false }
+      const attempt = (mode: true | 'ifPresent'): OutgoingMessage => ({
+        ...message,
+        replaceServerCopies: mode,
+        replacement: {
+          hosts: ['https://read.example.com'],
+          owed: record.owed,
+          owe: async () => {
+            record.owed = true
+            record.commandsAtOwe ??= [...server.commands]
+          },
+          confirmed: (uid) => (record.uid = uid),
+        },
+      })
+      return { record, attempt }
+    }
+    const appends = () => server.commands.filter((c) => c === 'APPEND').length
+    /** Exactly one clean copy in Sent and All Mail, and nothing left in Trash. */
+    function expectReplaced() {
+      expectOneCleanCopy(SENT)
+      expect(withId(ALL)).toHaveLength(1)
+      expect(decoded(withId(ALL)[0].raw)).toBe(decoded(clean))
+      expect(withId(TRASH)).toHaveLength(0)
+    }
+    for (const mode of [true, 'ifPresent'] as const) {
+      it(`after the move to Trash, a retry (${mode}) still files the clean copy`, async () => {
+        gmailServer()
+        server.deliver(ALL, serverCopy)
+        server.deliver(SENT, serverCopy)
+        const p = await connected()
+        const { record, attempt } = journal()
+        server.hooks.set('APPEND:before', drop)
+        await expect(p.fileSentCopy(account, attempt(mode))).rejects.toMatchObject({
+          code: 'filingUncertain',
+        })
+        // Gmail's copies are in Trash and the debt was recorded before they moved.
+        expect(withId(TRASH)).toHaveLength(1)
+        expect(record.owed).toBe(true)
+        expect(record.commandsAtOwe).not.toContain('MOVE')
+        expect(await p.fileSentCopy(account, attempt(mode))).toBe('filed')
+        expectReplaced()
+        expect(record.uid).toBe(withId(SENT)[0].uid)
+      })
+    }
+    it('after the APPEND, a retry confirms the copy and never files a second one', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      const { record, attempt } = journal()
+      server.hooks.set('APPEND:after', drop)
+      await expect(p.fileSentCopy(account, attempt(true))).rejects.toMatchObject({
+        code: 'filingUncertain',
+      })
+      // Not confirmed, so the trashed copy is still there.
+      expect(withId(TRASH)).toHaveLength(1)
+      expect(await p.fileSentCopy(account, attempt('ifPresent'))).toBe('filed')
+      expectReplaced()
+      expect(appends()).toBe(1)
+    })
+    it('after the copies in Trash are deleted, a retry leaves everything as it is', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      const { record, attempt } = journal()
+      server.hooks.set('UID EXPUNGE:after', drop)
+      await expect(p.fileSentCopy(account, attempt(true))).rejects.toMatchObject({
+        code: 'network',
+      })
+      expect(record.owed).toBe(true)
+      expect(await p.fileSentCopy(account, attempt('ifPresent'))).toBe('filed')
+      expectReplaced()
+      expect(appends()).toBe(1)
+    })
+    it('deletes nothing for good before the clean copy is confirmed in Sent', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      expect(await p.fileSentCopy(account, journal().attempt(true))).toBe('filed')
+      const at = (command: string) => server.commands.indexOf(command)
+      expect(at('MOVE')).toBeLessThan(at('APPEND'))
+      expect(at('APPEND')).toBeLessThan(at('UID EXPUNGE'))
+      expectReplaced()
+    })
+    it('if Gmail drops the APPEND while a copy is in Trash, it empties Trash and files again', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      // Gmail answers OK but keeps nothing.
+      server.hooks.set('APPEND:after', () => {
+        for (const path of [SENT, ALL]) {
+          const box = server.box(path)
+          box.messages = box.messages.filter((m) => m.input.messageId !== id)
+        }
+      })
+      expect(await p.fileSentCopy(account, journal().attempt(true))).toBe('filed')
+      expectReplaced()
+      expect(appends()).toBe(2)
+    })
+    it('keeps a clean copy already in Sent and only removes the copies with an image', async () => {
+      gmailServer()
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      const p = await connected()
+      expect(await p.fileSentCopy(account, journal().attempt(true))).toBe('filed')
+      // Gmail files its merged copy late, after the clean one.
+      server.deliver(ALL, serverCopy)
+      server.deliver(SENT, serverCopy)
+      expect(await p.fileSentCopy(account, journal().attempt(true))).toBe('filed')
+      expectReplaced()
+      expect(appends()).toBe(1)
+    })
   })
   it("without replaceServerCopies it keeps today's behaviour", async () => {
     server.deliver('Sent', serverCopy)

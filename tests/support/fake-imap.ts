@@ -229,7 +229,9 @@ export class FakeImapServer {
   // Read status: opt-in Gmail mode, set before ports are made. Adds X-GM-EXT-1, answers `gmraw`
   // "rfc822msgid:<id>" searches, and keeps label semantics: every message is in All Mail, so an
   // APPEND elsewhere lands there too, and moving it out of All Mail takes it out of every other
-  // folder except the destination. Existing behaviour is untouched while it is off.
+  // folder except the destination. A message's labels are its copies with the same Message-ID
+  // and HTML, so a clean copy and a recipient's copy stay apart. `UID EXPUNGE` runs an `after`
+  // hook. Existing behaviour is untouched while it is off.
   private gmailPorts = false
   get gmail() {
     return this.capabilities.has('X-GM-EXT-1')
@@ -243,9 +245,21 @@ export class FakeImapServer {
     this.port = (options, purpose) => this.asGmail(plain(options, purpose))
   }
   private asGmail(port: FakePort) {
-    const [select, search, move, append] = [port.select, port.search, port.move, port.append].map(
-      (fn) => fn.bind(port),
-    ) as [FakePort['select'], FakePort['search'], FakePort['move'], FakePort['append']]
+    const [select, search, move, append, expunge] = [
+      port.select,
+      port.search,
+      port.move,
+      port.append,
+      port.expunge,
+    ].map((fn) => fn.bind(port)) as [
+      FakePort['select'],
+      FakePort['search'],
+      FakePort['move'],
+      FakePort['append'],
+      FakePort['expunge'],
+    ]
+    const same = (a: FakeMessageInput, b: FakeMessageInput) =>
+      !!a.messageId && a.messageId === b.messageId && (a.html ?? '') === (b.html ?? '')
     const allMail = () => [...this.boxes.values()].find((b) => b.specialUse === '\\All')
     const on = () => this.gmail
     let selected: string | undefined
@@ -265,31 +279,37 @@ export class FakeImapServer {
     }
     port.move = async (uids, destination) => {
       const source = selected ? this.box(selected) : undefined
-      const ids = new Set(
-        source?.messages.filter((m) => uids.includes(m.uid)).map((m) => m.input.messageId),
-      )
+      const moved = source?.messages.filter((m) => uids.includes(m.uid)).map((m) => m.input) ?? []
       const result = await move(uids, destination)
       if (on() && source && source === allMail())
         for (const box of this.boxes.values())
           if (box !== source && box.path !== destination)
-            box.messages = box.messages.filter(
-              (m) => !m.input.messageId || !ids.has(m.input.messageId),
-            )
+            box.messages = box.messages.filter((m) => !moved.some((i) => same(i, m.input)))
+      return result
+    }
+    port.expunge = async (uids) => {
+      const result = await expunge(uids)
+      if (on()) this.hook('UID EXPUNGE', 'after')
       return result
     }
     port.append = async (path, content, flags, date) => {
-      const result = await append(path, content, flags, date)
-      const all = allMail()
-      if (on() && all && all.path !== path) {
-        const m = this.box(path).messages.at(-1)!
-        all.messages.push({
-          ...m,
-          uid: all.uidNext++,
-          flags: new Set(m.flags),
-          modseq: ++this.modseq,
-        })
+      const box = this.box(path)
+      const before = box.messages.length
+      try {
+        return await append(path, content, flags, date)
+      } finally {
+        // Also when the reply is lost: what was stored is in All Mail too.
+        const all = allMail()
+        if (on() && all && all.path !== path && box.messages.length > before) {
+          const m = box.messages.at(-1)!
+          all.messages.push({
+            ...m,
+            uid: all.uidNext++,
+            flags: new Set(m.flags),
+            modseq: ++this.modseq,
+          })
+        }
       }
-      return result
     }
     return port
   }

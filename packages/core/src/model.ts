@@ -464,11 +464,23 @@ export interface OutgoingMessage {
    * `ifPresent`: delivery is unconfirmed, so the clean copy is filed only if the server filed one.
    */
   replaceServerCopies?: boolean | 'ifPresent'
+  replacement?: SentCopyReplacement
 }
 // Read status
 export interface OutgoingCopy {
   recipient: string
   mime: Uint8Array
+}
+/** How a replaced Sent copy is told apart from recipients' copies, and kept durable. */
+export interface SentCopyReplacement {
+  /** The Worker's hosts: a copy whose HTML carries their image is a recipient's copy. */
+  hosts: string[]
+  /** The server's copies may already be in Trash: the clean copy is filed whatever the mode. */
+  owed?: boolean
+  /** Makes `owed` durable; awaited before anything is moved or filed. */
+  owe?(): Promise<void>
+  /** Told the clean copy's UID in Sent once it is confirmed there. */
+  confirmed?(uid: number): void
 }
 /** What became of one recipient's copy: `uncertain` may have arrived; `notSent` never left the device. */
 export interface CopyOutcome {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -454,6 +455,112 @@ describe('Read status: tracked sending', () => {
         sentCopy: 'filed',
       })
       expect(submitCopies).toHaveBeenCalledTimes(1)
+    })
+  })
+  describe('a dropped connection while the Sent copy is replaced', () => {
+    const one = { ...draft, cc: [], bcc: [] }
+    const TRASH = '[Gmail]/Trash'
+    /** The next IMAP command of this kind fails as if the connection dropped. */
+    const dropAt = (hook: string) =>
+      server.hooks.set(hook, () => {
+        throw new ProviderError('network', 'Connection closed.')
+      })
+    /** The reply to DATA is lost; Gmail filed its copy, and the connection drops after the move. */
+    const unconfirmedThenDrop = async (_s: unknown, _f: string, copies: Copies, p?: Progress) => {
+      await p!(copies[0].recipient)
+      await gmailFiles(copies[0])
+      dropAt('APPEND:before')
+      return [{ recipient: alex, result: 'uncertain' as const, reason: reasons.uncertain }]
+    }
+    const expectReplaced = () => {
+      const sent = server.box(SENT).messages
+      expect(sent).toHaveLength(1)
+      expect(text(sent[0].raw)).not.toContain('read.example.com')
+      expect(server.box(ALL).messages).toHaveLength(1)
+      expect(server.box(TRASH).messages).toHaveLength(0)
+    }
+    const owedAfterDrop = async () => {
+      submitCopies.mockImplementationOnce(unconfirmedThenDrop)
+      expect((await service.send(one)).status).toBe('uncertain')
+      await service.sendsSettled()
+      // Gmail's copy is in Trash, the clean one isn't filed yet: the journal says it's owed.
+      expect(server.box(TRASH).messages).toHaveLength(1)
+      expect(server.box(SENT).messages).toHaveLength(0)
+      expect(await journal()).toMatchObject({ state: 'uncertain', cleanOwed: true })
+    }
+    const later = async (minutes: number) => {
+      const at = Date.parse((await journal()).at)
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(at + minutes * 60_000)
+    }
+    const mimeFile = () => join(directory, 'outgoing', draftId + '.eml')
+    it('the next retry of an unconfirmed send files the clean copy, even after an hour', async () => {
+      await owedAfterDrop()
+      await later(61)
+      await service.refresh()
+      expectReplaced()
+      expect(await journal()).toMatchObject({ state: 'uncertain', sentCopy: 'filed' })
+      expect((await journal()).cleanOwed).toBeUndefined()
+      expect((await journal()).cleanUid).toBe(server.box(SENT).messages[0].uid)
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+      expect(submit).not.toHaveBeenCalled()
+    })
+    it('a restart files the clean copy', async () => {
+      await owedAfterDrop()
+      await stop(service)
+      await start()
+      await connected()
+      await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+      expectReplaced()
+      expect(submitCopies).toHaveBeenCalledTimes(1)
+    })
+    it('after the APPEND, a restart confirms the copy without filing another', async () => {
+      submitCopies.mockImplementationOnce(async (...args) => {
+        const outcomes = await fakeCopies(...args)
+        dropAt('APPEND:after')
+        return outcomes
+      })
+      expect((await service.send(draft)).status).toBe('sent')
+      await service.sendsSettled()
+      expect(await journal()).toMatchObject({ sentCopy: 'uncertain', cleanOwed: true })
+      await stop(service)
+      await start()
+      await connected()
+      await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+      expectReplaced()
+      // Filed once: the restart confirmed it in Sent instead of filing it again.
+      expect(server.commands.filter((c) => c === 'APPEND').length).toBe(1)
+    })
+    it('a dismiss keeps the MIME while the clean copy is owed, and the retry still files', async () => {
+      await owedAfterDrop()
+      // The dismiss's own last look drops too.
+      dropAt('APPEND:before')
+      await service.dismissSubmission(draftId)
+      expect(await journal()).toMatchObject({ dismissed: true, cleanOwed: true, mime: true })
+      expect((await journal()).sentCopy).not.toBe('dismissed')
+      expect(existsSync(mimeFile())).toBe(true)
+      expect(await service.submissions()).toEqual([])
+      await service.refresh()
+      expectReplaced()
+      expect(await journal()).toMatchObject({ dismissed: true, sentCopy: 'filed' })
+      expect(existsSync(mimeFile())).toBe(false)
+    })
+    it('a dismissed partial send still files its owed Sent copy', async () => {
+      plan = ['accepted', 'rejected', 'rejected']
+      submitCopies.mockImplementationOnce(async (...args) => {
+        const outcomes = await fakeCopies(...args)
+        dropAt('APPEND:before')
+        return outcomes
+      })
+      expect((await service.send(draft)).status).toBe('partial')
+      await service.sendsSettled()
+      expect(await journal()).toMatchObject({ cleanOwed: true })
+      await service.dismissSubmission(draftId)
+      expect(await journal()).toMatchObject({ dismissed: true, mime: true })
+      expect(existsSync(mimeFile())).toBe(true)
+      await service.refresh()
+      expectReplaced()
+      expect(await journal()).toMatchObject({ sentCopy: 'filed' })
     })
   })
   it('a journal write that fails before the first copy is a plain not-sent', async () => {

@@ -165,6 +165,10 @@ type Journal = {
   copies?: JournalCopy[]
   /** Recipients whose copy may have arrived: never offered for recovery. */
   unconfirmed?: string[]
+  /** Gmail's copies may be in Trash and the clean one not yet confirmed in Sent: it must be filed. */
+  cleanOwed?: boolean
+  /** The clean copy's UID in Sent, once confirmed there. */
+  cleanUid?: number
 }
 /** Drafts are saved to the server only after this long without an edit; local saves are instant. */
 const draftIdleMs = 10_000
@@ -2119,11 +2123,7 @@ export class MailService {
       const { provider, account } = this.provider(journal.accountId)
       if (!provider.fileSentCopy) return
       const prepared = outgoing?.mime ? outgoing : await this.outgoingMessage(journal)
-      // Read status: an unconfirmed tracked send is never shown as sent, only cleaned up.
-      const message =
-        journal.tracked && journal.state === 'uncertain'
-          ? { ...prepared, replaceServerCopies: 'ifPresent' as const }
-          : prepared
+      const message = journal.tracked ? this.trackedSentCopy(journal, prepared) : prepared
       journal.sentCopy = 'appending'
       await this.persistJournal()
       try {
@@ -2136,6 +2136,7 @@ export class MailService {
         }
         journal.sentCopy = result
         journal.sentCopyError = undefined
+        journal.cleanOwed = undefined // Read status: the clean copy is confirmed in Sent
         await this.persistJournal()
         await this.removeMime(journal.draftId)
       } catch (error) {
@@ -2152,6 +2153,40 @@ export class MailService {
     } finally {
       this.filing.delete(journal.draftId)
     }
+  }
+  /**
+   * Read status: the server's copy carries a recipient's image, so it is replaced. Once Gmail's
+   * copies may be in Trash, the debt is durable and every later attempt files the clean copy.
+   */
+  private trackedSentCopy(journal: Journal, prepared: OutgoingMessage): OutgoingMessage {
+    return {
+      ...prepared,
+      // An unconfirmed tracked send is never shown as sent, only cleaned up.
+      replaceServerCopies: journal.state === 'uncertain' ? 'ifPresent' : true,
+      replacement: {
+        hosts: this.workerHosts(),
+        owed: !!journal.cleanOwed,
+        owe: async () => {
+          journal.cleanOwed = true
+          await this.persistJournal()
+        },
+        confirmed: (uid) => (journal.cleanUid = uid),
+      },
+    }
+  }
+  /** Read status: the Worker hosts whose images mark a recipient's copy. */
+  private workerHosts(): string[] {
+    const base = workerBase(this.settings.readStatus?.workerUrl)
+    return base ? [base] : []
+  }
+  /** Read status: a tracked send whose clean Sent copy is still to be filed, so its MIME stays. */
+  private sentCopyOwed(journal: Journal) {
+    return (
+      !!journal.cleanOwed ||
+      (!!journal.tracked &&
+        ['sent', 'partial'].includes(journal.state) &&
+        ['pending', 'appending', 'uncertain', 'failed'].includes(journal.sentCopy || ''))
+    )
   }
   /** Read status: replaces the server's copy of an unconfirmed tracked send in the background. */
   private fileUnconfirmedCopy(journal: Journal) {
@@ -2171,13 +2206,16 @@ export class MailService {
       if (accountIds.has(journal.accountId) && !this.finishing.has(journal.draftId)) {
         const accepted = ['sent', 'partial'].includes(journal.state)
         // Read status: an unconfirmed tracked send may have left Gmail's copy with an image. It
-        // is looked for while recent and once after each start, not every minute forever.
+        // is looked for while recent and once after each start, not every minute forever; a
+        // clean copy owed (Gmail's copies may be in Trash) is filed whenever, even if dismissed.
         const unconfirmed =
           journal.tracked &&
           journal.state === 'uncertain' &&
           (this.lookOnStart.delete(journal.draftId) ||
+            journal.cleanOwed ||
             Date.now() - Date.parse(journal.at) < unconfirmedLookMs)
-        if ((accepted || unconfirmed) && !journal.dismissed) await this.fileSentCopy(journal)
+        if ((accepted || unconfirmed) && (!journal.dismissed || this.sentCopyOwed(journal)))
+          await this.fileSentCopy(journal)
         // Even a dismissed send must not leave its old draft behind to be sent again.
         if (accepted || (journal.state === 'uncertain' && journal.dismissed))
           await this.removeReplacedDraft(journal)
@@ -2347,11 +2385,15 @@ export class MailService {
     // Read status: one last look for Gmail's copy with an image before it is no longer retried.
     if (journal.tracked && journal.state === 'uncertain') await this.fileSentCopy(journal)
     journal.dismissed = true
-    if (journal.sentCopy && journal.sentCopy !== 'filed' && journal.sentCopy !== 'server')
+    // Read status: a clean Sent copy still owed keeps its MIME, and filing goes on.
+    const owed = this.sentCopyOwed(journal)
+    if (!owed && journal.sentCopy && journal.sentCopy !== 'filed' && journal.sentCopy !== 'server')
       journal.sentCopy = 'dismissed'
     if (draft && ['partial', 'uncertain'].includes(journal.state)) await this.completeDraft(draft)
-    await this.removeMime(id)
-    journal.mime = undefined
+    if (!owed) {
+      await this.removeMime(id)
+      journal.mime = undefined
+    }
     await this.persistJournal()
     // As the dialog says, its draft goes too, so a delivered message is not sent twice.
     if (journal.state === 'uncertain') await this.removeReplacedDraft(journal)

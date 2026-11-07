@@ -162,6 +162,11 @@ export function stripPixels(html: string, base?: string): string {
   return out + html.slice(last)
 }
 
+/** Whether `html` has an image from one of the Worker `bases`, as `stripPixels` sees it. */
+export function hasWorkerImage(html: string, bases: string[]): boolean {
+  return bases.some((base) => stripPixels(html, base) !== html)
+}
+
 export function trackedRecipients(draft: Pick<Draft, 'to' | 'cc' | 'bcc'>): string[] {
   const seen = new Set<string>()
   for (const a of [...draft.to, ...draft.cc, ...draft.bcc]) {

@@ -160,11 +160,14 @@ Builder-level calls by Claude (can be overridden):
 - the SMTP envelope is addressed to that one recipient;
 - the HTML part carries that recipient's image.
 
-Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Do this straight after the last copy is sent, because Gmail's merged Sent copy carries the first recipient's image until it's replaced. How the send test did it, which worked:
+Then remove Gmail's auto-saved Sent copies (found by `Message-ID`) and file one clean copy. Do this straight after the last copy is sent, because Gmail's merged Sent copy carries the first recipient's image until it's replaced. Nothing is deleted for good before the clean copy is confirmed in Sent, so a dropped connection never loses Khyati's Sent copy:
 
-- Find the copies in All Mail with `X-GM-RAW "rfc822msgid:<id>"` and move them to Trash. Deleting from Sent only removes the Sent label.
-- Delete them from Trash for good. Find them there with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
-- `APPEND` the clean copy to Sent with `\Seen`. Gmail accepts it even though the deleted copies had the same `Message-ID`. Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. The "Sending…" and "Sent" states from the speed work must stay accurate.
+- Find the copies in All Mail with `X-GM-RAW "rfc822msgid:<id>"` (exact `Message-ID` only). Those carrying a Worker image move to Trash; deleting from Sent would only remove the Sent label. A clean copy an earlier attempt already filed in Sent is kept.
+- Before anything moves, the send journal records that a clean copy is owed. From then on every retry files it (after a restart too, and even for an unconfirmed send), until a clean copy is confirmed in Sent.
+- `APPEND` the clean copy to Sent with `\Seen` and confirm it is there: by the UID Gmail returns, else by a search in Sent for the `Message-ID`, with no Worker image in it. Gmail accepted it in the send test once the copies had left All Mail. If it isn't there (Gmail may refuse it while a copy with the same `Message-ID` sits in Trash), delete the trashed copies and file it again.
+- Only then delete the trashed copies for good. Find them in Trash with a plain `HEADER Message-ID` search, since Gmail's own search can skip Trash.
+
+Use the existing send journal, so a crash midway is recoverable and never sends twice to anyone. Dismissing the send never drops a clean copy still owed. The "Sending…" and "Sent" states from the speed work must stay accurate.
 
 **The Worker:**
 

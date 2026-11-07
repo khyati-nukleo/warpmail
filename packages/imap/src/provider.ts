@@ -1826,12 +1826,16 @@ export class ImapProvider implements MailProvider {
       const find = (port: ImapPort, id: string, uidNext: number) =>
         this.withMessageId(port, id, uidNext)
       const present = () => this.run((port) => hasServerCopy(port, boxes, message.messageId, find))
-      if (!(await present())) {
+      // An owed copy is filed whatever is found: the server's copies may already be in Trash.
+      if (!message.replacement?.owed && !(await present())) {
         await sleep(this.timing.sentCopyGraceMs)
         // Unconfirmed delivery: only a copy the server filed shows it was accepted.
         if (message.replaceServerCopies === 'ifPresent' && !(await present())) return 'absent'
       }
-      await this.run((port) => replaceSentCopy(port, boxes, message.messageId, mime, find))
+      const uid = await this.run((port) =>
+        replaceSentCopy(port, boxes, message.messageId, mime, find, message.replacement),
+      )
+      if (uid) message.replacement?.confirmed?.(uid)
       this.requestSync('all')
       return 'filed'
     }
