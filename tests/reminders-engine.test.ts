@@ -232,7 +232,8 @@ describe('ReminderEngine', () => {
     expect(h.returned).toHaveBeenCalledTimes(1)
     expect(h.returned).toHaveBeenCalledWith([{ accountId: 'a1', threadId: 't1' }])
     expect(h.events).toContainEqual({ type: 'remindersReturned', count: 1, undoId: 'undo-1' })
-    expect(h.stored.get('reminders-returned')).toEqual(['a1|t1|m1@example.com'])
+    const due = addWorkingDays(receivedMs, 3)
+    expect(h.stored.get('reminders-returned')).toEqual(['a1|t1|m1@example.com|' + due])
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(1)
@@ -257,13 +258,55 @@ describe('ReminderEngine', () => {
     expect(h.returned).toHaveBeenCalledTimes(1)
     expect(h.returned.mock.calls[0]![0].map((t) => t.threadId)).toEqual(['t1', 't2', 't3'])
     expect(h.events).toContainEqual({ type: 'remindersReturned', count: 2, undoId: 'undo-2' })
+    const due = addWorkingDays(receivedMs, 3)
     expect(h.stored.get('reminders-returned')).toEqual([
-      'a1|t1|m1@example.com',
-      'a1|t2|m2@example.com',
+      'a1|t1|m1@example.com|' + due,
+      'a1|t2|m2@example.com|' + due,
     ])
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenLastCalledWith([{ accountId: 'a1', threadId: 't3' }])
+  })
+  it('returns a follow-up once, though a later note of mine that asks nothing is now the latest', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    h.engine.start()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    // Back in the inbox, she adds Sam with a note that asks nothing, then archives it again.
+    h.facts[0] = fact({
+      messageId: 'm2@example.com',
+      receivedAt: new Date(addWorkingDays(receivedMs, 4)).toISOString(),
+      asks: false,
+      inInbox: false,
+      ownAsk: { messageId: 'm1@example.com', receivedAt: received },
+    })
+    h.engine.invalidate('a1')
+    await settle()
+    // Still due from the first ask, and archiving it says it is handled.
+    expect((await h.engine.due('a1')).map((r) => r.messageId)).toEqual(['m2@example.com'])
+    expect(h.returned).toHaveBeenCalledTimes(1)
+  })
+  it('returns a snoozed follow-up again when the snooze ends, if it was archived meanwhile', async () => {
+    const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
+    h.engine.start()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    // Back in the inbox, she snoozes it to Monday and archives it.
+    const until = addWorkingDays(receivedMs, 6)
+    h.settings.reminderSnoozes = [
+      { accountId: 'a1', threadId: 't1', messageId: 'm1@example.com', until },
+    ]
+    h.engine.invalidate()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    h.clock.now = until + 60_000
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(2)
+    // Once per snooze.
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(2)
   })
   it('returns nothing until the provider has synced in full since connecting', async () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })
@@ -306,7 +349,7 @@ describe('ReminderEngine', () => {
     const keys = h.stored.get('reminders-returned') as string[]
     expect(keys).toHaveLength(500)
     expect(keys[0]).toBe('a1|old1|x@example.com')
-    expect(keys.at(-1)).toBe('a1|t1|m1@example.com')
+    expect(keys.at(-1)).toBe('a1|t1|m1@example.com|' + addWorkingDays(receivedMs, 3))
   })
   it('catches up on launch: a follow-up due while closed is listed at start', async () => {
     const h = make({ facts: [fact()], now: addWorkingDays(receivedMs, 5) })

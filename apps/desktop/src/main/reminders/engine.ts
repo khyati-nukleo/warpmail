@@ -1,6 +1,7 @@
 import {
   connectionErrorCodes,
   deriveReminder,
+  followUpAsk,
   isProviderError,
   ownAddresses,
   ProviderError,
@@ -51,7 +52,8 @@ export interface SentInput {
   html: string
   text: string
 }
-type Derived = { reminder: Reminder; inInbox: boolean }[]
+/** `askId`: a follow-up's ask, which a later note of mine that asks nothing doesn't change. */
+type Derived = { reminder: Reminder; inInbox: boolean; askId?: string }[]
 type Target = { account: Account; provider: MailProvider }
 
 const debounceMs = 500
@@ -287,7 +289,9 @@ export class ReminderEngine {
     return facts.flatMap((f) => {
       const snooze = snoozes.find((s) => s.threadId === f.threadId && s.messageId === f.messageId)
       const reminder = deriveReminder(f, { own, settings, snooze })
-      return reminder ? [{ reminder, inInbox: f.inInbox }] : []
+      if (!reminder) return []
+      const askId = reminder.kind === 'followUp' ? followUpAsk(f)?.messageId : undefined
+      return [{ reminder, inInbox: f.inInbox, askId }]
     })
   }
 
@@ -320,16 +324,17 @@ export class ReminderEngine {
       // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
       // full sync that started after it came due, which announces itself and recomputes.
       let held = false
-      for (const { reminder, inInbox } of derived) {
+      for (const { reminder, inInbox, askId } of derived) {
         if (reminder.kind !== 'followUp' || inInbox || reminder.dueMs > now) continue
         if (target.provider.readyForReminders?.(reminder.dueMs) === false) {
           held = true
           continue
         }
+        // Once per ask and due time: a snooze that ends later may bring it back again.
         waiting.push({
           accountId: id,
           threadId: reminder.threadId,
-          key: [id, reminder.threadId, reminder.messageId].join('|'),
+          key: [id, reminder.threadId, askId ?? reminder.messageId, reminder.dueMs].join('|'),
         })
       }
       if (held) target.provider.awaitFullSync?.()

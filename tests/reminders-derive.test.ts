@@ -3,6 +3,7 @@ import {
   addWorkingDays,
   defaultReminderSettings,
   deriveReminder,
+  followUpAsk,
   reminderLabelText,
   reminderSettingsOf,
   type ReminderFacts,
@@ -165,5 +166,20 @@ describe('reminderLabelText', () => {
     expect(reminderLabelText('followUp', { ...defaultReminderSettings, followUpDays: 1 })).toBe(
       'No reply in 1 day',
     )
+  })
+})
+
+describe('followUpAsk', () => {
+  it('is this message when it asks or carries Follow up, else my earlier ask, else none', () => {
+    const earlier = { messageId: 'm0@example.com', receivedAt: '2026-11-01T15:00:00.000Z' }
+    expect(followUpAsk(facts({ ownAsk: earlier }))).toEqual({
+      messageId: 'm1@example.com',
+      receivedAt: received,
+    })
+    expect(
+      followUpAsk(facts({ asks: false, labels: { noReminder: false, followUp: true } }))?.messageId,
+    ).toBe('m1@example.com')
+    expect(followUpAsk(facts({ asks: false, ownAsk: earlier }))).toEqual(earlier)
+    expect(followUpAsk(facts({ asks: false, ownAsk: null }))).toBeNull()
   })
 })

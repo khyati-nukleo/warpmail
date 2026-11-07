@@ -77,6 +77,15 @@ export function reminderSettingsOf(settings: Pick<Settings, 'reminders'>): Remin
   }
 }
 
+/** What a follow-up counts from: this message if it asks or has Follow up, else my earlier ask. */
+export function followUpAsk(
+  facts: ReminderFacts,
+): { messageId: string; receivedAt: string } | null {
+  if (facts.messageId && (facts.labels.followUp || facts.asks === true))
+    return { messageId: facts.messageId, receivedAt: facts.receivedAt }
+  return facts.ownAsk ?? null
+}
+
 export function deriveReminder(
   facts: ReminderFacts,
   context: { own: string[]; settings: ReminderSettings; snooze?: ReminderSnooze },
@@ -89,8 +98,7 @@ export function deriveReminder(
   if (facts.fromEmail && own.includes(facts.fromEmail)) {
     if (!settings.followUp) return null
     // Only someone else's reply ends an ask: my own later note ("here's the file") keeps it.
-    const ask =
-      facts.labels.followUp || facts.asks === true ? facts.receivedAt : facts.ownAsk?.receivedAt
+    const ask = followUpAsk(facts)?.receivedAt
     if (!ask) return null
     // Nobody would answer: every To recipient is me or a robot (a notification's reply address).
     if (facts.to.length && facts.to.every((a) => own.includes(a) || isAutomatedAddress(a)))
