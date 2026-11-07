@@ -1039,7 +1039,7 @@ export function Composer({
             {/* Read status */}
             <ReadStatusSwitch
               draft={draft}
-              protection={protection}
+              protection={protection === 'none' && own?.enabled ? 'sign' : protection}
               locked={locked}
               onChange={(readStatus) => update({ readStatus })}
             />
