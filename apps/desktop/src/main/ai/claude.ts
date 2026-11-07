@@ -62,8 +62,10 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
   const model = options.model ?? defaultAiModel
   const client = new Anthropic({
     apiKey: options.apiKey,
-    // Keep ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL from the environment out.
+    // Keep ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL and ANTHROPIC_LOG from the environment out:
+    // the SDK's debug log would print the draft.
     authToken: null,
+    logLevel: 'off',
     baseURL: options.baseURL ?? 'https://api.anthropic.com',
     maxRetries: options.maxRetries ?? 1,
     timeout: options.timeoutMs ?? 60_000,

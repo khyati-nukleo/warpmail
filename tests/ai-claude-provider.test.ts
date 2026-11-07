@@ -446,6 +446,23 @@ describe('claude provider', () => {
     for (const spy of spies) expect(spy).not.toHaveBeenCalled()
   })
 
+  it('never logs, even with ANTHROPIC_LOG set in the environment', async () => {
+    const before = process.env.ANTHROPIC_LOG
+    process.env.ANTHROPIC_LOG = 'debug'
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    )
+    try {
+      const s = await startServer(okReply(['Hi']))
+      const provider = createClaudeProvider({ apiKey, baseURL: s.baseURL, maxRetries: 0 })
+      await collect(provider.improve('Private draft text', 'polish', new AbortController().signal))
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    } finally {
+      if (before === undefined) delete process.env.ANTHROPIC_LOG
+      else process.env.ANTHROPIC_LOG = before
+    }
+  })
+
   it('ignores Anthropic credentials from the environment', async () => {
     process.env.ANTHROPIC_AUTH_TOKEN = 'env-token'
     const s = await startServer(okReply(['Hi']))
