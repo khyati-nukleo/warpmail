@@ -141,6 +141,8 @@ export class FakeImapServer {
   down = false
   /** Like servers whose search index lags behind APPEND: header searches find nothing. */
   laggingSearch = false
+  /** Like Gmail: creating `a/b` also creates a missing parent `a`. */
+  createsParents = false
   modseq = 1
   ports: FakePort[] = []
   commands: string[] = []
@@ -604,6 +606,9 @@ export class FakePort implements ImapPort {
   }
   async createMailbox(path: string) {
     this.check('CREATE')
+    if (this.server.createsParents)
+      for (let i = path.indexOf('/'); i > 0; i = path.indexOf('/', i + 1))
+        if (!this.server.boxes.has(path.slice(0, i))) this.server.addMailbox(path.slice(0, i))
     this.server.addMailbox(path)
   }
   async renameMailbox(path: string, newPath: string) {

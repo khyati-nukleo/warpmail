@@ -1,4 +1,10 @@
-import type { ReminderFacts, ReminderKind, ReminderSettings, ReminderSnooze } from './reminders'
+import type {
+  ReminderFacts,
+  ReminderKind,
+  ReminderLabel,
+  ReminderSettings,
+  ReminderSnooze,
+} from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -654,6 +660,13 @@ export interface MailProvider {
     limit: number,
   ): Promise<{ id: string; messageId: string }[]>
   setAskChecks?(account: Account, rows: { messageId: string; asks: boolean }[]): Promise<void>
+  /** Adds or removes a reminder label (a Gmail label kept as an IMAP folder) on one email. */
+  labelMessage?(
+    account: Account,
+    label: ReminderLabel,
+    messageId: string,
+    add: boolean,
+  ): Promise<void>
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }
