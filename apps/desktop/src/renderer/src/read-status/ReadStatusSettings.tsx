@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, Switch, cn } from '@inlark/ui'
 import { friendlyError, workerBase, type Bootstrap } from '@inlark/core'
@@ -36,6 +36,8 @@ export function ReadStatusSettings({
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState<'save' | 'remove' | 'test'>()
   const [result, setResult] = useState<{ ok: boolean; message: string }>()
+  /** An address being saved; Test waits for it, since the saved password goes only there. */
+  const savingAddress = useRef<Promise<unknown>>(undefined)
 
   const save = async (change: { enabled?: boolean; workerUrl?: string }) => {
     try {
@@ -67,7 +69,7 @@ export function ReadStatusSettings({
     }
     setAddressProblem(false)
     setAddress(base)
-    void save({ workerUrl: base || undefined })
+    savingAddress.current = save({ workerUrl: base || undefined })
   }
 
   const savePassword = async () => {
@@ -108,7 +110,9 @@ export function ReadStatusSettings({
     setBusy('test')
     setResult(undefined)
     try {
-      // A password typed but not saved yet is tested as is; otherwise the saved one is used.
+      await savingAddress.current
+      // A password typed but not saved yet is tested as is; otherwise the saved one is used,
+      // and only for the saved address (another address needs its password typed).
       setResult(await api.testReadStatus(base, password || undefined))
     } catch (error) {
       setResult({ ok: false, message: friendlyError(error) })

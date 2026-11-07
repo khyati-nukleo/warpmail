@@ -2594,6 +2594,11 @@ export class MailService {
     return this.readStatusInfo()
   }
   testReadStatus = async (workerUrl: string, password?: string) => {
+    // The saved password only ever goes to the saved address.
+    const saved = workerBase(this.settings.readStatus?.workerUrl)
+    const tested = workerBase(workerUrl)
+    if (!password && tested && tested !== saved)
+      return { ok: false, message: 'Enter the password for this address.' }
     const given = password || this.readStatusSecret.get()
     if (!given) return { ok: false, message: 'Enter the password first.' }
     return testWorker(workerUrl, given, this.options.readStatusFetch)

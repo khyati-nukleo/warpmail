@@ -96,6 +96,8 @@ let plan: CopyOutcome['result'][]
 let closing: Promise<void>[] = []
 /** Every service started in a test, including ones a test treats as crashed. */
 let running: MailService[] = []
+/** What the service asks the Worker; offline unless a test says otherwise. */
+let workerFetch: typeof fetch
 const factory: ProviderFactory = (options) => {
   const provider = new ImapProvider({
     connectionId: options.connectionId,
@@ -152,9 +154,7 @@ async function start() {
   store = new JsonStore(directory)
   service = new MailService(store, () => {}, {
     providers: factory,
-    readStatusFetch: async () => {
-      throw new Error('offline')
-    },
+    readStatusFetch: (...args) => workerFetch(...args),
   })
   running.push(service)
   await service.init()
@@ -182,6 +182,9 @@ beforeEach(async () => {
   server.addMailbox('[Gmail]/Drafts', '\\Drafts')
   server.gmail = true
   plan = []
+  workerFetch = async () => {
+    throw new Error('offline')
+  }
   submit = vi.fn(async (_settings, envelope) => ({ accepted: envelope.to, rejected: [] }))
   submitCopies = vi.fn(fakeCopies)
   await start()
@@ -792,6 +795,41 @@ describe('Read status: settling copies', () => {
     expect(
       recoverCopies([copy(alex, 'accepted'), copy(sam, 'sending'), copy(kim, 'pending')]),
     ).toEqual([copy(alex, 'accepted'), copy(sam, 'uncertain'), copy(kim, 'notSent', closed)])
+  })
+})
+
+describe('Read status: testing the Worker', () => {
+  /** The passwords sent to each address, in order. */
+  let asked: { url: string; auth: string | null }[]
+  beforeEach(() => {
+    asked = []
+    workerFetch = async (url, init) => {
+      asked.push({
+        url: String(url),
+        auth: new Headers(init?.headers).get('authorization'),
+      })
+      return new Response(JSON.stringify({ records: [], next: 0 }), {
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+  })
+  it('uses the saved password for the saved address', async () => {
+    expect((await service.testReadStatus(base)).ok).toBe(true)
+    expect(asked.map((a) => a.auth)).toEqual(['Bearer ' + password])
+  })
+  it('never sends the saved password to another address', async () => {
+    expect(await service.testReadStatus('https://other.example.com')).toEqual({
+      ok: false,
+      message: 'Enter the password for this address.',
+    })
+    expect(asked).toEqual([])
+  })
+  it('tests another address with the password typed for it', async () => {
+    expect((await service.testReadStatus('https://other.example.com', 'typed-password')).ok).toBe(
+      true,
+    )
+    expect(asked).toEqual([expect.objectContaining({ auth: 'Bearer typed-password' })])
+    expect(asked[0].url).toMatch(/^https:\/\/other\.example\.com\//)
   })
 })
 
