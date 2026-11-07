@@ -347,6 +347,7 @@ else {
         aiStatus: ai.status,
         setAiKey: ai.setKey,
         removeAiKey: ai.removeKey,
+        setAiModel: ai.setModel,
         testAiKey: ai.testKey,
         improveDraft: ai.improve,
         cancelImprove: ai.cancel,

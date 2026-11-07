@@ -1,18 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { ImproveStyle } from '@inlark/core'
+import { defaultAiModel, type AiModel, type ImproveStyle } from '@inlark/core'
 import { cleanImprovedText, improveInstructions, improveRequestText } from './instructions'
 import { ImproveError, type ImproveProvider, type ImproveUsage } from './provider'
 
-export const claudeModel = 'claude-opus-5-5'
-
-/**
- * USD per million tokens. Source: platform.claude.com/docs/en/about-claude/pricing,
- * confirmed 2026-11-06. `cacheWrite` is the 5-minute cache write price.
- */
-export const claudePrices = { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 }
+/** Claude Haiku 5.5 has no server-side fallback and rejects the parameter. */
+const withFallback = (model: AiModel) => model !== 'claude-haiku-5-5'
 
 export interface ClaudeProviderOptions {
   apiKey: string
+  /** Defaults to Claude Opus 5.5. */
+  model?: AiModel
   baseURL?: string
   maxRetries?: number
   timeoutMs?: number
@@ -58,6 +55,7 @@ function sum(iterations: readonly IterationUsage[], key: TokenCount): number {
 }
 
 export function createClaudeProvider(options: ClaudeProviderOptions): ImproveProvider {
+  const model = options.model ?? defaultAiModel
   const client = new Anthropic({
     apiKey: options.apiKey,
     // Keep ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL from the environment out.
@@ -102,10 +100,11 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
     try {
       const stream = client.beta.messages.stream(
         {
-          model: claudeModel,
+          model,
           max_tokens: 16000,
-          betas: ['server-side-fallback-2026-07-01'],
-          fallbacks: 'default',
+          ...(withFallback(model)
+            ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
+            : {}),
           output_config: { effort: 'low' },
           system: [
             { type: 'text', text: improveInstructions, cache_control: { type: 'ephemeral' } },
@@ -153,7 +152,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ImprovePro
 
   async function check(signal?: AbortSignal): Promise<void> {
     try {
-      await client.models.retrieve(claudeModel, undefined, { signal })
+      await client.models.retrieve(model, undefined, { signal })
     } catch (err) {
       throw toImproveError(err, signal)
     }

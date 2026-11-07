@@ -2,10 +2,10 @@ import { cn } from '@inlark/ui'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ExternalLink, Sparkles } from '@inlark/ui/icons'
-import { Button, Modal, Spinner } from '@inlark/ui'
-import { friendlyError, type AiStatus } from '@inlark/core'
+import { Button, Modal, Select, Spinner } from '@inlark/ui'
+import { aiModelInfo, aiModels, friendlyError, type AiModel, type AiStatus } from '@inlark/core'
 import { api } from './api'
-import { formatUsage } from './ai-usage'
+import { formatPrices, formatUsage } from './ai-usage'
 import { PasswordField, modalActions } from './encryption-ui'
 
 const section = cn(
@@ -23,6 +23,7 @@ type Notify = (message: string, tone?: 'error' | 'info') => void
 type Result = { ok: boolean; text: string }
 
 const consoleUrl = 'https://console.anthropic.com/settings/keys'
+const modelOptions = aiModels.map((model) => ({ value: model.id, label: model.label }))
 
 export function AiSettings({ notify }: { notify: Notify }) {
   const queryClient = useQueryClient()
@@ -65,6 +66,16 @@ export function AiSettings({ notify }: { notify: Notify }) {
     }
     setSaving(false)
     await runTest()
+  }
+
+  const chooseModel = async (model: AiModel) => {
+    try {
+      publish(await api.setAiModel(model))
+      // A test result was for the previous model.
+      setResult(undefined)
+    } catch (e) {
+      notify(friendlyError(e), 'error')
+    }
   }
 
   const remove = async () => {
@@ -180,6 +191,28 @@ export function AiSettings({ notify }: { notify: Notify }) {
         )}
       </div>
       <div className={section}>
+        <h4>Model</h4>
+        <div className={settingRow}>
+          <div>
+            <strong>{data ? aiModelInfo(data.model).label : '…'}</strong>
+            {data && (
+              <p>
+                {aiModelInfo(data.model).detail} {formatPrices(aiModelInfo(data.model))}.
+              </p>
+            )}
+          </div>
+          {data && (
+            <Select
+              aria-label="Model"
+              className="setting-select w-auto min-w-60 shrink-0"
+              value={data.model}
+              options={modelOptions}
+              onValueChange={(model) => void chooseModel(model)}
+            />
+          )}
+        </div>
+      </div>
+      <div className={section}>
         <h4>This month</h4>
         <div className={settingRow}>
           <div>
@@ -188,8 +221,8 @@ export function AiSettings({ notify }: { notify: Notify }) {
               {data ? formatUsage(data.improves, data.estimatedCost) : '…'}
             </strong>
             <p>
-              Estimated from Claude Opus 5.5’s list prices ($4 per million input tokens, $20 per
-              million output tokens). Your Anthropic Console shows the exact bill.
+              Estimated from the list prices of the model each improve used. Your Anthropic Console
+              shows the exact bill.
             </p>
           </div>
         </div>

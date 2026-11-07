@@ -1,6 +1,6 @@
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
-import type { AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
+import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -766,6 +766,7 @@ export interface DesktopMailAPI {
   aiStatus(): Promise<AiStatus>
   setAiKey(key: string): Promise<AiStatus>
   removeAiKey(): Promise<AiStatus>
+  setAiModel(model: AiModel): Promise<AiStatus>
   testAiKey(): Promise<AiTestResult>
   improveDraft(input: { id: string; text: string; style: ImproveStyle }): Promise<ImproveResult>
   cancelImprove(id: string): Promise<void>

@@ -32,12 +32,14 @@ let report: ImproveUsage | undefined
 let fail: ImproveError | undefined
 let waitForAbort: boolean
 let today: Date
+let models: string[]
 
 function service() {
   const ai = new AiService(new JsonStore(directory), (event) => events.push(event), {
     now: () => today,
-    createProvider: (_key, onUsage): ImproveProvider => {
+    createProvider: (_key, onUsage, model): ImproveProvider => {
       created++
+      models.push(model)
       return {
         async *improve(_text, _style, signal) {
           try {
@@ -72,6 +74,7 @@ beforeEach(async () => {
   fail = undefined
   waitForAbort = false
   today = new Date(2026, 10, 6, 12)
+  models = []
   vi.spyOn(safeStorage, 'isEncryptionAvailable').mockReturnValue(true)
 })
 afterEach(async () => {
@@ -219,6 +222,54 @@ describe('AiService', () => {
     expect(await ai.status()).toMatchObject({ month: '2026-12', improves: 1 })
   })
 
+  it('uses Claude Opus 5.5 until another model is chosen, and remembers the choice', async () => {
+    const ai = service()
+    await ai.init()
+    await ai.setKey(key)
+    expect((await ai.status()).model).toBe('claude-opus-5-5')
+    expect((await ai.setModel('claude-haiku-5-5')).model).toBe('claude-haiku-5-5')
+    await ai.improve(input())
+    await ai.testKey()
+    expect(models).toEqual(['claude-haiku-5-5', 'claude-haiku-5-5'])
+    const again = service()
+    await again.init()
+    expect((await again.status()).model).toBe('claude-haiku-5-5')
+  })
+
+  it('rejects a model that isn’t offered', async () => {
+    const ai = service()
+    await ai.init()
+    await expect(ai.setModel('gpt-5' as never)).rejects.toThrow()
+    expect((await ai.status()).model).toBe('claude-opus-5-5')
+  })
+
+  it('prices each improve at the model that ran it', async () => {
+    const ai = service()
+    await ai.init()
+    await ai.setKey(key)
+    report = { inputTokens: 100_000, outputTokens: 50_000, cacheWriteTokens: 0, cacheReadTokens: 0 }
+    await ai.improve(input()) // Opus: 0.40 + 1.00
+    await ai.setModel('claude-sonnet-5-5')
+    await ai.improve(input()) // Sonnet: 0.20 + 0.50
+    expect(await ai.status()).toMatchObject({ improves: 2, estimatedCost: 2.1 })
+  })
+
+  it('keeps counts saved before models could be chosen at Opus prices', async () => {
+    const store = new JsonStore(directory)
+    await store.init()
+    await store.write('ai-usage', {
+      month: '2026-11',
+      improves: 1,
+      inputTokens: 100_000,
+      outputTokens: 50_000,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    })
+    const ai = service()
+    await ai.init()
+    expect(await ai.status()).toMatchObject({ improves: 1, estimatedCost: 1.4 })
+  })
+
   it('remove key forgets it', async () => {
     const ai = service()
     await ai.init()
@@ -243,11 +294,14 @@ describe('AiService', () => {
       'testAiKey',
       'improveDraft',
       'cancelImprove',
+      'setAiModel',
     ]
     for (const name of names) expect(Object.keys(ipcSchemas)).toContain(name)
     expect(
       ipcSchemas.improveDraft.safeParse([{ id: 'a', text: 'hi', style: 'other' }]).success,
     ).toBe(false)
+    expect(ipcSchemas.setAiModel.safeParse(['gpt-5']).success).toBe(false)
+    expect(ipcSchemas.setAiModel.safeParse(['claude-haiku-5-5']).success).toBe(true)
     expect(
       ipcSchemas.improveDraft.safeParse([{ id: 'a', text: 'hi', style: 'shorter' }]).success,
     ).toBe(true)

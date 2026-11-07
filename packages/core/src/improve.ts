@@ -40,9 +40,58 @@ export const improveErrorMessages: Record<ImproveErrorKind, string> = {
 export type ImproveResult =
   { ok: true; text: string } | { ok: false; error: ImproveErrorKind; message: string }
 
+/** The Claude models Improve can use, cheapest first. */
+export type AiModel =
+  'claude-haiku-5-5' | 'claude-sonnet-5-5' | 'claude-opus-5-5' | 'claude-fable-5-1'
+
+export const defaultAiModel: AiModel = 'claude-opus-5-5'
+
+export interface AiModelInfo {
+  id: AiModel
+  label: string
+  detail: string
+  /**
+   * USD per million tokens. Source: platform.claude.com/docs/en/about-claude/pricing,
+   * confirmed 2026-11-06. `cacheWrite` is the 5-minute cache write price.
+   */
+  prices: { input: number; output: number; cacheWrite: number; cacheRead: number }
+}
+
+export const aiModels: AiModelInfo[] = [
+  {
+    id: 'claude-haiku-5-5',
+    label: 'Claude Haiku 5.5',
+    detail: 'Fastest and cheapest. Fine for quick fixes.',
+    prices: { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 },
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    label: 'Claude Sonnet 5.5',
+    detail: 'Good writing at half the price of Opus.',
+    prices: { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.1 },
+  },
+  {
+    id: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5',
+    detail: 'The best balance of writing and price. The default.',
+    prices: { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
+  },
+  {
+    id: 'claude-fable-5-1',
+    label: 'Claude Fable 5.1',
+    detail: 'Anthropic’s most capable model. Costs the most.',
+    prices: { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 0.25 },
+  },
+]
+
+export const aiModelInfo = (model: AiModel): AiModelInfo =>
+  aiModels.find((info) => info.id === model) ?? aiModels.find((i) => i.id === defaultAiModel)!
+
 export interface AiStatus {
   hasKey: boolean
   secureStorage: boolean
+  /** The model Improve uses. */
+  model: AiModel
   /** Month of the counters, as YYYY-MM. */
   month: string
   improves: number

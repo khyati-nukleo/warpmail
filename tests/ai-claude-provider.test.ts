@@ -158,6 +158,35 @@ describe('claude provider', () => {
     expect(content).toContain('Lunch at noon?')
   })
 
+  it('sends the chosen model', async () => {
+    const s = await startServer(okReply(['Hi']))
+    const provider = createClaudeProvider({
+      apiKey,
+      model: 'claude-sonnet-5-5',
+      baseURL: s.baseURL,
+      maxRetries: 0,
+    })
+    await collect(provider.improve('Lunch at noon?', 'polish', new AbortController().signal))
+    expect(s.requests[0]!.body.model).toBe('claude-sonnet-5-5')
+    expect(s.requests[0]!.body.fallbacks).toBe('default')
+  })
+
+  it('leaves out the server-side fallback for Haiku, which rejects it', async () => {
+    const s = await startServer(okReply(['Hi']))
+    const provider = createClaudeProvider({
+      apiKey,
+      model: 'claude-haiku-5-5',
+      baseURL: s.baseURL,
+      maxRetries: 0,
+    })
+    await collect(provider.improve('Lunch at noon?', 'polish', new AbortController().signal))
+    const req = s.requests[0]!
+    expect(req.body.model).toBe('claude-haiku-5-5')
+    expect(req.body.fallbacks).toBeUndefined()
+    expect(String(req.headers['anthropic-beta'] ?? '')).not.toContain('server-side-fallback')
+    expect(req.body.output_config.effort).toBe('low')
+  })
+
   it('keeps the text streamed before a server-side fallback and adds what follows', async () => {
     const s = await startServer({
       events: [
@@ -355,6 +384,20 @@ describe('claude provider', () => {
     await expect(provider.check()).resolves.toBeUndefined()
     expect(s.requests[0]!.method).toBe('GET')
     expect(s.requests[0]!.url).toContain('/v1/models/claude-opus-5-5')
+
+    const sonnet = await startServerRaw(200, {
+      type: 'model',
+      id: 'claude-sonnet-5-5',
+      display_name: 'Claude',
+      created_at: '2026-01-01T00:00:00Z',
+    })
+    await createClaudeProvider({
+      apiKey,
+      model: 'claude-sonnet-5-5',
+      baseURL: sonnet.baseURL,
+      maxRetries: 0,
+    }).check()
+    expect(sonnet.requests[0]!.url).toContain('/v1/models/claude-sonnet-5-5')
 
     const bad = await startServer({
       status: 401,

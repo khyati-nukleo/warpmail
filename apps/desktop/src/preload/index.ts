@@ -68,6 +68,7 @@ const methods = [
   'aiStatus',
   'setAiKey',
   'removeAiKey',
+  'setAiModel',
   'testAiKey',
   'improveDraft',
   'cancelImprove',

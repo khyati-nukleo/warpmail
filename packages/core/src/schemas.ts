@@ -338,6 +338,9 @@ export const ipcSchemas = {
   aiStatus: z.tuple([]),
   setAiKey: z.tuple([z.string().max(500)]),
   removeAiKey: z.tuple([]),
+  setAiModel: z.tuple([
+    z.enum(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']),
+  ]),
   testAiKey: z.tuple([]),
   improveDraft: z.tuple([
     z.object({

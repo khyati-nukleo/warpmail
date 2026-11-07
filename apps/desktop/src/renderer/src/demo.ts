@@ -1,4 +1,5 @@
 import {
+  defaultAiModel,
   improveErrorMessages,
   accountKey,
   conversationFromMessages,
@@ -880,6 +881,7 @@ const copyOf = (source: Draft, patch: Partial<Draft>): Draft => ({
 const demoAiStatus = {
   hasKey: false,
   secureStorage: false,
+  model: defaultAiModel,
   month: new Date().toISOString().slice(0, 7),
   improves: 0,
   estimatedCost: 0,
@@ -1577,6 +1579,7 @@ export const demoAPI: DesktopMailAPI = {
     throw new Error('Improve is not available in the demo.')
   },
   removeAiKey: async () => demoAiStatus,
+  setAiModel: async () => demoAiStatus,
   testAiKey: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
   improveDraft: async () => ({ ok: false, error: 'noKey', message: improveErrorMessages.noKey }),
   cancelImprove: async () => {},

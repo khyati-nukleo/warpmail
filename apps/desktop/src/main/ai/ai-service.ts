@@ -1,5 +1,9 @@
 import {
+  aiModelInfo,
+  aiModels,
+  defaultAiModel,
   improveErrorMessages,
+  type AiModel,
   type AiStatus,
   type AiTestResult,
   type AppEvent,
@@ -8,20 +12,39 @@ import {
   type ImproveStyle,
 } from '@inlark/core'
 import { JsonStore, decryptSecret, encryptSecret, secureStorageAvailable } from '../storage'
-import { claudePrices, createClaudeProvider } from './claude'
+import { createClaudeProvider } from './claude'
 import { ImproveError, type ImproveProvider, type ImproveUsage } from './provider'
 
 const keyFile = 'ai-key'
 const usageFile = 'ai-usage'
+const settingsFile = 'ai-settings'
 const maxLength = 20_000
 
 interface Usage extends ImproveUsage {
   month: string
   improves: number
+  /** Estimated USD, added up per request at the price of the model that ran it. */
+  cost: number
 }
 export interface AiServiceOptions {
-  createProvider?: (apiKey: string, onUsage: (usage: ImproveUsage) => void) => ImproveProvider
+  createProvider?: (
+    apiKey: string,
+    onUsage: (usage: ImproveUsage) => void,
+    model: AiModel,
+  ) => ImproveProvider
   now?: () => Date
+}
+
+/** Estimated USD for these tokens at the model's list prices. */
+function cost(tokens: ImproveUsage, model: AiModel): number {
+  const prices = aiModelInfo(model).prices
+  return (
+    (tokens.inputTokens * prices.input +
+      tokens.outputTokens * prices.output +
+      tokens.cacheWriteTokens * prices.cacheWrite +
+      tokens.cacheReadTokens * prices.cacheRead) /
+    1e6
+  )
 }
 
 const failure = (error: ImproveErrorKind) => ({
@@ -45,7 +68,8 @@ export class AiService {
     options: AiServiceOptions = {},
   ) {
     this.createProvider =
-      options.createProvider ?? ((apiKey, onUsage) => createClaudeProvider({ apiKey, onUsage }))
+      options.createProvider ??
+      ((apiKey, onUsage, model) => createClaudeProvider({ apiKey, onUsage, model }))
     this.now = options.now ?? (() => new Date())
   }
 
@@ -58,10 +82,17 @@ export class AiService {
     return {
       hasKey: (await this.storedKey()) !== undefined,
       secureStorage: secureStorageAvailable(),
+      model: await this.model(),
       month: usage.month,
       improves: usage.improves,
-      estimatedCost: this.cost(usage),
+      estimatedCost: Math.round(usage.cost * 100) / 100,
     }
+  }
+
+  setModel = async (model: AiModel): Promise<AiStatus> => {
+    if (!aiModels.some((info) => info.id === model)) throw new Error('That model isn’t offered.')
+    await this.store.write(settingsFile, { model })
+    return this.status()
   }
 
   setKey = async (key: string): Promise<AiStatus> => {
@@ -82,7 +113,7 @@ export class AiService {
     const apiKey = await this.apiKey()
     if (!apiKey) return failure('noKey')
     try {
-      await this.createProvider(apiKey, () => {}).check()
+      await this.createProvider(apiKey, () => {}, await this.model()).check()
       return { ok: true }
     } catch (error) {
       return failure(error instanceof ImproveError ? error.kind : 'failed')
@@ -108,9 +139,12 @@ export class AiService {
     const apiKey = await this.apiKey()
     if (signal.aborted) return done(failure('cancelled'))
     if (!apiKey) return done(failure('noKey'))
+    // The request keeps the model it started with, even if the choice changes meanwhile.
+    const model = await this.model()
+    if (signal.aborted) return done(failure('cancelled'))
     let result: ImproveResult
     try {
-      const provider = this.createProvider(apiKey, (usage) => this.addUsage(usage))
+      const provider = this.createProvider(apiKey, (usage) => this.addUsage(usage, model), model)
       let text = ''
       // Always consumed with for await so the provider's cleanup (usage report) runs.
       for await (const snapshot of provider.improve(input.text, input.style, signal)) {
@@ -150,6 +184,11 @@ export class AiService {
     }
   }
 
+  private async model(): Promise<AiModel> {
+    const stored = await this.store.read<{ model?: unknown }>(settingsFile, {})
+    return aiModels.find((info) => info.id === stored.model)?.id ?? defaultAiModel
+  }
+
   private month() {
     const date = this.now()
     return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0')
@@ -162,35 +201,33 @@ export class AiService {
       outputTokens: 0,
       cacheWriteTokens: 0,
       cacheReadTokens: 0,
+      cost: 0,
     }
     const stored = await this.store.read<Partial<Usage>>(usageFile, {})
     if (stored.month !== empty.month) return empty
     const count = (value: unknown) => (typeof value === 'number' && value > 0 ? value : 0)
-    return {
-      month: empty.month,
-      improves: count(stored.improves),
+    const tokens: ImproveUsage = {
       inputTokens: count(stored.inputTokens),
       outputTokens: count(stored.outputTokens),
       cacheWriteTokens: count(stored.cacheWriteTokens),
       cacheReadTokens: count(stored.cacheReadTokens),
     }
+    return {
+      month: empty.month,
+      improves: count(stored.improves),
+      ...tokens,
+      // Counts saved before the model could be chosen were all Claude Opus 5.5.
+      cost: typeof stored.cost === 'number' ? count(stored.cost) : cost(tokens, defaultAiModel),
+    }
   }
-  private cost(usage: Usage) {
-    const dollars =
-      (usage.inputTokens * claudePrices.input +
-        usage.outputTokens * claudePrices.output +
-        usage.cacheWriteTokens * claudePrices.cacheWrite +
-        usage.cacheReadTokens * claudePrices.cacheRead) /
-      1e6
-    return Math.round(dollars * 100) / 100
-  }
-  private addUsage(tokens: ImproveUsage) {
+  private addUsage(tokens: ImproveUsage, model: AiModel) {
     this.queueUsage((usage) => ({
       ...usage,
       inputTokens: usage.inputTokens + tokens.inputTokens,
       outputTokens: usage.outputTokens + tokens.outputTokens,
       cacheWriteTokens: usage.cacheWriteTokens + tokens.cacheWriteTokens,
       cacheReadTokens: usage.cacheReadTokens + tokens.cacheReadTokens,
+      cost: usage.cost + cost(tokens, model),
     }))
   }
   /** Updates run one after another. A failed write is ignored so it can't replace the result. */

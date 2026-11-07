@@ -110,6 +110,10 @@ Proposed by Claude in this design (open to change on review):
 13. Failures never touch the draft.
 14. The provider is swappable (from the 2026-11-03 roadmap call).
 
+Decided with Khyati after the first build:
+
+15. Settings → AI lets Khyati choose the model (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5 or Fable 5.1), to trade cost against writing quality. Opus 5.5 stays the default, and this month's cost counts each improve at the price of the model that ran it (2026-11-06).
+
 ## How it's built (for the builder)
 
 **Use the `claude-api` skill when building.** Use it to pick the current model, the request shape and streaming, and to confirm pricing and data-use terms. Don't rely on figures written here.
