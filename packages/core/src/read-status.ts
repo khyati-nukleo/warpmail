@@ -3,6 +3,25 @@ import { isAutomatedAddress } from './split'
 
 export const readStatusLimits = { recipients: 25 }
 
+export type FetchSource = 'apple' | 'google' | 'other'
+export interface FetchRecord {
+  at: number
+  source: FetchSource
+}
+export interface ReadStatusRequest {
+  messageId: string
+  recipients: string[]
+}
+export interface ReadStatusLookup {
+  recipients: { email: string; fetches: FetchRecord[] }[]
+}
+export interface ReadStatusInfo {
+  passwordSet: boolean
+  secureStorage: boolean
+  lastCollectedAt?: string
+  error?: string
+}
+
 export type TrackingBlock =
   | 'off'
   | 'notConfigured'

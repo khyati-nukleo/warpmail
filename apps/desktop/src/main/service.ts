@@ -56,6 +56,9 @@ import {
   stripPixels,
   trackingBlock,
   workerBase,
+  type ReadStatusInfo,
+  type ReadStatusLookup,
+  type ReadStatusRequest,
   type CopyOutcome,
   type SubmissionOutcome,
   type SubmissionTracking,
@@ -79,8 +82,10 @@ import {
   type TabCounts,
 } from './split-inbox'
 import { JsonStore, encryptSecret, decryptSecret, secureStorageAvailable } from './storage'
-import { imageCode, trackedMessageId } from './read-status/codes'
+import { imageCode, isTrackedMessageId, trackedMessageId } from './read-status/codes'
 import { ReadStatusSecret } from './read-status/secret'
+import { ReadStatusCollector } from './read-status/collector'
+import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
 
 export type Connection = {
@@ -211,6 +216,8 @@ export interface ServiceOptions {
   providers?: ProviderFactory
   discover?: (email: string) => Promise<DiscoveryResult>
   crypto?: () => CryptoTransport
+  /** Read status: replaces `fetch` when asking the Worker. */
+  readStatusFetch?: typeof fetch
 }
 /** Fingerprints shown to the user are computed here from the certificate itself, never taken on trust. */
 function verifiedCertificates(config: ConnectionConfig): ConnectionConfig {
@@ -279,6 +286,7 @@ export class MailService {
   private senderAvatars = new SenderAvatarResolver()
   readonly encryption: EncryptionService
   readonly readStatusSecret: ReadStatusSecret
+  private readonly collector: ReadStatusCollector
   private protectedLoaded = new Set<string>()
   private protectionTransition = false
   private draftWrites: Promise<unknown> = Promise.resolve()
@@ -288,6 +296,16 @@ export class MailService {
     private options: ServiceOptions = {},
   ) {
     this.readStatusSecret = new ReadStatusSecret(store)
+    this.collector = new ReadStatusCollector(
+      store,
+      () => {
+        const settings = this.settings.readStatus
+        const base = settings?.enabled === false ? undefined : workerBase(settings?.workerUrl)
+        return { base, password: this.readStatusSecret.get() }
+      },
+      () => this.emit({ type: 'readStatus' }),
+      { fetch: options.readStatusFetch },
+    )
     this.encryption = new EncryptionService(store, options.crypto, (accountId, email) =>
       this.guard(
         accountId,
@@ -367,6 +385,7 @@ export class MailService {
     await this.persistJournal()
     void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id)))
     this.timer = setInterval(() => void this.refresh(), 60_000)
+    this.collector.start() // Read status
   }
   /** Read status: a tracked send the app closed during settles from its copies, never resent. */
   private async recoverTracked(journal: Journal, draft?: Draft) {
@@ -2409,8 +2428,48 @@ export class MailService {
       // Re-enabling applies to future arrivals, including mail beyond the visible page.
       for (const baseline of this.authArrivals.values()) baseline.since = Date.now()
     }
+    const readStatusChanged =
+      JSON.stringify(this.settings.readStatus) !== JSON.stringify(settings.readStatus)
     this.settings = settings
+    if (readStatusChanged) void this.collector.collectNow() // Read status
     return settings
+  }
+  // Read status
+  readStatus = async (requests: ReadStatusRequest[]): Promise<(ReadStatusLookup | null)[]> => {
+    const password = this.readStatusSecret.get()
+    const on = this.settings.readStatus?.enabled !== false
+    if (!on || !password || !workerBase(this.settings.readStatus?.workerUrl))
+      return requests.map(() => null)
+    return requests.map(({ messageId, recipients }) => {
+      if (!isTrackedMessageId(password, messageId)) return null
+      const emails = [...new Set(recipients.map((r) => r.trim().toLowerCase()))]
+      return {
+        recipients: emails.map((email) => ({
+          email,
+          fetches: this.collector.fetches(imageCode(password, messageId, email)),
+        })),
+      }
+    })
+  }
+  readStatusInfo = async (): Promise<ReadStatusInfo> => {
+    const { lastCollectedAt, error } = this.collector.info()
+    return {
+      passwordSet: !!this.readStatusSecret.get(),
+      secureStorage: secureStorageAvailable(),
+      ...(lastCollectedAt && { lastCollectedAt }),
+      ...(error && { error }),
+    }
+  }
+  setReadStatusPassword = async (password: string | null): Promise<ReadStatusInfo> => {
+    await this.readStatusSecret.set(password)
+    this.emit({ type: 'readStatus' })
+    void this.collector.collectNow()
+    return this.readStatusInfo()
+  }
+  testReadStatus = async (workerUrl: string, password?: string) => {
+    const given = password || this.readStatusSecret.get()
+    if (!given) return { ok: false, message: 'Enter the password first.' }
+    return testWorker(workerUrl, given, this.options.readStatusFetch)
   }
   diagnostics = async () =>
     JSON.stringify(
@@ -2681,6 +2740,7 @@ export class MailService {
     this.disposed = true
     void this.encryption.lock()
     if (this.timer) clearInterval(this.timer)
+    this.collector.stop() // Read status
     if (this.indexingEmit) clearTimeout(this.indexingEmit)
     for (const provider of this.providers.values()) {
       provider.dispose()

@@ -125,7 +125,12 @@ async function fakeCopies(_settings: unknown, _from: string, copies: Copies, pro
 }
 async function start() {
   store = new JsonStore(directory)
-  service = new MailService(store, () => {}, { providers: factory })
+  service = new MailService(store, () => {}, {
+    providers: factory,
+    readStatusFetch: async () => {
+      throw new Error('offline')
+    },
+  })
   await service.init()
 }
 const connected = () => vi.waitFor(() => expect(service.accounts[0]?.status).toBe('connected'))

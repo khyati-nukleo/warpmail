@@ -355,4 +355,18 @@ export const ipcSchemas = {
     }),
   ]),
   cancelImprove: z.tuple([z.string().min(1).max(100)]),
+  // Read status
+  readStatus: z.tuple([
+    z
+      .array(
+        z.object({
+          messageId: z.string().min(1).max(998),
+          recipients: z.array(z.string().max(320)).max(600),
+        }),
+      )
+      .max(500),
+  ]),
+  readStatusInfo: z.tuple([]),
+  setReadStatusPassword: z.tuple([z.string().min(1).max(4096).nullable()]),
+  testReadStatus: z.tuple([z.string().max(2048), z.string().max(4096).optional()]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>

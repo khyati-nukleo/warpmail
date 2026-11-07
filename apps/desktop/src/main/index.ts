@@ -351,6 +351,11 @@ else {
         testAiKey: ai.testKey,
         improveDraft: ai.improve,
         cancelImprove: ai.cancel,
+        // Read status
+        readStatus: service.readStatus,
+        readStatusInfo: service.readStatusInfo,
+        setReadStatusPassword: service.setReadStatusPassword,
+        testReadStatus: service.testReadStatus,
       }
       for (const [name, schema] of Object.entries(ipcSchemas))
         ipcMain.handle('mail:' + name, async (event, ...args: unknown[]) => {

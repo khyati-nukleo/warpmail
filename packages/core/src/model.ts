@@ -1,6 +1,7 @@
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
+import type { ReadStatusInfo, ReadStatusLookup, ReadStatusRequest } from './read-status' // Read status
 export type View = 'inbox' | 'starred' | 'archive' | 'sent' | 'drafts' | 'junk' | 'trash' | 'all'
 export type ConnectionState = 'connecting' | 'connected' | 'offline' | 'authentication' | 'error'
 /** How an account's avatar looks: a generated marble pattern, or a picture the user chose. */
@@ -603,6 +604,7 @@ export type AppEvent =
   | { type: 'update'; status: UpdateStatus }
   // Improve draft
   | { type: 'improve'; id: string; text: string }
+  | { type: 'readStatus' } // Read status
 export type UpdateStatus =
   | { phase: 'idle' }
   | { phase: 'downloading'; version: string; percent: number }
@@ -805,5 +807,10 @@ export interface DesktopMailAPI {
   testAiKey(): Promise<AiTestResult>
   improveDraft(input: { id: string; text: string; style: ImproveStyle }): Promise<ImproveResult>
   cancelImprove(id: string): Promise<void>
+  // Read status
+  readStatus(requests: ReadStatusRequest[]): Promise<(ReadStatusLookup | null)[]>
+  readStatusInfo(): Promise<ReadStatusInfo>
+  setReadStatusPassword(password: string | null): Promise<ReadStatusInfo>
+  testReadStatus(workerUrl: string, password?: string): Promise<{ ok: boolean; message: string }>
   onEvent(listener: (event: AppEvent) => void): () => void
 }
