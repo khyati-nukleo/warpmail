@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Editor } from '@tiptap/react'
 import { improveErrorMessages, type ImproveResult, type ImproveStyle } from '@inlark/core'
 import { api } from '../api'
@@ -31,6 +31,7 @@ export function useImprove({
   protection: Protection
   locked: boolean
 }) {
+  const queryClient = useQueryClient()
   const status = useQuery({ queryKey: ['ai-status'], queryFn: () => api.aiStatus() })
   const hasKey = status.data?.hasKey
   const [session, dispatch] = useReducer(improveReducer, { phase: 'closed' })
@@ -71,6 +72,8 @@ export function useImprove({
       .then((result) => {
         if (pending.current === id) pending.current = undefined
         dispatch({ type: 'result', id, result })
+        // Main has recorded this request's use, so Settings → AI shows this month's count.
+        void queryClient.invalidateQueries({ queryKey: ['ai-status'] })
       })
   }
 
