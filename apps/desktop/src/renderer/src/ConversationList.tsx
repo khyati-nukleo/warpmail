@@ -13,14 +13,12 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Account, Conversation, MailAction, View } from '@inlark/core'
 import { Spinner } from '@inlark/ui'
 import { ConversationRow, senderLabel } from './ConversationRow'
-import { day } from './mail-date'
+import { listRows } from './list-rows'
 import { offersAction } from './view-actions'
 
 export type ConversationListHandle = {
   scrollToConversation: (key: string) => void
 }
-
-type Row = { group: string } | { conversation: Conversation }
 
 const ListConversationRow = memo(function ListConversationRow({
   conversation,
@@ -123,19 +121,7 @@ export function ConversationList({
     () => new Map(accounts.map((account) => [account.id, account])),
     [accounts],
   )
-  const rows = useMemo(() => {
-    const result: Row[] = []
-    let previous = ''
-    for (const conversation of conversations) {
-      const group = day(conversation.receivedAt)
-      if (group !== previous) {
-        result.push({ group })
-        previous = group
-      }
-      result.push({ conversation })
-    }
-    return result
-  }, [conversations])
+  const rows = useMemo(() => listRows(conversations), [conversations])
   const senderCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const conversation of conversations) {

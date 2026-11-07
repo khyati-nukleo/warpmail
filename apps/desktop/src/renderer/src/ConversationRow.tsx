@@ -9,6 +9,7 @@ import { HintIconButton } from './HintIconButton'
 import { actionLimit } from './account-limits'
 import { useShortcutText } from './shortcuts'
 import { ReadStatusEye } from './read-status/ReadStatusEye' // Read status
+import { ReminderLabel, useReminderSettings } from './reminders/ReminderLabel'
 
 export function senderLabel(conversation: Conversation) {
   return conversation.from.map((sender) => sender.name || sender.email.split('@')[0]).join(', ')
@@ -44,6 +45,7 @@ export function ConversationRow({
   onToggleRead: () => void
 }) {
   const keys = useShortcutText()
+  const reminderSettings = useReminderSettings()
   const moveLimit = actionLimit(a, 'move')
   const subject = c.subject || '(No subject)'
   // An unsent reply is flagged rather than counted, so it never reads as sent.
@@ -127,6 +129,7 @@ export function ConversationRow({
         {drafts > 0 && (
           <span className="row-draft shrink-0 text-draft text-[11px] font-semibold">Draft</span>
         )}
+        <ReminderLabel reminder={c.reminder} settings={reminderSettings} />
       </div>
       <div
         className={cn(
