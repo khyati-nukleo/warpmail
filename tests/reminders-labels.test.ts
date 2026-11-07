@@ -200,11 +200,23 @@ describe('Warpmail label folders', () => {
   it('shows the label in reminder facts at once, and clears it on remove', async () => {
     gmail()
     const p = await connected()
-    expect((await facts(p))[0]!.labels).toEqual({ noReminder: false, followUp: false })
+    expect((await facts(p))[0]!.labels).toEqual({
+      noReminder: false,
+      followUp: false,
+      returned: false,
+    })
     await p.labelMessage!(account, 'noReminder', 'question@example.org', true)
-    expect((await facts(p))[0]!.labels).toEqual({ noReminder: true, followUp: false })
+    expect((await facts(p))[0]!.labels).toEqual({
+      noReminder: true,
+      followUp: false,
+      returned: false,
+    })
     await p.labelMessage!(account, 'noReminder', 'question@example.org', false)
-    expect((await facts(p))[0]!.labels).toEqual({ noReminder: false, followUp: false })
+    expect((await facts(p))[0]!.labels).toEqual({
+      noReminder: false,
+      followUp: false,
+      returned: false,
+    })
     expect(server.box(noReminder).messages).toEqual([])
     // The email itself stays where it was.
     expect(server.box('INBOX').messages).toHaveLength(1)

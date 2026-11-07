@@ -25,7 +25,8 @@ const list = (values: readonly unknown[]) => JSON.stringify(values)
  * Gmail also lists drafts in All Mail, so an email with a copy in Drafts is unsent and never
  * the fact. Drafts are few: the list is read once from the index and probed per row.
  *
- * When the latest is mine, `own_ask` is my latest message since anyone else's that asks.
+ * When the latest is mine, `own_ask` is my latest message since anyone else's that asks, with
+ * whether it has the Returned label.
  */
 export function reminderFactsQuery(
   accountId: string,
@@ -93,11 +94,13 @@ export function reminderFactsQuery(
           AND i.mailbox_id = ${p(query.inboxId)} AND i.thread_id = l.t) AS in_inbox,
         ${labelled('n', query.labelIds.noReminder)} AS no_reminder,
         ${labelled('f', query.labelIds.followUp)} AS follow_up,
+        ${labelled('x', query.labelIds.returned)} AS returned,
         (SELECT c.asks FROM reminder_checks c
           WHERE c.account_id = ${p(accountId)} AND c.message_id = m.message_id) AS asks,
         CASE WHEN ${mine('m')} THEN (
           -- Newest first, the first that is my ask or anyone else's message decides.
-          SELECT CASE WHEN ${mine('o')} THEN json_array(o.message_id, o.received_at) END
+          SELECT CASE WHEN ${mine('o')} THEN json_array(o.message_id, o.received_at,
+            ${labelled('p', query.labelIds.returned, 'o')}) END
           FROM messages o WHERE ${counted('o')}
             AND (CASE WHEN ${mine('o')} THEN ${asking('o')}
               ELSE ${isPerson('o')} END)
@@ -117,14 +120,15 @@ export interface ReminderFactsRow {
   in_inbox: number
   no_reminder: number
   follow_up: number
+  returned: number
   asks: number | null
   own_ask: string | null
 }
 
 function ownAskOf(value: string | null): ReminderFacts['ownAsk'] {
   if (!value) return null
-  const [messageId, receivedAt] = JSON.parse(value) as [string, string]
-  return { messageId, receivedAt }
+  const [messageId, receivedAt, returned] = JSON.parse(value) as [string, string, number]
+  return { messageId, receivedAt, returned: returned === 1 }
 }
 
 export function toReminderFacts(row: ReminderFactsRow): ReminderFacts {
@@ -137,7 +141,11 @@ export function toReminderFacts(row: ReminderFactsRow): ReminderFacts {
       .map((a) => a.email.trim().toLowerCase())
       .filter(Boolean),
     inInbox: row.in_inbox === 1,
-    labels: { noReminder: row.no_reminder === 1, followUp: row.follow_up === 1 },
+    labels: {
+      noReminder: row.no_reminder === 1,
+      followUp: row.follow_up === 1,
+      returned: row.returned === 1,
+    },
     asks: row.asks === null ? null : row.asks === 1,
     ownAsk: ownAskOf(row.own_ask),
   }

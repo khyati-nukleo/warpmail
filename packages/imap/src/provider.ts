@@ -1073,7 +1073,7 @@ export class ImapProvider implements MailProvider {
     const inbox = boxes.find((b) => isInbox(b.path))
     if (!inbox) return []
     const labelIds: Partial<Record<ReminderLabel, string>> = {}
-    for (const label of ['noReminder', 'followUp'] as const) {
+    for (const label of ['noReminder', 'followUp', 'returned'] as const) {
       const box = boxes.find((b) => b.path === labelPath(label, b.delimiter))
       if (box) labelIds[label] = box.id
     }

@@ -6,6 +6,7 @@ import {
   type AppEvent,
   type MailProvider,
   type ReminderFacts,
+  type ReminderLabel,
   type Settings,
 } from '@inlark/core'
 import { ReminderEngine } from '../apps/desktop/src/main/reminders/engine'
@@ -33,7 +34,7 @@ const fact = (over: Partial<ReminderFacts> = {}): ReminderFacts => ({
   fromEmail: me,
   to: ['pat@example.com'],
   inInbox: true,
-  labels: { noReminder: false, followUp: false },
+  labels: { noReminder: false, followUp: false, returned: false },
   asks: true,
   ...over,
 })
@@ -90,8 +91,11 @@ function harness(
         .map((s) => ({ id: s.id, html: s.html, text: s.text })),
     ),
     requestSync: vi.fn(),
-    labelMessage: vi.fn(async (_a: Account, label: 'noReminder' | 'followUp', id: string, add) => {
-      for (const f of facts) if (f.messageId === id) f.labels = { ...f.labels, [label]: add }
+    labelMessage: vi.fn(async (_a: Account, label: ReminderLabel, id: string, add) => {
+      for (const f of facts) {
+        if (f.messageId === id) f.labels = { ...f.labels, [label]: add }
+        if (f.ownAsk?.messageId === id && label === 'returned') f.ownAsk.returned = add
+      }
     }),
   } as unknown as Harness['provider']
   const returned = vi.fn(async (targets: { accountId: string; threadId: string }[]) => ({
@@ -307,6 +311,48 @@ describe('ReminderEngine', () => {
     h.engine.invalidate('a1')
     await settle()
     expect(h.returned).toHaveBeenCalledTimes(2)
+  })
+  it('labels the ask Returned in Gmail once it moved back', async () => {
+    const h = make({
+      facts: [
+        fact({
+          messageId: 'm2@example.com',
+          asks: false,
+          inInbox: false,
+          ownAsk: { messageId: 'm1@example.com', receivedAt: received, returned: false },
+        }),
+      ],
+      now: addWorkingDays(receivedMs, 4),
+    })
+    h.engine.start()
+    await settle()
+    expect(h.returned).toHaveBeenCalledTimes(1)
+    expect(h.provider.labelMessage).toHaveBeenCalledWith(
+      account,
+      'returned',
+      'm1@example.com',
+      true,
+    )
+  })
+  it('skips a follow-up the other laptop already returned, by its Returned label', async () => {
+    const h = make({
+      facts: [
+        fact({ inInbox: false, labels: { noReminder: false, followUp: false, returned: true } }),
+        fact({
+          threadId: 't2',
+          messageId: 'm2@example.com',
+          asks: false,
+          inInbox: false,
+          ownAsk: { messageId: 'm0@example.com', receivedAt: received, returned: true },
+        }),
+      ],
+      now: addWorkingDays(receivedMs, 4),
+    })
+    h.engine.start()
+    await settle()
+    // Still listed as due; archiving it after it came back said it was handled.
+    expect(await h.engine.due('a1')).toHaveLength(2)
+    expect(h.returned).not.toHaveBeenCalled()
   })
   it('returns nothing until the provider has synced in full since connecting', async () => {
     const h = make({ facts: [fact({ inInbox: false })], now: addWorkingDays(receivedMs, 4) })

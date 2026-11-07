@@ -52,8 +52,16 @@ export interface SentInput {
   html: string
   text: string
 }
-/** `askId`: a follow-up's ask, which a later note of mine that asks nothing doesn't change. */
-type Derived = { reminder: Reminder; inInbox: boolean; askId?: string }[]
+/**
+ * `ask`: a follow-up's ask, which a later note of mine that asks nothing doesn't change, and
+ * whether its Returned label stops a return: it does unless a snooze set the due time since.
+ */
+type Derived = {
+  reminder: Reminder
+  inInbox: boolean
+  ask?: { messageId: string; returned: boolean; skip: boolean }
+}[]
+type Waiting = ReturnTarget & { key: string; ask?: { messageId: string; returned: boolean } }
 type Target = { account: Account; provider: MailProvider }
 
 const debounceMs = 500
@@ -290,8 +298,13 @@ export class ReminderEngine {
       const snooze = snoozes.find((s) => s.threadId === f.threadId && s.messageId === f.messageId)
       const reminder = deriveReminder(f, { own, settings, snooze })
       if (!reminder) return []
-      const askId = reminder.kind === 'followUp' ? followUpAsk(f)?.messageId : undefined
-      return [{ reminder, inInbox: f.inInbox, askId }]
+      const found = reminder.kind === 'followUp' ? followUpAsk(f) : null
+      if (!found) return [{ reminder, inInbox: f.inInbox }]
+      // The label is shared and the snooze is not: a snooze that ends may bring it back again.
+      const snoozed =
+        !!snooze && reminder.dueMs > (deriveReminder(f, { own, settings })?.dueMs ?? 0)
+      const ask = { ...found, skip: found.returned && !snoozed }
+      return [{ reminder, inInbox: f.inInbox, ask }]
     })
   }
 
@@ -308,7 +321,7 @@ export class ReminderEngine {
   }
 
   private async recompute(ids: string[]) {
-    const waiting: (ReturnTarget & { key: string })[] = []
+    const waiting: Waiting[] = []
     const now = this.now()
     for (const id of ids) {
       if (this.disposed) return
@@ -324,18 +337,16 @@ export class ReminderEngine {
       // Showing reminders from a stale index is fine; moving mail on it is not. One waits for a
       // full sync that started after it came due, which announces itself and recomputes.
       let held = false
-      for (const { reminder, inInbox, askId } of derived) {
-        if (reminder.kind !== 'followUp' || inInbox || reminder.dueMs > now) continue
+      for (const { reminder, inInbox, ask } of derived) {
+        if (reminder.kind !== 'followUp' || inInbox || reminder.dueMs > now || ask?.skip) continue
         if (target.provider.readyForReminders?.(reminder.dueMs) === false) {
           held = true
           continue
         }
         // Once per ask and due time: a snooze that ends later may bring it back again.
-        waiting.push({
-          accountId: id,
-          threadId: reminder.threadId,
-          key: [id, reminder.threadId, askId ?? reminder.messageId, reminder.dueMs].join('|'),
-        })
+        const askId = ask?.messageId ?? reminder.messageId
+        const key = [id, reminder.threadId, askId, reminder.dueMs].join('|')
+        waiting.push({ accountId: id, threadId: reminder.threadId, key, ask })
       }
       if (held) target.provider.awaitFullSync?.()
     }
@@ -426,8 +437,11 @@ export class ReminderEngine {
     return read
   }
 
-  /** Brings archived due follow-ups back to the inbox in one move, once per email. */
-  private async returnDue(waiting: (ReturnTarget & { key: string })[]) {
+  /**
+   * Brings archived due follow-ups back to the inbox in one move, once per ask: kept here, and
+   * as a Returned label on the ask in Gmail, which the other laptop reads.
+   */
+  private async returnDue(waiting: Waiting[]) {
     const stored = await this.deps.store.read<unknown>(returnedKey, [])
     const keys = Array.isArray(stored)
       ? stored.filter((k): k is string => typeof k === 'string')
@@ -452,6 +466,18 @@ export class ReminderEngine {
         returnedKey,
         [...keys, ...done.map((w) => w.key)].slice(-returnedLimit),
       )
+    // After the move: a label without it would stop the return on both laptops.
+    for (const { accountId, ask } of done)
+      if (ask && !ask.returned)
+        this.labelsWaiting.push({
+          accountId,
+          label: 'returned',
+          messageId: ask.messageId,
+          until: this.now() + labelWaitMs,
+          offline: 0,
+        })
+    this.labelsWaiting = this.labelsWaiting.slice(-labelsWaitingLimit)
+    for (const accountId of new Set(done.map((w) => w.accountId))) await this.saveLabels(accountId)
     if (result.moved)
       this.deps.emit({
         type: 'remindersReturned',

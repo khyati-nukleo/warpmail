@@ -25,7 +25,7 @@ const facts = (over: Partial<ReminderFacts> = {}): ReminderFacts => ({
   fromEmail: me,
   to: ['pat@example.com'],
   inInbox: true,
-  labels: { noReminder: false, followUp: false },
+  labels: { noReminder: false, followUp: false, returned: false },
   asks: true,
   ...over,
 })
@@ -48,10 +48,13 @@ describe('deriveReminder', () => {
   it('nothing when the ask-check never ran', () => expect(derive(facts({ asks: null }))).toBeNull())
   it('follow-up label forces a follow-up', () =>
     expect(
-      derive(facts({ asks: false, labels: { noReminder: false, followUp: true } }))?.kind,
+      derive(facts({ asks: false, labels: { noReminder: false, followUp: true, returned: false } }))
+        ?.kind,
     ).toBe('followUp'))
   it('no-reminder label wins', () =>
-    expect(derive(facts({ labels: { noReminder: true, followUp: false } }))).toBeNull())
+    expect(
+      derive(facts({ labels: { noReminder: true, followUp: false, returned: false } })),
+    ).toBeNull())
   it('reply when a person wrote to me', () =>
     expect(derive(incoming())).toMatchObject({
       kind: 'reply',
@@ -98,7 +101,7 @@ describe('deriveReminder', () => {
       derive(
         facts({
           asks: false,
-          labels: { noReminder: true, followUp: false },
+          labels: { noReminder: true, followUp: false, returned: false },
           ownAsk: { messageId: 'm0@example.com', receivedAt: earlier },
         }),
       ),
@@ -175,11 +178,25 @@ describe('followUpAsk', () => {
     expect(followUpAsk(facts({ ownAsk: earlier }))).toEqual({
       messageId: 'm1@example.com',
       receivedAt: received,
+      returned: false,
     })
     expect(
-      followUpAsk(facts({ asks: false, labels: { noReminder: false, followUp: true } }))?.messageId,
+      followUpAsk(
+        facts({ asks: false, labels: { noReminder: false, followUp: true, returned: false } }),
+      )?.messageId,
     ).toBe('m1@example.com')
-    expect(followUpAsk(facts({ asks: false, ownAsk: earlier }))).toEqual(earlier)
+    expect(followUpAsk(facts({ asks: false, ownAsk: earlier }))).toEqual({
+      ...earlier,
+      returned: false,
+    })
+    // Its Returned label, on whichever message is the ask.
+    expect(
+      followUpAsk(facts({ labels: { noReminder: false, followUp: false, returned: true } }))
+        ?.returned,
+    ).toBe(true)
+    expect(
+      followUpAsk(facts({ asks: false, ownAsk: { ...earlier, returned: true } }))?.returned,
+    ).toBe(true)
     expect(followUpAsk(facts({ asks: false, ownAsk: null }))).toBeNull()
   })
 })

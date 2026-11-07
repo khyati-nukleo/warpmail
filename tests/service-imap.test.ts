@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { X509Certificate } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('electron', () => ({
@@ -1091,6 +1091,40 @@ describe('IMAP reading', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+  it('returns a follow-up once across two laptops, by a Returned label in Gmail', async () => {
+    const ask = {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    }
+    server.deliver('Archive', ask)
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    ;(service as any).reminders.invalidate(accountId)
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+    await vi.waitFor(() => expect(server.boxes.get('Warpmail/Returned')?.messages).toHaveLength(1))
+    // Hidden like the other reminder labels.
+    expect((await service.mailboxes(accountId)).map((b) => b.name)).not.toContain('Returned')
+    // She archives it: handled.
+    const { id } = (await service.query({ view: 'inbox' })).items[0]!
+    await service.mutate({ targets: [{ accountId, threadId: id }], action: 'archive' })
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    // The other laptop, closed when it fell due: its own index and nothing stored locally.
+    service.dispose()
+    await new Promise((r) => setTimeout(r, 20))
+    for (const file of await readdir(directory))
+      if (file.startsWith('imap-connection.sqlite')) await rm(join(directory, file))
+    await store.write('reminders-returned', [])
+    await restart()
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    ;(service as any).reminders.invalidate(accountId)
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
   })
   it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
     server.deliver('INBOX', {

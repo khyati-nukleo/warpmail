@@ -3,10 +3,12 @@ import { isAutomatedAddress } from './split'
 import { addWorkingDays } from './working-days'
 
 export type ReminderKind = 'followUp' | 'reply'
-export type ReminderLabel = 'noReminder' | 'followUp'
+/** `returned`: on an ask whose follow-up came back to the inbox, so it does once on any device. */
+export type ReminderLabel = 'noReminder' | 'followUp' | 'returned'
 export const reminderLabelNames: Record<ReminderLabel, string> = {
   noReminder: 'No reminder',
   followUp: 'Follow up',
+  returned: 'Returned',
 }
 export const reminderLabelRoot = 'Warpmail'
 export const reminderLookbackDays = 30
@@ -18,14 +20,15 @@ export interface ReminderFacts {
   fromEmail: string | null // lowercase
   to: string[] // lowercase addresses on its To line
   inInbox: boolean // any message of the thread is in INBOX
-  labels: { noReminder: boolean; followUp: boolean } // a copy with this Message-ID is in the label folder
+  /** A copy with this Message-ID is in the label folder. */
+  labels: { noReminder: boolean; followUp: boolean; returned: boolean }
   asks: boolean | null // stored ask-check of this message; null when never checked
   /**
    * My latest message since anyone else last wrote that asks (stored ask-check or Follow up
    * label, and no No reminder label); it may be this message or an earlier one. Undefined when
    * the provider doesn't work it out: then this message alone decides.
    */
-  ownAsk?: { messageId: string; receivedAt: string } | null
+  ownAsk?: { messageId: string; receivedAt: string; returned?: boolean } | null
 }
 
 /** The email a reminder is about, as dismissing and snoozing name it. */
@@ -80,10 +83,14 @@ export function reminderSettingsOf(settings: Pick<Settings, 'reminders'>): Remin
 /** What a follow-up counts from: this message if it asks or has Follow up, else my earlier ask. */
 export function followUpAsk(
   facts: ReminderFacts,
-): { messageId: string; receivedAt: string } | null {
+): { messageId: string; receivedAt: string; returned: boolean } | null {
   if (facts.messageId && (facts.labels.followUp || facts.asks === true))
-    return { messageId: facts.messageId, receivedAt: facts.receivedAt }
-  return facts.ownAsk ?? null
+    return {
+      messageId: facts.messageId,
+      receivedAt: facts.receivedAt,
+      returned: facts.labels.returned,
+    }
+  return facts.ownAsk ? { ...facts.ownAsk, returned: facts.ownAsk.returned ?? false } : null
 }
 
 export function deriveReminder(

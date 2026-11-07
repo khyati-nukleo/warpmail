@@ -25,6 +25,7 @@ let boxes: {
   noReminder: string
   followUp: string
   drafts: string
+  returned: string
 }
 
 const folder = (path: string, specialUse: string | null = null): FolderListing => ({
@@ -79,7 +80,11 @@ function facts(extra: Partial<ReminderFactsQuery> = {}) {
   return index.reminderFacts('a', {
     inboxId: boxes.inbox,
     mailboxIds: [boxes.inbox, boxes.all, boxes.sent],
-    labelIds: { noReminder: boxes.noReminder, followUp: boxes.followUp },
+    labelIds: {
+      noReminder: boxes.noReminder,
+      followUp: boxes.followUp,
+      returned: boxes.returned,
+    },
     important,
     sinceMs: Date.parse(hour(0)),
     draftsId: boxes.drafts,
@@ -94,14 +99,18 @@ async function threadOf(uid: number, mailboxId = boxes.inbox) {
 
 async function open() {
   index = openInProcessIndex(path)
-  const [inbox, all, sentBox, noReminder, followUp, drafts] = await index.syncMailboxes('a', [
-    folder('INBOX'),
-    folder('[Gmail]/All Mail', '\\All'),
-    folder('[Gmail]/Sent Mail', '\\Sent'),
-    folder('Warpmail/No reminder'),
-    folder('Warpmail/Follow up'),
-    folder('[Gmail]/Drafts', '\\Drafts'),
-  ])
+  const [inbox, all, sentBox, noReminder, followUp, drafts, returned] = await index.syncMailboxes(
+    'a',
+    [
+      folder('INBOX'),
+      folder('[Gmail]/All Mail', '\\All'),
+      folder('[Gmail]/Sent Mail', '\\Sent'),
+      folder('Warpmail/No reminder'),
+      folder('Warpmail/Follow up'),
+      folder('[Gmail]/Drafts', '\\Drafts'),
+      folder('Warpmail/Returned'),
+    ],
+  )
   boxes = {
     inbox: inbox!.id,
     all: all!.id,
@@ -109,6 +118,7 @@ async function open() {
     noReminder: noReminder!.id,
     followUp: followUp!.id,
     drafts: drafts!.id,
+    returned: returned!.id,
   }
 }
 
@@ -133,7 +143,7 @@ describe('reminder facts', () => {
         fromEmail: 'ada@example.com',
         to: ['me@example.com'],
         inInbox: true,
-        labels: { noReminder: false, followUp: false },
+        labels: { noReminder: false, followUp: false, returned: false },
         asks: null,
         ownAsk: null,
       },
@@ -225,13 +235,42 @@ describe('reminder facts', () => {
     expect((await facts({ own }))[0]!.ownAsk).toEqual({
       messageId: 'm2@example.com',
       receivedAt: hour(2),
+      returned: false,
     })
     // A Follow up label makes my latest message the ask.
     await index.upsertMessages('a', [message(boxes.followUp, 4, { from: me, to: ada })])
     expect((await facts({ own }))[0]!.ownAsk).toEqual({
       messageId: 'm4@example.com',
       receivedAt: hour(4),
+      returned: false,
     })
+  })
+
+  it('reports a Returned label on my ask, whether my latest message or an earlier one', async () => {
+    await index.upsertMessages('a', [
+      message(boxes.inbox, 1),
+      sent(2, { inReplyTo: ['m1@example.com'] }),
+      sent(3, { inReplyTo: ['m2@example.com'] }),
+    ])
+    await index.setAskChecks('a', [
+      { messageId: 'm2@example.com', asks: true },
+      { messageId: 'm3@example.com', asks: false },
+    ])
+    const own = ['me@example.com']
+    expect((await facts({ own }))[0]).toMatchObject({
+      messageId: 'm3@example.com',
+      labels: { returned: false },
+      ownAsk: { messageId: 'm2@example.com', returned: false },
+    })
+    // The other laptop brought the ask back to the inbox.
+    await index.upsertMessages('a', [message(boxes.returned, 2, { from: me, to: ada })])
+    expect((await facts({ own }))[0]).toMatchObject({
+      messageId: 'm3@example.com',
+      labels: { returned: false },
+      ownAsk: { messageId: 'm2@example.com', returned: true },
+    })
+    await index.upsertMessages('a', [message(boxes.returned, 3, { from: me, to: ada })])
+    expect((await facts({ own }))[0]!.labels.returned).toBe(true)
   })
 
   it('drops my ask once someone else replied after it', async () => {
@@ -282,7 +321,7 @@ describe('reminder facts', () => {
       expect.objectContaining({
         messageId: 'm1@example.com',
         receivedAt: hour(1),
-        labels: { noReminder: true, followUp: false },
+        labels: { noReminder: true, followUp: false, returned: false },
       }),
     ])
   })
@@ -455,7 +494,11 @@ describe('schema v5', () => {
       const query = reminderFactsQuery('a', {
         inboxId: boxes.inbox,
         mailboxIds: [boxes.inbox, boxes.all, boxes.sent],
-        labelIds: { noReminder: boxes.noReminder, followUp: boxes.followUp },
+        labelIds: {
+          noReminder: boxes.noReminder,
+          followUp: boxes.followUp,
+          returned: boxes.returned,
+        },
         important: {
           kind: 'important',
           always: [{ address: 'boss@example.com', words: ['urgent'] }],
