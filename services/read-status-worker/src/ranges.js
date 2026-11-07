@@ -5,8 +5,8 @@
 
 /**
  * Apple (AS714 / AS6185). Hand-kept: 17.0.0.0/8 is Apple's IPv4 block
- * (ARIN, NetRange 17.0.0.0 - 17.255.255.255); the IPv6 prefixes are from Apple's
- * published allocations (iCloud Private Relay / Mail Privacy Protection). Checked 2026-11-06.
+ * (ARIN, NetRange 17.0.0.0 - 17.255.255.255); the IPv6 prefixes are Apple's own
+ * allocations (AS714). Checked 2026-11-06.
  * @type {string[]}
  */
 export const appleRanges = ['17.0.0.0/8', '2620:149::/32', '2a01:b740::/32']
