@@ -25,6 +25,7 @@ export class ReadStatusCollector {
   private ready: Promise<void>
   private timer?: ReturnType<typeof setTimeout>
   private running?: Promise<void>
+  private rerun = false
   private started = false
   private failures = 0
   private lastCollectedAt?: string
@@ -64,8 +65,18 @@ export class ReadStatusCollector {
     this.timer = undefined
   }
 
+  /** Joins a run in progress, which then runs once more so new settings take effect. */
   collectNow(): Promise<void> {
-    this.running ??= this.collect().finally(() => {
+    if (this.running) {
+      this.rerun = true
+      return this.running
+    }
+    this.running = (async () => {
+      do {
+        this.rerun = false
+        await this.collect()
+      } while (this.rerun)
+    })().finally(() => {
       this.running = undefined
     })
     return this.running

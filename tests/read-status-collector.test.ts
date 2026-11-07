@@ -176,6 +176,37 @@ describe('collector', () => {
     expect(calls()).toBe(9)
   })
 
+  it('a collect asked for during a run runs again with the new settings', async () => {
+    let current = 'wrong-password'
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const good = worker([rec(1, 'a')])
+    const seen: string[] = []
+    const impl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get('Authorization')!
+      seen.push(auth)
+      if (auth !== 'Bearer ' + password) {
+        await held
+        return new Response('{"error":"unauthorized"}', { status: 401 })
+      }
+      return good.impl(input, init)
+    }) as unknown as typeof fetch
+    const { collector } = make(impl, () => ({ base, password: current }))
+    const first = collector.collectNow()
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+    // The password is fixed while the first fetch is still out.
+    current = password
+    const second = collector.collectNow()
+    release()
+    await Promise.all([first, second])
+    expect(seen).toEqual(['Bearer wrong-password', 'Bearer ' + password])
+    expect(collector.info().error).toBeUndefined()
+    expect(collector.fetches('a')).toHaveLength(1)
+    // Once settled, a single call runs once.
+    await collector.collectNow()
+    expect(seen).toHaveLength(3)
+  })
+
   it('reports a wrong password and junk answers plainly', async () => {
     const answers = [
       [new Response('{"error":"unauthorized"}', { status: 401 }), wrongPassword],
@@ -220,19 +251,25 @@ describe('collector', () => {
     expect(impl).toHaveBeenCalledTimes(1)
   })
 
-  it('never runs two collections at once', async () => {
+  it('never runs two collections at once; calls during a run share one rerun', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => (release = resolve))
+    let active = 0
+    let most = 0
     const impl = vi.fn(async () => {
+      most = Math.max(most, ++active)
       await gate
+      active--
       return page([])
     }) as unknown as typeof fetch
     const { collector } = make(impl)
     const first = collector.collectNow()
     const second = collector.collectNow()
+    const third = collector.collectNow()
     release()
-    await Promise.all([first, second])
-    expect(impl).toHaveBeenCalledTimes(1)
+    await Promise.all([first, second, third])
+    expect(most).toBe(1)
+    expect(impl).toHaveBeenCalledTimes(2)
   })
 })
 
