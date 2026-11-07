@@ -10,6 +10,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defaultReminderSettings, type Conversation } from '../packages/core/src'
 
 vi.stubGlobal('location', { search: '', protocol: 'file:' })
+// Read status's eye reads the bootstrap on its own; only the Reminders label is checked here.
+vi.mock('../apps/desktop/src/renderer/src/read-status/ReadStatusEye', () => ({
+  ReadStatusEye: () => null,
+}))
 // React's act() environment, so updates flush inside act.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
