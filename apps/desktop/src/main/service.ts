@@ -2446,7 +2446,10 @@ export class MailService {
       return requests.map(() => null)
     return requests.map(({ messageId, recipients }) => {
       if (!isTrackedMessageId(password, messageId)) return null
-      const emails = [...new Set(recipients.map((r) => r.trim().toLowerCase()))]
+      // Automated recipients got no image, so they get no status row.
+      const emails = [...new Set(recipients.map((r) => r.trim().toLowerCase()))].filter(
+        (email) => !isAutomatedAddress(email),
+      )
       return {
         recipients: emails.map((email) => ({
           email,

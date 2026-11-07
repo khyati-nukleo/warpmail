@@ -320,7 +320,8 @@ describe('service lookups', () => {
         expect((await service.readStatusInfo()).lastCollectedAt).toBeTruthy(),
       )
       const result = await service.readStatus([
-        { messageId: tracked, recipients: ['Alex@Example.org', sam] },
+        // An automated recipient gets no image, so it gets no status either.
+        { messageId: tracked, recipients: ['Alex@Example.org', 'noreply@example.org', sam] },
         { messageId: 'plain@example.com', recipients: [alex] },
       ])
       expect(result).toEqual([
