@@ -667,6 +667,8 @@ export interface MailProvider {
     messageId: string,
     add: boolean,
   ): Promise<void>
+  /** Asks for a sync soon, such as when an email just filed isn't indexed yet. */
+  requestSync?(scope: 'inbox' | 'all'): void
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }

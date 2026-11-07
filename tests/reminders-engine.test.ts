@@ -89,6 +89,7 @@ function harness(
         .filter((s) => ids.includes(s.id) && (s.html !== undefined || s.text !== undefined))
         .map((s) => ({ id: s.id, html: s.html, text: s.text })),
     ),
+    requestSync: vi.fn(),
     labelMessage: vi.fn(async (_a: Account, label: 'noReminder' | 'followUp', id: string, add) => {
       for (const f of facts) if (f.messageId === id) f.labels = { ...f.labels, [label]: add }
     }),
@@ -442,9 +443,60 @@ describe('ReminderEngine choices saved as labels', () => {
     await settle()
     expect(h.provider.labelMessage).toHaveBeenCalledTimes(2)
   })
-  it('stops retrying a label after a few changes', async () => {
+  it('keeps waiting through unrelated changes until the Sent copy is indexed', async () => {
+    const h = make()
+    let indexed = false
+    const label = h.provider.labelMessage.getMockImplementation()!
+    h.provider.labelMessage.mockImplementation(async (...args: unknown[]) => {
+      if (!indexed) throw new ProviderError('notFound', 'Gone.')
+      return label(...args)
+    })
+    h.engine.start()
+    await settle()
+    await h.engine.afterSend(sent({ followUp: true }))
+    // Not indexed yet: it asks for a sync instead of waiting for the next one.
+    expect(h.provider.requestSync).toHaveBeenCalledWith('all')
+    for (let i = 0; i < 5; i++) {
+      h.clock.now += 60_000
+      h.engine.invalidate('a1')
+      await settle()
+    }
+    expect(h.provider.requestSync).toHaveBeenCalledTimes(1)
+    indexed = true
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(7)
+    expect(h.provider.labelMessage).toHaveBeenLastCalledWith(
+      account,
+      'followUp',
+      'm1@example.com',
+      true,
+    )
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(7)
+  })
+  it('gives up on a label ten minutes after the send', async () => {
     const h = make()
     h.provider.labelMessage.mockRejectedValue(new ProviderError('notFound', 'Gone.'))
+    h.engine.start()
+    await settle()
+    await h.engine.afterSend(sent({ followUp: true }))
+    h.clock.now += 10 * 60_000
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(2)
+    h.clock.now += 1
+    for (let i = 0; i < 3; i++) {
+      h.engine.invalidate('a1')
+      await settle()
+    }
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(2)
+    expect(h.log).toHaveBeenCalledWith('reminders-label-expired')
+  })
+  it('stops retrying a label after five tries offline', async () => {
+    const h = make()
+    h.provider.labelMessage.mockRejectedValue(new ProviderError('network', 'Offline.'))
     h.engine.start()
     await settle()
     await h.engine.afterSend(sent({ followUp: true }))
@@ -452,7 +504,21 @@ describe('ReminderEngine choices saved as labels', () => {
       h.engine.invalidate('a1')
       await settle()
     }
-    expect(h.provider.labelMessage.mock.calls.length).toBeLessThanOrEqual(6)
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(5)
+  })
+  it('drops waiting labels once reminders are turned off', async () => {
+    const h = make()
+    h.provider.labelMessage.mockRejectedValueOnce(new ProviderError('notFound', 'Gone.'))
+    h.engine.start()
+    await settle()
+    await h.engine.afterSend(sent({ followUp: true }))
+    h.settings.reminders = { enabled: false }
+    h.engine.invalidate('a1')
+    await settle()
+    h.settings.reminders = {}
+    h.engine.invalidate('a1')
+    await settle()
+    expect(h.provider.labelMessage).toHaveBeenCalledTimes(1)
   })
   it('dismisses a reminder with a label, and restore brings it back', async () => {
     const h = make({ facts: [incoming()], now: addWorkingDays(receivedMs, 2) })

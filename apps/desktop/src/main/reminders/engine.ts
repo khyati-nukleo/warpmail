@@ -63,8 +63,10 @@ const scanLimit = 25
 const returnedKey = 'reminders-returned'
 const returnedLimit = 500
 const dayMs = 86_400_000
-/** Recomputes a label waits through for its Sent copy to be indexed, before giving up. */
-const labelTries = 5
+/** How long a switch label waits for its Sent copy to be indexed. */
+const labelWaitMs = 10 * 60_000
+/** Tries while offline before giving up; tries before the copy is indexed are local and free. */
+const labelOfflineTries = 5
 const labelsWaitingLimit = 100
 
 const background = { background: true }
@@ -99,7 +101,9 @@ export class ReminderEngine {
     accountId: string
     label: ReminderLabel
     messageId: string
-    tries: number
+    until: number
+    offline: number
+    syncAsked?: boolean
   }[] = []
   private labelling = new Set<string>()
 
@@ -150,6 +154,8 @@ export class ReminderEngine {
    * it differs from that guess. Never throws.
    */
   async afterSend(input: SentInput): Promise<void> {
+    // Nothing runs inside the send flow's own steps.
+    await Promise.resolve()
     try {
       if (input.sentCopy !== 'filed' && input.sentCopy !== 'server') return
       const target = this.target(input.accountId)
@@ -163,7 +169,8 @@ export class ReminderEngine {
         accountId: account.id,
         label: input.followUp ? 'followUp' : 'noReminder',
         messageId: input.messageId,
-        tries: 0,
+        until: this.now() + labelWaitMs,
+        offline: 0,
       })
       this.labelsWaiting = this.labelsWaiting.slice(-labelsWaitingLimit)
       await this.saveLabels(account.id)
@@ -176,25 +183,38 @@ export class ReminderEngine {
   private async saveLabels(accountId: string) {
     if (this.labelling.has(accountId)) return
     this.labelling.add(accountId)
+    const drop = (waiting: (typeof this.labelsWaiting)[number]) =>
+      (this.labelsWaiting = this.labelsWaiting.filter((w) => w !== waiting))
     try {
       for (const waiting of this.labelsWaiting.filter((w) => w.accountId === accountId)) {
         const target = this.target(accountId)
-        if (!target?.provider.labelMessage) return
-        waiting.tries++
+        if (!target?.provider.labelMessage) return this.dropLabels(accountId)
+        if (this.now() > waiting.until) {
+          drop(waiting)
+          this.log('reminders-label-expired')
+          continue
+        }
         try {
+          // Skips service.guard on purpose: a background retry never marks the account offline.
           await target.provider.labelMessage(target.account, waiting.label, waiting.messageId, true)
-          this.labelsWaiting = this.labelsWaiting.filter((w) => w !== waiting)
+          drop(waiting)
           this.invalidate(accountId)
         } catch (error) {
           this.log('reminders-label-failed')
-          const later = isProviderError(error, 'notFound', ...connectionErrorCodes)
-          if (!later || waiting.tries >= labelTries)
-            this.labelsWaiting = this.labelsWaiting.filter((w) => w !== waiting)
+          if (isProviderError(error, 'notFound')) {
+            // Once: each sync announces a change, which retries this again.
+            if (!waiting.syncAsked) target.provider.requestSync?.('all')
+            waiting.syncAsked = true
+          } else if (!offline(error) || ++waiting.offline >= labelOfflineTries) drop(waiting)
         }
       }
     } finally {
       this.labelling.delete(accountId)
     }
+  }
+
+  private dropLabels(accountId: string) {
+    this.labelsWaiting = this.labelsWaiting.filter((w) => w.accountId !== accountId)
   }
 
   /** Hides a reminder on every device: a `No reminder` label on its email. */
@@ -288,7 +308,10 @@ export class ReminderEngine {
     for (const id of ids) {
       if (this.disposed) return
       const target = this.target(id)
-      if (!target) continue
+      if (!target) {
+        this.dropLabels(id)
+        continue
+      }
       if (this.labelsWaiting.some((w) => w.accountId === id)) await this.saveLabels(id)
       const derived = await this.derived(id)
       // In the background: the inbox never waits for bodies to be read.
