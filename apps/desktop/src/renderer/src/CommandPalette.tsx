@@ -132,7 +132,7 @@ export function CommandPalette({
           autoFocus
           placeholder={onSearch ? 'Type a command or search your mail…' : 'Type a command…'}
           value={value}
-          aria-label="Search commands or mail"
+          aria-label={onSearch ? 'Search commands or mail' : 'Search commands'}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={open}
@@ -182,7 +182,7 @@ export function CommandPalette({
         )}
         id={listId}
         role="listbox"
-        aria-label="Commands and mail search"
+        aria-label={onSearch ? 'Commands and mail search' : 'Commands'}
         ref={results}
       >
         {options.map((c, i) => (
