@@ -230,6 +230,9 @@ export function App() {
   const sendInBackground = (draft: Draft) => {
     forgetNotSent(draft.id)
     setOutbox((current) => new Set(current).add(draft.id))
+    // Undo send: a later Send of the same draft owns its outbox entry from here on.
+    const run = {}
+    outboxRuns.current.set(draft.id, run)
     // Undo send: a held email shows its countdown bar, then "Sending…", instead of this toast.
     if (draft.status !== 'uncertain' && undoSendSeconds(settings) > 0)
       heldMark.current = toastSequence
@@ -245,11 +248,14 @@ export function App() {
       localSaveDraft,
       localDeleteDraft,
     }).then((outcome) => {
-      setOutbox((current) => {
-        const next = new Set(current)
-        next.delete(draft.id)
-        return next
-      })
+      if (outboxRuns.current.get(draft.id) === run) {
+        outboxRuns.current.delete(draft.id)
+        setOutbox((current) => {
+          const next = new Set(current)
+          next.delete(draft.id)
+          return next
+        })
+      }
       if (outcome.quiet) return void refresh() // Undo send: undone, the draft is reopening
       const reopen = outcome.draft
       // Unconfirmed sends are already listed from the main process.
@@ -272,6 +278,11 @@ export function App() {
   }
   // Undo send: emails counting down in the main process, shown in the bar.
   const heldMark = useRef(0)
+  const outboxRuns = useRef(new Map<string, object>())
+  /** A held draft is still sending: it opens only through Undo. */
+  const isHeld = (id: string) => held.some((s) => s.draftId === id)
+  const openUnlessHeld = (draft: Draft) =>
+    isHeld(draft.id) ? notify('This message is still sending.', 'info') : setComposer(draft)
   const heldQuery = useQuery({ queryKey: ['heldSends'], queryFn: () => api.heldSends() })
   const held: HeldSend[] = heldQuery.data || []
   /** Takes back a send still counting down and reopens its draft exactly as it was. */
@@ -308,7 +319,8 @@ export function App() {
         await queryClient.refetchQueries({ queryKey: ['drafts'] })
         return queryClient.getQueryData<Draft[]>(['drafts']) || []
       })
-      if (draft) setComposer(draft)
+      if (draft)
+        openUnlessHeld(draft) // Undo send
       else notify('This draft has since been sent or deleted.', 'info')
     } catch (e) {
       fail(e)
@@ -2339,7 +2351,7 @@ export function App() {
                     (n) => !route.account || n.draft.accountId === route.account,
                   )}
                   accounts={accounts}
-                  onOpenDraft={setComposer}
+                  onOpenDraft={openUnlessHeld}
                   onDismissNotSent={forgetNotSent}
                   onOpenNotSent={(id) => void openNotSent(id)}
                   notify={notify}
