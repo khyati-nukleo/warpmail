@@ -94,6 +94,7 @@ import { ReadStatusCollector } from './read-status/collector'
 import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
 import { ReminderEngine } from './reminders/engine' // Reminders
+import { UndoSend, type UndoSendClock } from './undo-send' // Undo send
 
 export type Connection = {
   id: string
@@ -242,6 +243,8 @@ export interface ServiceOptions {
   crypto?: () => CryptoTransport
   /** Read status: replaces `fetch` when asking the Worker. */
   readStatusFetch?: typeof fetch
+  /** Undo send: replaces the countdown's clock in tests. */
+  undoSendClock?: UndoSendClock
 }
 /** Fingerprints shown to the user are computed here from the certificate itself, never taken on trust. */
 function verifiedCertificates(config: ConnectionConfig): ConnectionConfig {
@@ -318,6 +321,7 @@ export class MailService {
   private draftWrites: Promise<unknown> = Promise.resolve()
   // Reminders
   private reminders: ReminderEngine
+  private readonly undoSends: UndoSend // Undo send
   constructor(
     private store: JsonStore,
     private emit: (event: AppEvent) => void,
@@ -352,6 +356,34 @@ export class MailService {
         accountId,
         (provider, account) => provider.encryptionHints?.(account, email) || Promise.resolve([]),
       ),
+    )
+    // Undo send: the countdown lives here, so closing the window never drops a pending email.
+    this.undoSends = new UndoSend(
+      store,
+      {
+        settings: () => this.settings,
+        save: (draft) => this.saveDraft(draft),
+        syncing: (id) => this.draftSyncs.get(id),
+        draft: (id) => {
+          const draft = this.localDrafts.get(id)
+          return draft?.encryption === 'encrypt' && !this.protectedLoaded.has(id) ? 'locked' : draft
+        },
+        send: (draft) => this.send(draft),
+        started: (id, since) => {
+          const journal = this.journals.get(id)
+          return (
+            this.sending.has(id) ||
+            (!!journal && (journal.state !== 'rejected' || (!!since && journal.at >= since)))
+          )
+        },
+        notSent: (id, message) => this.noteNotSent(id, message),
+        connecting: (accountId) =>
+          this.accounts.find((a) => a.id === accountId)?.status === 'connecting',
+        keep: (draft) => this.syncDraft(draft),
+        emit: (sends) => this.emit({ type: 'heldSends', sends }),
+        log: (event) => this.log(event),
+      },
+      options.undoSendClock,
     )
   }
   private log(event: string, state?: string) {
@@ -431,6 +463,7 @@ export class MailService {
     this.reminders.start() // Reminders: catch up; accounts that connect later invalidate
     this.timer = setInterval(() => void this.refresh(), 60_000)
     this.collector.start() // Read status
+    await this.undoSends.init() // Undo send: pending sends left by a quit or a kill
   }
   /** Read status: a tracked send the app closed during settles from its copies, never resent. */
   private async recoverTracked(journal: Journal, draft?: Draft) {
@@ -1542,7 +1575,11 @@ export class MailService {
   /** A draft being sent, or with a send on record, belongs to the send, not to draft saves. */
   private claimedBySend(id: string) {
     const journal = this.journals.get(id)
-    return this.sending.has(id) || (!!journal && journal.state !== 'rejected')
+    return (
+      this.sending.has(id) ||
+      (!!journal && journal.state !== 'rejected') ||
+      this.undoSends.holds(id) // Undo send: counting down
+    )
   }
   syncDraft = async (input: Draft): Promise<Draft> => {
     if (this.protectionTransition) throw new Error('The vault is locking.')
@@ -1892,6 +1929,25 @@ export class MailService {
     if (!pending.length) return undefined
     // A send that returns hands over to its finishing work, so check again.
     return Promise.allSettled(pending).then(() => this.sendsSettled())
+  }
+  // Undo send
+  /** Sends after the "Undo send" countdown; with it off, exactly `send`. */
+  sendWithUndo = async (input: Draft) => {
+    if (this.protectionTransition) throw new Error('The vault is locking.')
+    return this.undoSends.hold(sendDraftSchema.parse(input))
+  }
+  undoSend = (draftId: string) => this.undoSends.undo(draftId)
+  heldSends = async () => this.undoSends.heldSends()
+  /** Quitting: sends or keeps pending emails per the setting. Undefined when none are pending. */
+  heldSendsOnQuit = () => {
+    const held = this.undoSends.onQuit()
+    if (held) {
+      // Out of sight from here on: no more checking for mail, no notifications.
+      if (this.timer) clearInterval(this.timer)
+      this.timer = undefined
+      this.settings = { ...this.settings, notifications: false, autoCopyAuth: false }
+    }
+    return held
   }
   /**
    * Records why a draft was not sent, as a refused attempt, and (unless `onDraft` is false)
@@ -3014,5 +3070,6 @@ export class MailService {
       provider.dispose()
       void provider.close?.()
     }
+    this.undoSends.dispose() // Undo send
   }
 }

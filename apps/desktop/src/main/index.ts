@@ -49,6 +49,10 @@ let unreadCount = 0,
 // Keep the current window's mode while a saved preference waits for the next restart.
 let windowUsesSystemTitleBar = false
 let restartQueued = false
+// Undo send: finishing pending emails out of sight after a quit (see `before-quit`).
+let heldQuit: 'waiting' | 'done' | undefined
+let reopenAfterQuit = false
+const reopenArgs: string[] = []
 let service: MailService
 const updates = new UpdateManager((status) => send({ type: 'update', status }))
 const pendingEvents: AppEvent[] = []
@@ -59,6 +63,7 @@ if (smoke && !process.env.INLARK_DATA_DIR)
   throw new Error('Smoke tests require a separate INLARK_DATA_DIR.')
 const devURL = process.env.ELECTRON_RENDERER_URL
 function send(event: AppEvent) {
+  if (event.type === 'mailto' && heldQuit === 'waiting') reopenArgs.push(event.url) // Undo send
   if (event.type === 'open' || event.type === 'mailto') show()
   if (window && rendererReady) window.webContents.send('mail:event', event)
   else if (event.type === 'open' || event.type === 'mailto') pendingEvents.push(event)
@@ -82,6 +87,8 @@ function send(event: AppEvent) {
   }
 }
 function show() {
+  // Undo send: quitting out of sight. Asked to open meanwhile, inlark starts again afterwards.
+  if (heldQuit === 'waiting') return void (reopenAfterQuit = true)
   if (!window) createWindow()
   window?.show()
   window?.focus()
@@ -315,6 +322,10 @@ else {
         deleteServerDraft: service.deleteServerDraft,
         send: service.send,
         reconcile: service.reconcile,
+        // Undo send
+        sendWithUndo: service.sendWithUndo,
+        undoSend: service.undoSend,
+        heldSends: service.heldSends,
         submissions: service.submissions,
         retrySentCopy: service.retrySentCopy,
         recoverRejected: service.recoverRejected,
@@ -337,7 +348,7 @@ else {
         },
         restart: async () => {
           if (restartQueued) return
-          app.relaunch()
+          // Relaunched once quitting really goes ahead (see `before-quit`).
           restartQueued = true
           // Reply to the renderer before quitting through the normal cleanup and tray path.
           setImmediate(() => app.quit())
@@ -406,9 +417,45 @@ else {
 }
 /** How long quitting waits for a message that is still sending. */
 const quitSendWaitMs = 30_000
+/** Undo send: how long inlark stays running out of sight to finish pending emails. */
+const quitHeldWaitMs = 2 * 60_000
 let quitWaiting = false
+let relaunched = false
 app.on('before-quit', (event) => {
   quitting = true
+  // Undo send: a second quit request, or the system logging out or shutting down, while inlark
+  // finishes out of sight goes straight through. The send journal and the pending records
+  // recover whatever was cut short, and the next launch follows the setting.
+  if (heldQuit === 'waiting') {
+    heldQuit = 'done'
+    quitWaiting = true
+  }
+  // Undo send: a countdown still running follows "If you close the app during the countdown",
+  // also when this quit ends a "Finishing sending…" wait.
+  const held = heldQuit ? undefined : service?.heldSendsOnQuit()
+  if (held) {
+    event.preventDefault()
+    heldQuit = 'waiting'
+    // The window closes straight away; inlark finishes out of sight, then quits.
+    if (window && !window.isDestroyed()) window.destroy()
+    tray?.destroy()
+    tray = null
+    const finishNow = () => heldQuit === 'waiting' && app.quit()
+    powerMonitor.once('shutdown', finishNow)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    void Promise.race([
+      held.then(() => service.sendsSettled()),
+      new Promise((resolve) => (timer = setTimeout(resolve, quitHeldWaitMs))),
+    ]).then(() => {
+      clearTimeout(timer)
+      powerMonitor.removeListener('shutdown', finishNow)
+      if (heldQuit !== 'waiting') return
+      heldQuit = 'done'
+      quitWaiting = true
+      app.quit()
+    })
+    return
+  }
   const sends = quitWaiting ? undefined : service?.sendsSettled()
   if (sends) {
     // The composer closes on Send, so a quit often comes right after it. Let the message
@@ -440,10 +487,19 @@ app.on('before-quit', (event) => {
     })
     return
   }
+  // Restart, or Undo send: asked to open while finishing out of sight. A `mailto:` from the
+  // original launch is not opened again; one that arrived meanwhile is.
+  if ((restartQueued || reopenAfterQuit) && !relaunched) {
+    relaunched = true
+    app.relaunch({
+      args: [...process.argv.slice(1).filter((a) => !a.startsWith('mailto:')), ...reopenArgs],
+    })
+  }
   // An open “Finishing sending…” box must never keep the app from exiting.
   if (quitWaiting) setTimeout(() => app.exit(0), 5000).unref()
   service?.dispose()
 })
 app.on('window-all-closed', () => {
+  if (heldQuit === 'waiting') return // Undo send: the window was closed on purpose
   if (!tray || !service?.settings.closeToTray) app.quit()
 })

@@ -1,10 +1,16 @@
-import { friendlyError, type Draft, type SendResult } from '@inlark/core'
+import { friendlyError, type Draft, type NotSentResult, type SendResult } from '@inlark/core'
 
-/** What a send came to. A `draft` is the copy to reopen: it was not confirmed as sent. */
-export type SendOutcome = { text: string; tone?: 'error'; draft?: Draft }
+/**
+ * What a send came to. A `draft` is the copy to reopen: it was not confirmed as sent. `quiet`:
+ * nothing to say (Undo send: it was undone, and the draft is reopening).
+ */
+export type SendOutcome =
+  | { text: string; tone?: 'error' | 'info'; draft?: Draft; quiet?: undefined }
+  | { quiet: true; text?: undefined; tone?: undefined; draft?: undefined }
 
 export interface SendIO {
-  send(draft: Draft): Promise<SendResult>
+  /** Undo send: may also come back not sent, held back or undone. */
+  send(draft: Draft): Promise<SendResult | NotSentResult>
   reconcile(draftId: string): Promise<SendResult>
   drafts(): Promise<Draft[]>
   localSaveDraft(draft: Draft): Promise<unknown>
@@ -36,6 +42,18 @@ export async function deliver(draft: Draft, io: SendIO): Promise<SendOutcome> {
   try {
     const result =
       draft.status === 'uncertain' ? await io.reconcile(draft.id) : await io.send(draft)
+    // Undo send: nothing left. The draft stays in Drafts as it is now.
+    if (result.status === 'undone') return { quiet: true }
+    if (result.status === 'unsent') {
+      const saved = await io
+        .drafts()
+        .then((values) => values.find((d) => d.id === draft.id && d.status !== 'sent'))
+        .catch(() => undefined)
+      if (saved) await io.localSaveDraft(saved).catch(() => {})
+      return saved
+        ? { tone: 'info', text: result.message, draft: saved }
+        : { tone: 'info', text: result.message }
+    }
     if (result.status === 'sent' || result.status === 'partial') {
       const text = sentMessage(result)
       return io.localDeleteDraft(draft.id).then(

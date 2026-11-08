@@ -6,6 +6,13 @@ import type {
   ReminderTarget,
   ReminderSnooze,
 } from './reminders'
+import type {
+  HeldSend,
+  NotSentResult,
+  UndoSendOnQuit,
+  UndoSendResult,
+  UndoSendSeconds,
+} from './undo-send' // Undo send
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -268,6 +275,9 @@ export interface Settings {
   htmlSignatures?: Record<string, boolean>
   /** Where the reader goes after a conversation leaves the current view. */
   afterArchive?: 'next' | 'previous' | 'list'
+  // Undo send: absent means 10 seconds and "Send it anyway".
+  undoSendSeconds?: UndoSendSeconds
+  undoSendOnQuit?: UndoSendOnQuit
   /**
    * Keyboard shortcuts changed from their defaults, by action. Each binding is a list of chords
    * pressed in turn, such as `['Mod+K']` or `['G', 'I']`; an empty list turns a shortcut off.
@@ -692,6 +702,7 @@ export type AppEvent =
   | { type: 'open'; accountId: string; threadId: string }
   | { type: 'progress'; completed: number; total: number }
   | { type: 'submissions'; submissions: SubmissionSummary[] }
+  | { type: 'heldSends'; sends: HeldSend[] } // Undo send
   | { type: 'update'; status: UpdateStatus }
   // Improve draft
   | { type: 'improve'; id: string; text: string }
@@ -871,6 +882,11 @@ export interface DesktopMailAPI {
   deleteServerDraft(accountId: string, messageId: string): Promise<void>
   send(draft: Draft): Promise<SendResult>
   reconcile(draftId: string): Promise<SendResult>
+  // Undo send
+  /** Sends after the "Undo send" delay (at once when it's off). */
+  sendWithUndo(draft: Draft): Promise<SendResult | NotSentResult>
+  undoSend(draftId: string): Promise<UndoSendResult>
+  heldSends(): Promise<HeldSend[]>
   submissions(): Promise<SubmissionSummary[]>
   /** Retries only the Sent copy of a message that was already sent. */
   retrySentCopy(draftId: string): Promise<SendResult>

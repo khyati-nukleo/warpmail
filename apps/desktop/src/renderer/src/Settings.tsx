@@ -45,6 +45,7 @@ import { ShortcutEditor } from './ShortcutEditor'
 import { EncryptionPanel } from './EncryptionSettings'
 import { AiSettings } from './AiSettings'
 import { newMessageAccount } from './compose-account'
+import { UndoSendSettings } from './undo-send/UndoSendSettings' // Undo send
 import { InboxSettings } from './split/InboxSettings'
 import { RemindersSettings } from './reminders/RemindersSettings'
 import { saveSplitSettings } from './split/split-saves'
@@ -386,6 +387,8 @@ export function SettingsPanel({
                     />
                   </div>
                 </div>
+                {/* Undo send */}
+                <UndoSendSettings settings={bootstrap.settings} update={update} />
                 <div
                   className={cn(
                     'setting-section my-6.25 mx-0 [&_h4]:text-[11px] [&_h4]:font-medium [&_h4]:mt-0 [&_h4]:mb-3 [&_h4]:mx-0',
