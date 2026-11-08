@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Draft, SendResult } from '../packages/core/src'
+import type { Draft, NotSentResult, SendResult } from '../packages/core/src'
 import { deliver, latestDraft, type SendIO } from '../apps/desktop/src/renderer/src/background-send'
 
 const draft: Draft = {
@@ -16,7 +16,7 @@ const draft: Draft = {
   updatedAt: '2026-09-23T10:00:00.000Z',
   status: 'local',
 }
-const io = (send: () => Promise<SendResult>, saved: Draft[] = []) =>
+const io = (send: () => Promise<SendResult | NotSentResult>, saved: Draft[] = []) =>
   ({
     send: vi.fn(send),
     reconcile: vi.fn(async (): Promise<SendResult> => ({
@@ -115,5 +115,26 @@ describe('reopening a draft that was not sent', () => {
   it('finds nothing to open once the draft was sent or deleted', async () => {
     expect(await latestDraft('draft', async () => [{ ...draft, status: 'sent' }])).toBeUndefined()
     expect(await latestDraft('draft', async () => [])).toBeUndefined()
+  })
+})
+
+describe('Undo send in the background', () => {
+  it('says nothing when the send was undone: the draft reopens instead', async () => {
+    const api = io(async () => ({ status: 'undone', message: 'Not sent.' }))
+    expect(await deliver(draft, api)).toEqual({ quiet: true })
+    expect(api.localDeleteDraft).not.toHaveBeenCalled()
+  })
+  it('explains a held send that did not leave, with the draft as it is now', async () => {
+    const edited = { ...draft, text: 'Changed', updatedAt: '2026-09-23T10:05:00.000Z' }
+    const message = 'You changed this email after pressing Send, so it wasn’t sent. It’s in Drafts.'
+    const api = io(async () => ({ status: 'unsent', message }), [edited])
+    expect(await deliver(draft, api)).toEqual({ tone: 'info', text: message, draft: edited })
+    expect(api.localSaveDraft).toHaveBeenCalledWith(edited)
+    expect(api.localDeleteDraft).not.toHaveBeenCalled()
+  })
+  it('offers nothing to reopen when the held draft was deleted', async () => {
+    const message = 'This email was deleted before it was sent, so nothing was sent.'
+    const api = io(async () => ({ status: 'unsent', message }), [])
+    expect(await deliver(draft, api)).toEqual({ tone: 'info', text: message })
   })
 })

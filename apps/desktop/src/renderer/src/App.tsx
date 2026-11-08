@@ -122,6 +122,9 @@ import { newMessageAccount } from './compose-account'
 import { recipientSuggestions } from './recipient-suggestions'
 import { SubmissionList, type NotSent } from './SendingStatus'
 import { deliver, latestDraft } from './background-send'
+import { undoSendSeconds, type HeldSend } from '@inlark/core' // Undo send
+import { UndoSendBar } from './undo-send/UndoSendBar' // Undo send
+import { heldBarHeight } from './undo-send/held-text' // Undo send
 import { IndexingMeter } from './IndexingMeter'
 import { UpdateNotice } from './UpdateNotice'
 import { offersAction } from './view-actions'
@@ -227,12 +230,16 @@ export function App() {
   const sendInBackground = (draft: Draft) => {
     forgetNotSent(draft.id)
     setOutbox((current) => new Set(current).add(draft.id))
-    setToast({
-      text: draft.status === 'uncertain' ? 'Checking delivery…' : 'Sending…',
-      tone: 'progress',
-    })
+    // Undo send: a held email shows its countdown bar, then "Sending…", instead of this toast.
+    if (draft.status !== 'uncertain' && undoSendSeconds(settings) > 0)
+      heldMark.current = toastSequence
+    else
+      setToast({
+        text: draft.status === 'uncertain' ? 'Checking delivery…' : 'Sending…',
+        tone: 'progress',
+      })
     void deliver(draft, {
-      send: (d) => api.send(d),
+      send: (d) => api.sendWithUndo(d),
       reconcile: (id) => api.reconcile(id),
       drafts: () => api.drafts(),
       localSaveDraft,
@@ -243,6 +250,7 @@ export function App() {
         next.delete(draft.id)
         return next
       })
+      if (outcome.quiet) return void refresh() // Undo send: undone, the draft is reopening
       const reopen = outcome.draft
       // Unconfirmed sends are already listed from the main process.
       if (reopen && reopen.status !== 'uncertain')
@@ -261,6 +269,29 @@ export function App() {
       })
       void refresh()
     })
+  }
+  // Undo send: emails counting down in the main process, shown in the bar.
+  const heldMark = useRef(0)
+  const heldQuery = useQuery({ queryKey: ['heldSends'], queryFn: () => api.heldSends() })
+  const held: HeldSend[] = heldQuery.data || []
+  /** Takes back a send still counting down and reopens its draft exactly as it was. */
+  const undoHeld = async (draftId: string) => {
+    try {
+      const result = await api.undoSend(draftId)
+      if (!result.undone)
+        return notify(
+          result.reason === 'sending'
+            ? 'Too late to undo. It’s already sending.'
+            : 'Too late to undo.',
+          'info',
+        )
+      void queryClient.invalidateQueries({ queryKey: ['drafts'] })
+      if (!result.draft) return notify('Not sent. It’s in Drafts.', 'info')
+      await localSaveDraft(result.draft)
+      setComposer(result.draft)
+    } catch (e) {
+      fail(e)
+    }
   }
   /** Opens a draft that was not sent as it is now: it may have been fixed since. */
   const openNotSent = async (id: string) => {
@@ -837,6 +868,12 @@ export function App() {
     if (!range || !draftAnchor.current) draftAnchor.current = key
   }
   const openDraft = async (item: DraftItem) => {
+    // Undo send: one counting down is taken back with Undo, which reopens it.
+    if (
+      item.kind === 'local' &&
+      held.some((s) => s.draftId === item.draft.id && s.state === 'waiting')
+    )
+      return notify('This message is about to be sent. Undo it to make changes.', 'info')
     if (item.kind === 'local' && outbox.has(item.draft.id))
       return notify('This message is still sending.', 'info')
     if (item.kind === 'local') return setComposer(item.draft)
@@ -977,6 +1014,7 @@ export function App() {
         void queryClient.invalidateQueries({ queryKey: ['encryption'] })
       }
       if (event.type === 'changed') void refresh()
+      if (event.type === 'heldSends') queryClient.setQueryData(['heldSends'], event.sends) // Undo send
       if (event.type === 'accounts') {
         queryClient.setQueryData<Bootstrap>(
           ['bootstrap'],
@@ -1035,6 +1073,9 @@ export function App() {
   ])
   const [toastHeld, setToastHeld] = useState(false)
   const canUndo = !!toast?.undoId || !!toast?.onUndo
+  // Undo send: Z takes back the newest email counting down, unless the toast's action is newer.
+  const newestHeld = [...held].reverse().find((s) => s.state === 'waiting')
+  const undoSendFirst = !!newestHeld && (!canUndo || (toast?.id ?? 0) <= heldMark.current)
   const toastDuration = canUndo ? 9000 : toast?.tone === 'error' ? 8000 : 5000
   // A send in progress, or one that needs a decision, stays until it is replaced or dismissed.
   const toastStays = toast?.tone === 'progress' || !!toast?.action
@@ -1205,7 +1246,11 @@ export function App() {
       read: { run: () => void act('read'), enabled: canAct },
       star: { run: toggleStar, enabled: canAct },
       move: { run: () => openMove(targets()), enabled: canAct && !allMatching },
-      undo: { run: () => void undo(), enabled: !blocked && canUndo },
+      undo: {
+        // Undo send
+        run: () => void (undoSendFirst ? undoHeld(newestHeld!.draftId) : undo()),
+        enabled: !blocked && (canUndo || undoSendFirst),
+      },
       reply: { run: () => latest && void compose(latest), enabled: inThread },
       replyAll: { run: () => latest && void compose(latest, 'replyAll'), enabled: inThread },
       forward: { run: () => latest && void compose(latest, 'forward'), enabled: inThread },
@@ -1378,6 +1423,19 @@ export function App() {
       }))
     : []
   const commands: Command[] = [
+    // Undo send
+    ...(newestHeld
+      ? [
+          {
+            id: 'undoSend',
+            group: 'Suggested',
+            label: 'Undo send',
+            icon: Undo2,
+            key: undoSendFirst ? keys('undo') : undefined,
+            run: () => void undoHeld(newestHeld.draftId),
+          },
+        ]
+      : []),
     ...(toast && canUndo
       ? [
           {
@@ -2537,6 +2595,8 @@ export function App() {
               'toast-error [&>svg:first-child]:text-danger [&_.toast-timer]:bg-danger/45',
           )}
           role={toast.tone === 'error' ? 'alert' : 'status'}
+          // Undo send: sits above the countdown bar while it shows.
+          style={held.length ? { bottom: 23 + heldBarHeight(held.length) + 8 } : undefined}
           onMouseEnter={() => setToastHeld(true)}
           onMouseLeave={() => setToastHeld(false)}
           key={toast.id}
@@ -2586,6 +2646,8 @@ export function App() {
           )}
         </div>
       )}
+      {/* Undo send */}
+      <UndoSendBar sends={held} accounts={accounts} onUndo={(id) => void undoHeld(id)} />
       <Suspense
         fallback={
           <div
