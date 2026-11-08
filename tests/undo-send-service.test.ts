@@ -149,6 +149,9 @@ const localDraft = async () => (await service.drafts()).find((d) => d.id === dra
 const lastHeld = () =>
   events.filter((e): e is Extract<AppEvent, { type: 'heldSends' }> => e.type === 'heldSends').at(-1)
     ?.sends as HeldSend[] | undefined
+/** Waits until the draft's countdown has started, so moving the clock reaches its deadline. */
+const armed = (id = draftId) =>
+  vi.waitFor(() => expect(lastHeld()?.find((s) => s.draftId === id)?.state).toBe('waiting'))
 /** Lets the service's own awaits (store writes, IMAP) run while the clock stands still. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100))
 
@@ -175,7 +178,7 @@ afterEach(async () => {
 describe('Undo send through the mail service', () => {
   it('nothing reaches the server during the countdown; then it is sent and filed as usual', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     expect(lastHeld()).toMatchObject([{ draftId, state: 'waiting', subject: 'Plans' }])
     clock.advance(9_999)
     await settle()
@@ -193,7 +196,7 @@ describe('Undo send through the mail service', () => {
   })
   it('undo sends nothing and leaves the draft in Drafts exactly as it was', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(4_000)
     const undo = await service.undoSend(draftId)
     expect(undo).toEqual({ undone: true, draft: expect.objectContaining(draft) })
@@ -207,7 +210,7 @@ describe('Undo send through the mail service', () => {
     expect(await records()).toEqual([])
     // Sending it again afterwards is a fresh countdown.
     const again = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(10_000)
     expect(await again).toMatchObject({ status: 'sent' })
     expect(submit).toHaveBeenCalledTimes(1)
@@ -220,7 +223,7 @@ describe('Undo send through the mail service', () => {
   })
   it('after a kill mid-countdown, "Send it anyway" sends it on the next launch exactly once', async () => {
     void service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(3_000)
     await kill()
     expect(submit).not.toHaveBeenCalled()
@@ -244,7 +247,7 @@ describe('Undo send through the mail service', () => {
       return new Promise(() => {})
     })
     void service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(10_000)
     await submitting
     await kill()
@@ -258,7 +261,7 @@ describe('Undo send through the mail service', () => {
   })
   it('after a kill, "Keep it as a draft" sends nothing and saves it to the server Drafts', async () => {
     void service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(3_000)
     await service.setSettings({ ...service.settings, undoSendOnQuit: 'draft' })
     await kill()
@@ -270,21 +273,35 @@ describe('Undo send through the mail service', () => {
     expect(await localDraft()).toMatchObject({ text: 'Hello', status: 'synced' })
     expect(await records()).toEqual([])
   })
-  it('quitting with "Send it anyway" sends at once and waits until it is filed', async () => {
-    void service.sendWithUndo(draft)
-    await settle()
+  it('quitting with "Send it anyway" waits out the countdown out of sight, then sends once', async () => {
+    const result = service.sendWithUndo(draft)
+    await armed()
     clock.advance(2_000)
+    let done = false
     const quit = service.heldSendsOnQuit()
     expect(quit).toBeDefined()
+    void quit!.then(() => (done = true))
+    clock.advance(7_999)
+    await settle()
+    // Not before its own deadline, even with the window gone.
+    expect(submit).not.toHaveBeenCalled()
+    expect(server.box('Sent').messages).toHaveLength(0)
+    expect(done).toBe(false)
+    clock.advance(1)
+    expect(await result).toMatchObject({ status: 'sent' })
     await quit
     await service.sendsSettled()
     expect(submit).toHaveBeenCalledTimes(1)
     expect(server.box('Sent').messages).toHaveLength(1)
+    expect(await records()).toEqual([])
+    clock.advance(60_000)
+    await settle()
+    expect(submit).toHaveBeenCalledTimes(1)
   })
   it('quitting with "Keep it as a draft" sends nothing and saves it to the server Drafts', async () => {
     await service.setSettings({ ...service.settings, undoSendOnQuit: 'draft' })
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     await service.heldSendsOnQuit()
     expect(await result).toMatchObject({ status: 'unsent' })
     expect(server.box('Drafts').messages).toHaveLength(1)
@@ -303,11 +320,18 @@ describe('Undo send through the mail service', () => {
     expect(await localDraft()).toMatchObject({ status: 'synced', text: 'Hello' })
     expect(submit).not.toHaveBeenCalled()
   })
-  it('quitting with "Send it anyway" while a Send is still saving sends it and files it', async () => {
+  it('quitting with "Send it anyway" while a Send is still saving counts it down too', async () => {
     const result = service.sendWithUndo(draft)
-    await service.heldSendsOnQuit()
-    await service.sendsSettled()
+    const quit = service.heldSendsOnQuit()
+    expect(quit).toBeDefined()
+    await armed()
+    clock.advance(9_999)
+    await settle()
+    expect(submit).not.toHaveBeenCalled()
+    clock.advance(1)
     expect(await result).toMatchObject({ status: 'sent' })
+    await quit
+    await service.sendsSettled()
     expect(submit).toHaveBeenCalledTimes(1)
     expect(server.box('Sent').messages).toHaveLength(1)
   })
@@ -319,6 +343,7 @@ describe('Undo send through the mail service', () => {
     const syncing = service.syncDraft(draft)
     const result = service.sendWithUndo({ ...draft, followUp: true })
     await syncing
+    await armed()
     await settle()
     expect(await localDraft()).toMatchObject({ followUp: true })
     clock.advance(10_000)
@@ -330,7 +355,7 @@ describe('Undo send through the mail service', () => {
   })
   it('a draft edited during the countdown is not sent', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     await service.saveDraft({ ...draft, text: 'Changed', updatedAt: '2026-11-07T10:00:03.000Z' })
     clock.advance(10_000)
     expect(await result).toMatchObject({ status: 'unsent' })
@@ -339,7 +364,7 @@ describe('Undo send through the mail service', () => {
   })
   it('background draft saves leave a held draft alone: nothing reaches Drafts on the server', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     // The periodic save of drafts idle for 10 seconds, and a save asked for directly.
     await (service as unknown as { syncPendingDrafts(): Promise<void> }).syncPendingDrafts()
     await service.syncDraft(draft)
@@ -350,7 +375,7 @@ describe('Undo send through the mail service', () => {
   })
   it('a draft deleted during the countdown is not sent', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     await service.deleteDraft(draftId)
     clock.advance(10_000)
     expect(await result).toMatchObject({ status: 'unsent' })
@@ -399,7 +424,7 @@ describe('Undo send with Read status', () => {
   })
   it('a tracked email still goes one copy per recipient after the countdown', async () => {
     const result = service.sendWithUndo(draft)
-    await settle()
+    await armed()
     clock.advance(9_999)
     await settle()
     expect(submitCopies).not.toHaveBeenCalled()

@@ -79,6 +79,9 @@ type HeldRecord = HeldSend & {
 }
 type Held = HeldRecord & {
   timer?: unknown
+  /** Quitting with "Send it anyway": settles once this send has been handed over or dropped. */
+  leaving?: Promise<void>
+  left?: () => void
   /** Set for a send someone is waiting on; a send resumed after a relaunch has none. */
   settle?: (result: SendResult | NotSentResult) => void
   fail?: (error: unknown) => void
@@ -205,7 +208,8 @@ export class UndoSend {
       this.publish()
       return { result: Promise.resolve(undone) }
     }
-    if (this.quitting) return { result: this.whileQuitting(draft, token.done) }
+    if (this.quitting && undoSendOnQuit(this.host.settings()) === 'draft')
+      return { result: this.whileQuitting(draft, token.done) }
     const held: Held = {
       draftId: draft.id,
       accountId: draft.accountId,
@@ -234,6 +238,8 @@ export class UndoSend {
       return { result }
     this.arm(held)
     this.publish()
+    // Sent at its deadline after all, with the window already gone: the quit waits for it.
+    if (this.quitting) this.awaitLeaving(held)
     // A server save that began before Send ends by storing the draft as it had it: the held
     // copy is saved again over it, so the email that leaves is the one Send was pressed on.
     const syncing = this.host.syncing(draft.id)
@@ -246,19 +252,14 @@ export class UndoSend {
       )
     return { result }
   }
-  /** A Send that arrives once quitting has begun follows the quit setting straight away. */
+  /** "Keep it as a draft": a Send that arrives once quitting has begun is kept straight away. */
   private whileQuitting(
     draft: Draft,
     prepared: Promise<void>,
   ): Promise<SendResult | NotSentResult> {
-    if (undoSendOnQuit(this.host.settings()) === 'draft') {
-      // Once this Send no longer holds the draft, or the server save would leave it alone.
-      this.track(prepared.then(() => this.keepDraft(draft.id)))
-      return Promise.resolve({ status: 'unsent', message: notSent.kept })
-    }
-    const sending = this.host.send(draft)
-    this.track(sending)
-    return sending
+    // Once this Send no longer holds the draft, or the server save would leave it alone.
+    this.track(prepared.then(() => this.keepDraft(draft.id)))
+    return Promise.resolve({ status: 'unsent', message: notSent.kept })
   }
 
   /** Takes back a send still counting down. Too late once it has gone to sending. */
@@ -303,8 +304,9 @@ export class UndoSend {
       this.track(this.persist().catch(() => this.host.log('undo-send-save-failed')))
       this.publish()
     } else
-      // Nobody can press Undo without a window: waiting longer would only delay quitting.
-      for (const held of waiting) this.release(held)
+      // Khyati's call (2026-11-08): each email still waits out its own countdown, out of sight,
+      // then goes through the normal send. Undo is out of reach meanwhile.
+      for (const held of waiting) this.awaitLeaving(held)
     // A write that failed earlier lands now, before the app goes.
     if (this.dirty) this.track(this.persist().catch(() => this.host.log('undo-send-save-failed')))
     const settled = (): Promise<void> =>
@@ -319,6 +321,12 @@ export class UndoSend {
     for (const held of this.held.values()) if (held.timer) this.clock.clearTimeout(held.timer)
   }
 
+  /** Counts a waiting send among what quitting waits for, until it is handed over or dropped. */
+  private awaitLeaving(held: Held) {
+    if (held.leaving) return
+    held.leaving = new Promise<void>((resolve) => (held.left = resolve))
+    this.track(held.leaving)
+  }
   private arm(held: Held) {
     const ms = Math.max(0, Date.parse(held.dueAt) - this.clock.now())
     held.timer = this.clock.setTimeout(() => this.release(held), ms)
@@ -327,6 +335,7 @@ export class UndoSend {
     if (held.timer) this.clock.clearTimeout(held.timer)
     this.held.delete(held.draftId)
     held.settle?.(result)
+    held.left?.()
   }
   private track(run: Promise<unknown>) {
     const tracked = run.then(
@@ -345,6 +354,8 @@ export class UndoSend {
     if (held.timer) this.clock.clearTimeout(held.timer)
     this.publish()
     this.track(this.sendHeld(held))
+    // After the send is counted, so a quit waiting on this one goes on to wait for the send.
+    held.left?.()
   }
   private async sendHeld(held: Held) {
     let outcome: { result: SendResult | NotSentResult } | { error: unknown }

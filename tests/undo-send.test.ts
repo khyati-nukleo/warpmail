@@ -296,24 +296,45 @@ describe('Undo send: quitting during the countdown', () => {
   it('has nothing to wait for when nothing is pending', () => {
     expect(undoSend.onQuit()).toBeUndefined()
   })
-  it('"Send it anyway" sends at once and settles only after sending', async () => {
+  it('"Send it anyway" waits out each countdown, sends each once at its deadline, then settles', async () => {
     let finish!: (r: SendResult) => void
     host.send.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)))
     void undoSend.hold(base)
-    void undoSend.hold({ ...base, id: other, accountId: 'home' })
     await vi.advanceTimersByTimeAsync(2_000)
+    void undoSend.hold({ ...base, id: other, accountId: 'home' })
+    await vi.advanceTimersByTimeAsync(0)
     let done = false
     void undoSend.onQuit()!.then(() => (done = true))
-    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(7_999)
+    // Out of sight now, but nothing leaves before its own deadline.
+    expect(host.send).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(host.send).toHaveBeenCalledTimes(1)
+    expect(host.send.mock.calls[0][0].id).toBe(id)
+    expect(done).toBe(false)
+    await vi.advanceTimersByTimeAsync(2_000)
     expect(host.send).toHaveBeenCalledTimes(2)
+    // The first is still sending: the quit waits for it.
     expect(done).toBe(false)
     finish(sent)
     await vi.advanceTimersByTimeAsync(0)
     expect(done).toBe(true)
     expect(records()).toEqual([])
-    // The countdown that would have ended later sends nothing more.
     await vi.advanceTimersByTimeAsync(60_000)
     expect(host.send).toHaveBeenCalledTimes(2)
+  })
+  it('a second quit during that wait leaves the countdown on disk, and the next launch resumes it', async () => {
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(2_000)
+    void undoSend.onQuit()
+    await vi.advanceTimersByTimeAsync(1_000)
+    // The second quit goes straight through: the app stops here.
+    await kill()
+    expect(undoSend.heldSends()).toMatchObject([{ draftId: id, state: 'waiting' }])
+    await vi.advanceTimersByTimeAsync(6_999)
+    expect(host.send).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(host.send).toHaveBeenCalledTimes(1)
   })
   it('"Keep it as a draft" sends nothing and saves the drafts to the server', async () => {
     settings = { undoSendOnQuit: 'draft' }
@@ -509,7 +530,7 @@ describe('Undo send: edges found in review', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(host.send).not.toHaveBeenCalled()
   })
-  it('a quit while a Send is still saving sends it before settling, with "Send it anyway"', async () => {
+  it('a quit while a Send is still saving counts it down too, with "Send it anyway"', async () => {
     let saved!: () => void
     host.save.mockImplementationOnce(
       (draft: Draft) => new Promise((resolve) => (saved = () => resolve(draft))),
@@ -519,7 +540,10 @@ describe('Undo send: edges found in review', () => {
     let done = false
     void undoSend.onQuit()!.then(() => (done = true))
     saved()
-    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(host.send).not.toHaveBeenCalled()
+    expect(done).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
     expect(host.send).toHaveBeenCalledTimes(1)
     expect(done).toBe(true)
   })
