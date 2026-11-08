@@ -59,6 +59,11 @@ const start = async () => {
   undoSend = new UndoSend(store, host)
   await undoSend.init()
 }
+/** The app is killed and launched again. */
+const kill = async () => {
+  undoSend.dispose()
+  await start()
+}
 
 beforeEach(async () => {
   vi.useFakeTimers({ now: new Date('2026-11-07T10:00:05.000Z') })
@@ -73,6 +78,7 @@ beforeEach(async () => {
       drafts.set(draft.id, draft)
       return draft
     }),
+    syncing: () => undefined,
     draft: (draftId) => drafts.get(draftId),
     send: vi.fn(async (draft: Draft) => {
       started.add(draft.id)
@@ -338,10 +344,6 @@ describe('Undo send: quitting during the countdown', () => {
 })
 
 describe('Undo send: relaunching after the app was killed', () => {
-  const kill = async () => {
-    undoSend.dispose()
-    await start()
-  }
   it('"Send it anyway" sends a past-due email once its account has connected, exactly once', async () => {
     void undoSend.hold(base)
     await vi.advanceTimersByTimeAsync(3_000)
@@ -527,5 +529,65 @@ describe('Undo send: edges found in review', () => {
     expect(undoSend.holds(id)).toBe(true)
     await vi.advanceTimersByTimeAsync(10_000)
     expect(undoSend.holds(id)).toBe(false)
+  })
+  it('an Undo whose record could not be written is still never sent, after a quit', async () => {
+    const result = undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(3_000)
+    store.fail = true
+    expect(await undoSend.undo(id)).toMatchObject({ undone: true })
+    expect(await result).toMatchObject({ status: 'undone' })
+    store.fail = false
+    // The quit writes what the failed write missed.
+    await undoSend.onQuit()
+    undoSend.dispose()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await start()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.send).not.toHaveBeenCalled()
+    expect(records()).toEqual([])
+  })
+  it('an Undo whose record could not be written is still never sent, after a kill', async () => {
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(3_000)
+    store.fail = true
+    await undoSend.undo(id)
+    await vi.advanceTimersByTimeAsync(2_000)
+    store.fail = false
+    // Retried in the background until it is written.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(records()).toEqual([])
+    await kill()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(host.send).not.toHaveBeenCalled()
+  })
+  it('a second Send that could not be recorded leaves no earlier countdown to send later', async () => {
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(3_000)
+    store.fail = true
+    await expect(undoSend.hold(base)).rejects.toThrow('Disk full')
+    store.fail = false
+    await vi.advanceTimersByTimeAsync(5_000)
+    await kill()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(host.send).not.toHaveBeenCalled()
+  })
+  it('"Keep it as a draft" on relaunch says why an email whose countdown had ended was kept', async () => {
+    connecting.add('work')
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(10_000)
+    settings = { undoSendOnQuit: 'draft' }
+    await kill()
+    connecting.delete('work')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.send).not.toHaveBeenCalled()
+    expect(host.notSent).toHaveBeenCalledWith(id, expect.stringContaining('Drafts'))
+  })
+  it('"Keep it as a draft" on relaunch says nothing for an email still counting down', async () => {
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(3_000)
+    settings = { undoSendOnQuit: 'draft' }
+    await kill()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.notSent).not.toHaveBeenCalled()
   })
 })

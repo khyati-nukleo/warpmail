@@ -292,6 +292,42 @@ describe('Undo send through the mail service', () => {
     await settle()
     expect(submit).not.toHaveBeenCalled()
   })
+  it('quitting with "Keep it as a draft" while a Send is still saving saves it to the server Drafts', async () => {
+    await service.setSettings({ ...service.settings, undoSendOnQuit: 'draft' })
+    const result = service.sendWithUndo(draft)
+    const quit = service.heldSendsOnQuit()
+    expect(quit).toBeDefined()
+    await quit
+    expect(await result).toMatchObject({ status: 'unsent' })
+    expect(server.box('Drafts').messages).toHaveLength(1)
+    expect(await localDraft()).toMatchObject({ status: 'synced', text: 'Hello' })
+    expect(submit).not.toHaveBeenCalled()
+  })
+  it('quitting with "Send it anyway" while a Send is still saving sends it and files it', async () => {
+    const result = service.sendWithUndo(draft)
+    await service.heldSendsOnQuit()
+    await service.sendsSettled()
+    expect(await result).toMatchObject({ status: 'sent' })
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(server.box('Sent').messages).toHaveLength(1)
+  })
+  it('a server draft save already running at Send never overwrites the held copy', async () => {
+    const reminders = (service as unknown as { reminders: { afterSend: unknown } }).reminders
+    const afterSend = vi.fn(async () => {})
+    reminders.afterSend = afterSend
+    // Started before Send, with the draft as it was before the follow-up switch was read.
+    const syncing = service.syncDraft(draft)
+    const result = service.sendWithUndo({ ...draft, followUp: true })
+    await syncing
+    await settle()
+    expect(await localDraft()).toMatchObject({ followUp: true })
+    clock.advance(10_000)
+    expect(await result).toMatchObject({ status: 'sent' })
+    await service.sendsSettled()
+    expect(afterSend).toHaveBeenCalledTimes(1)
+    expect(afterSend.mock.calls[0]).toMatchObject([{ followUp: true }])
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
   it('a draft edited during the countdown is not sent', async () => {
     const result = service.sendWithUndo(draft)
     await settle()

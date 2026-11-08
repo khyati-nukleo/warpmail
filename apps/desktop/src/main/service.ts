@@ -363,6 +363,7 @@ export class MailService {
       {
         settings: () => this.settings,
         save: (draft) => this.saveDraft(draft),
+        syncing: (id) => this.draftSyncs.get(id),
         draft: (id) => {
           const draft = this.localDrafts.get(id)
           return draft?.encryption === 'encrypt' && !this.protectedLoaded.has(id) ? 'locked' : draft

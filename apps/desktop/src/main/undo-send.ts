@@ -14,6 +14,8 @@ export const undoSendKey = 'undo-sends'
 /** How long a send after a relaunch waits for its account to finish connecting. */
 const connectWaitMs = 2 * 60_000
 const connectPollMs = 250
+/** A pending-sends write that failed is tried again this often until it lands. */
+const retryWriteMs = 2_000
 /** A send stopped by `dispose` before it was handed over. */
 const stopped = new Error('Stopped before sending.')
 
@@ -24,6 +26,8 @@ const notSent = {
   deleted: 'This email was deleted before it was sent, so nothing was sent.',
   locked: 'Unlock the encryption vault, then send this email again. It’s in Drafts.',
   kept: 'Not sent. It’s in Drafts.',
+  closed:
+    'inlark closed before this email was sent, so it was kept in Drafts. Send it again when you’re ready.',
 } as const
 
 export interface UndoSendStore {
@@ -35,6 +39,8 @@ export interface UndoSendHost {
   settings(): Pick<Settings, 'undoSendSeconds' | 'undoSendOnQuit'>
   /** Saves the draft locally, as sending does first. */
   save(draft: Draft): Promise<Draft>
+  /** A server save of this draft already under way, if any. */
+  syncing(draftId: string): Promise<unknown> | undefined
   /** The draft as saved now; `locked` when it is protected and the vault is locked. */
   draft(id: string): Draft | 'locked' | undefined
   /** Today's send, unchanged. */
@@ -92,6 +98,12 @@ export class UndoSend {
   private preparing = new Map<string, { cancelled: boolean; done: Promise<void> }>()
   private quitting = false
   private disposed = false
+  // Writes of the pending sends, in order: one that failed is written again until one lands, so
+  // an Undo whose write failed is never left on disk to be sent by the next launch.
+  private writes = 0
+  private written = 0
+  private failed = 0
+  private retry?: ReturnType<typeof setTimeout>
   constructor(
     private store: UndoSendStore,
     private host: UndoSendHost,
@@ -112,8 +124,15 @@ export class UndoSend {
         continue
       }
       if (keep) {
+        // Its countdown had ended, so the bar said "Sending…": the draft says it wasn't sent.
+        // Noted first, so the server save below keeps the note.
+        const noted = record.releasedAt
+          ? this.host
+              .notSent(record.draftId, notSent.closed)
+              .catch(() => this.host.log('undo-send-save-failed'))
+          : Promise.resolve()
         // In the background: a quit soon after launch doesn't wait for a connection for it.
-        void this.keepDraft(record.draftId, record.accountId, record.updatedAt)
+        void noted.then(() => this.keepDraft(record.draftId, record.accountId, record.updatedAt))
         continue
       }
       const held: Held = { ...record, state: 'waiting' }
@@ -169,7 +188,7 @@ export class UndoSend {
   private async prepare(
     input: Draft,
     seconds: number,
-    token: { cancelled: boolean },
+    token: { cancelled: boolean; done: Promise<void> },
   ): Promise<{ result: Promise<SendResult | NotSentResult> }> {
     const undone = { status: 'undone' as const, message: notSent.undone }
     let draft: Draft
@@ -186,7 +205,7 @@ export class UndoSend {
       this.publish()
       return { result: Promise.resolve(undone) }
     }
-    if (this.quitting) return { result: this.whileQuitting(draft) }
+    if (this.quitting) return { result: this.whileQuitting(draft, token.done) }
     const held: Held = {
       draftId: draft.id,
       accountId: draft.accountId,
@@ -215,12 +234,26 @@ export class UndoSend {
       return { result }
     this.arm(held)
     this.publish()
+    // A server save that began before Send ends by storing the draft as it had it: the held
+    // copy is saved again over it, so the email that leaves is the one Send was pressed on.
+    const syncing = this.host.syncing(draft.id)
+    if (syncing)
+      this.track(
+        syncing.then(async () => {
+          if (this.held.get(draft.id) === held && held.state === 'waiting')
+            await this.host.save(draft).catch(() => this.host.log('undo-send-save-failed'))
+        }),
+      )
     return { result }
   }
   /** A Send that arrives once quitting has begun follows the quit setting straight away. */
-  private whileQuitting(draft: Draft): Promise<SendResult | NotSentResult> {
+  private whileQuitting(
+    draft: Draft,
+    prepared: Promise<void>,
+  ): Promise<SendResult | NotSentResult> {
     if (undoSendOnQuit(this.host.settings()) === 'draft') {
-      this.track(this.keepDraft(draft.id))
+      // Once this Send no longer holds the draft, or the server save would leave it alone.
+      this.track(prepared.then(() => this.keepDraft(draft.id)))
       return Promise.resolve({ status: 'unsent', message: notSent.kept })
     }
     const sending = this.host.send(draft)
@@ -259,7 +292,7 @@ export class UndoSend {
    * been sent (or kept as a draft, saved to the server). Undefined when nothing is pending.
    */
   onQuit(): Promise<void> | undefined {
-    if (!this.held.size && !this.runs.size) return undefined
+    if (!this.held.size && !this.runs.size && !this.dirty) return undefined
     this.quitting = true
     const waiting = [...this.held.values()].filter((h) => h.state === 'waiting')
     if (undoSendOnQuit(this.host.settings()) === 'draft') {
@@ -272,6 +305,8 @@ export class UndoSend {
     } else
       // Nobody can press Undo without a window: waiting longer would only delay quitting.
       for (const held of waiting) this.release(held)
+    // A write that failed earlier lands now, before the app goes.
+    if (this.dirty) this.track(this.persist().catch(() => this.host.log('undo-send-save-failed')))
     const settled = (): Promise<void> =>
       this.runs.size ? Promise.allSettled([...this.runs]).then(settled) : Promise.resolve()
     return settled()
@@ -280,6 +315,7 @@ export class UndoSend {
   /** Stops the timers, as when the app is killed: pending records stay on disk. */
   dispose() {
     this.disposed = true
+    if (this.retry) clearTimeout(this.retry)
     for (const held of this.held.values()) if (held.timer) this.clock.clearTimeout(held.timer)
   }
 
@@ -372,7 +408,28 @@ export class UndoSend {
         ...(releasedAt && { releasedAt }),
       }),
     )
-    return this.store.write(undoSendKey, records)
+    const write = this.store.write(undoSendKey, records)
+    const sequence = ++this.writes
+    write.then(
+      () => (this.written = Math.max(this.written, sequence)),
+      () => {
+        this.failed = Math.max(this.failed, sequence)
+        this.retryWrite()
+      },
+    )
+    return write
+  }
+  /** The last write that failed came after the last one that landed. */
+  private get dirty() {
+    return this.failed > this.written
+  }
+  private retryWrite() {
+    if (this.retry || this.disposed) return
+    this.retry = setTimeout(() => {
+      this.retry = undefined
+      if (this.dirty && !this.disposed)
+        void this.persist().catch(() => this.host.log('undo-send-save-failed'))
+    }, retryWriteMs)
   }
   private publish() {
     this.host.emit(this.heldSends())
