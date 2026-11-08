@@ -348,7 +348,7 @@ else {
         },
         restart: async () => {
           if (restartQueued) return
-          app.relaunch()
+          // Relaunched once quitting really goes ahead (see `before-quit`).
           restartQueued = true
           // Reply to the renderer before quitting through the normal cleanup and tray path.
           setImmediate(() => app.quit())
@@ -420,11 +420,19 @@ const quitSendWaitMs = 30_000
 /** Undo send: how long inlark stays running out of sight to finish pending emails. */
 const quitHeldWaitMs = 2 * 60_000
 let quitWaiting = false
+let relaunched = false
 app.on('before-quit', (event) => {
   quitting = true
-  // Undo send: a countdown still running follows "If you close the app during the countdown".
-  if (heldQuit === 'waiting') return event.preventDefault()
-  const held = heldQuit || quitWaiting ? undefined : service?.heldSendsOnQuit()
+  // Undo send: a second quit request, or the system logging out or shutting down, while inlark
+  // finishes out of sight goes straight through. The send journal and the pending records
+  // recover whatever was cut short, and the next launch follows the setting.
+  if (heldQuit === 'waiting') {
+    heldQuit = 'done'
+    quitWaiting = true
+  }
+  // Undo send: a countdown still running follows "If you close the app during the countdown",
+  // also when this quit ends a "Finishing sending…" wait.
+  const held = heldQuit ? undefined : service?.heldSendsOnQuit()
   if (held) {
     event.preventDefault()
     heldQuit = 'waiting'
@@ -432,16 +440,18 @@ app.on('before-quit', (event) => {
     if (window && !window.isDestroyed()) window.destroy()
     tray?.destroy()
     tray = null
+    const finishNow = () => heldQuit === 'waiting' && app.quit()
+    powerMonitor.once('shutdown', finishNow)
     let timer: ReturnType<typeof setTimeout> | undefined
     void Promise.race([
       held.then(() => service.sendsSettled()),
       new Promise((resolve) => (timer = setTimeout(resolve, quitHeldWaitMs))),
     ]).then(() => {
       clearTimeout(timer)
+      powerMonitor.removeListener('shutdown', finishNow)
+      if (heldQuit !== 'waiting') return
       heldQuit = 'done'
       quitWaiting = true
-      if (reopenAfterQuit && !restartQueued)
-        app.relaunch({ args: [...process.argv.slice(1), ...reopenArgs] })
       app.quit()
     })
     return
@@ -477,10 +487,19 @@ app.on('before-quit', (event) => {
     })
     return
   }
+  // Restart, or Undo send: asked to open while finishing out of sight. A `mailto:` from the
+  // original launch is not opened again; one that arrived meanwhile is.
+  if ((restartQueued || reopenAfterQuit) && !relaunched) {
+    relaunched = true
+    app.relaunch({
+      args: [...process.argv.slice(1).filter((a) => !a.startsWith('mailto:')), ...reopenArgs],
+    })
+  }
   // An open “Finishing sending…” box must never keep the app from exiting.
   if (quitWaiting) setTimeout(() => app.exit(0), 5000).unref()
   service?.dispose()
 })
 app.on('window-all-closed', () => {
+  if (heldQuit === 'waiting') return // Undo send: the window was closed on purpose
   if (!tray || !service?.settings.closeToTray) app.quit()
 })
