@@ -344,8 +344,8 @@ describe('Undo send through the mail service', () => {
     const result = service.sendWithUndo({ ...draft, followUp: true })
     await syncing
     await armed()
-    await settle()
-    expect(await localDraft()).toMatchObject({ followUp: true })
+    // Saved over the server save's copy once that ended: no reliance on timing.
+    await vi.waitFor(async () => expect(await localDraft()).toMatchObject({ followUp: true }))
     clock.advance(10_000)
     expect(await result).toMatchObject({ status: 'sent' })
     await service.sendsSettled()

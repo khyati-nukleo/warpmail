@@ -194,6 +194,9 @@ export class UndoSend {
     token: { cancelled: boolean; done: Promise<void> },
   ): Promise<{ result: Promise<SendResult | NotSentResult> }> {
     const undone = { status: 'undone' as const, message: notSent.undone }
+    // Read before anything waits: a server save running now ends by storing the draft as it had
+    // it, so the held copy is saved over it once it ends (see below).
+    const syncing = this.host.syncing(input.id)
     let draft: Draft
     try {
       draft = await this.host.save(input)
@@ -242,7 +245,6 @@ export class UndoSend {
     if (this.quitting) this.awaitLeaving(held)
     // A server save that began before Send ends by storing the draft as it had it: the held
     // copy is saved again over it, so the email that leaves is the one Send was pressed on.
-    const syncing = this.host.syncing(draft.id)
     if (syncing)
       this.track(
         syncing.then(async () => {

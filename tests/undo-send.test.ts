@@ -614,4 +614,25 @@ describe('Undo send: edges found in review', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(host.notSent).not.toHaveBeenCalled()
   })
+  it('a server save that ends while Send is still saving is still saved over', async () => {
+    // Like the service: the running save is listed only until it ends.
+    let syncing: Promise<unknown> | undefined
+    let ended!: () => void
+    syncing = new Promise<void>((resolve) => (ended = resolve)).then(() => (syncing = undefined))
+    host.syncing = () => syncing
+    let saved!: () => void
+    host.save.mockImplementationOnce(
+      (draft: Draft) => new Promise((resolve) => (saved = () => resolve(draft))),
+    )
+    const held = { ...base, followUp: true }
+    void undoSend.hold(held)
+    ended()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(syncing).toBeUndefined()
+    saved()
+    await vi.advanceTimersByTimeAsync(0)
+    // Saved once more over what the server save stored.
+    expect(host.save).toHaveBeenCalledTimes(2)
+    expect(host.save).toHaveBeenLastCalledWith(held)
+  })
 })
