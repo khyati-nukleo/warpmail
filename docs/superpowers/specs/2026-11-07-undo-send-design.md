@@ -22,7 +22,8 @@ reaches the server before the countdown ends, so Undo always works while the bar
    replacement, Reminders' labelling. With the setting Off, sending behaves exactly as today.
 4. **Second setting "If you close the app during the countdown":**
    - **Send it anyway** (default): the window closes straight away, but the app keeps running
-     out of sight until the pending email(s) are sent, then quits.
+     out of sight until the pending email(s) are sent, then quits. Each email still waits out
+     the rest of its own countdown before it is sent (decided 2026-11-08).
    - **Keep it as a draft:** the email isn't sent and stays in Drafts.
 5. **If the app is killed instead of closed** (crash, laptop shut mid-countdown): on the next
    launch, follow the same setting: send it, or leave it in Drafts. **Never send twice.**
@@ -83,13 +84,18 @@ one account, rows also name the account, as other notices in inlark do. `Z` undo
 "Closing" means quitting inlark. When inlark keeps running in the tray, closing the window just
 hides it, and the countdown carries on as normal.
 
-- **Send it anyway:** the window closes at once. Every waiting email is sent right away (nobody
-  can press Undo any more, so waiting longer would only keep the app running), then inlark waits
-  as it already does for sends in progress and Sent copies, and quits. The wait is capped at two
-  minutes so inlark never stays hidden for good. A send the cap cuts off after submission began is
-  reported on the next launch by the existing journal ("Delivery unconfirmed"), never resent; one
-  cut off before it reached the journal (still waiting for its account, say) left nothing behind,
-  so the next launch follows the setting for it.
+- **Send it anyway:** the window and the tray icon close at once. Each waiting email keeps its
+  own deadline: it waits out the rest of its countdown out of sight, then goes through the normal
+  send flow. inlark quits once every one has been sent (Sent copies included, as it already waits
+  for today) or has failed. Undo is out of reach during that wait, since there is no window; that
+  is accepted. A Send that arrives while quitting counts down the same way.
+- **The cap.** The hidden wait is capped at two minutes, so inlark never stays running out of
+  sight for good, for example when a server doesn't answer. Two minutes covers the longest
+  countdown (30 seconds) plus a normal send and its Sent copy with room to spare. A send the cap
+  cuts off after submission began is reported on the next launch by the existing journal
+  ("Delivery unconfirmed"), never resent. One cut off before it reached the journal (still
+  counting down, or waiting for its account) left nothing behind, so the next launch follows the
+  setting for it.
 - While inlark finishes out of sight, its once-a-minute refresh stops and it shows no
   notifications (new-mail and copied-code ones). Accounts stay connected, since the emails
   are being sent over them. If you open inlark again meanwhile (or click a `mailto:` link), it
@@ -104,9 +110,9 @@ hides it, and the countdown carries on as normal.
 - The setting applies to every quit, including one that ends the existing "Finishing sending…"
   wait, and a "Restart" from Settings.
 
-Quitting and being killed differ for an email with time left on its countdown. A quit with "Send
-it anyway" sends it at once; a kill leaves it on disk, and the next launch resumes its countdown
-with Undo (see below).
+For an email with time left on its countdown, a quit with "Send it anyway" sends it at its
+deadline, out of sight. A kill (or a second quit during the hidden wait) leaves it on disk, and
+the next launch resumes its countdown with Undo (see below).
 
 ### After a crash or a kill
 
@@ -177,6 +183,12 @@ Decided with Khyati (2026-11-07):
 5. A kill follows the same setting on the next launch, and never sends twice.
 6. Scheduled send is out of scope.
 
+Decided with Khyati (2026-11-08):
+
+36. **"Send it anyway" at quit waits out each email's remaining countdown**, out of sight, then
+    sends it through the normal flow and quits once all are sent or settled. Undo is not
+    reachable meanwhile, which is accepted. This replaces builder's call 10.
+
 Builder's calls (2026-11-07):
 
 7. **The countdown runs in main and is stored on disk** (`undo-sends.json`) with its due time;
@@ -186,11 +198,12 @@ Builder's calls (2026-11-07):
 9. **The send journal decides whether a send was attempted**; the pending record is marked
    `sending` with its hand-over time, and a `sending` record the journal never saw is followed
    per the setting rather than dropped (found in review: it was silently dropped at first).
-10. **Quit with "Send it anyway" sends at once** instead of waiting out the countdown: Undo is
-    unreachable without a window, and quitting sooner leaves less time to be cut off.
-11. **The hidden wait is capped at two minutes** (today's visible wait is 30 seconds). A send
-    still running at the cap is recovered by the journal on the next launch. During the wait
-    inlark doesn't check mail or notify, and a request to open it relaunches it afterwards.
+10. ~~**Quit with "Send it anyway" sends at once** instead of waiting out the countdown.~~
+    Replaced by Khyati's decision 36 (2026-11-08): each email waits out its countdown first.
+11. **The hidden wait is capped at two minutes** (today's visible wait is 30 seconds), enough
+    for the longest countdown plus sending. A send still running at the cap is recovered by the
+    journal on the next launch. During the wait the refresh timer and notifications stop, and a
+    request to open inlark relaunches it afterwards.
 12. **"Keep it as a draft" also saves the draft to the server's Drafts**: at quit within the same
     capped wait, after a kill once the account connects.
 13. **A relaunch with time left resumes the countdown with Undo** (send it anyway) rather than
