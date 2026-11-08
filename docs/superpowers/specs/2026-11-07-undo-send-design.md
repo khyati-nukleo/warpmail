@@ -90,12 +90,23 @@ hides it, and the countdown carries on as normal.
   reported on the next launch by the existing journal ("Delivery unconfirmed"), never resent; one
   cut off before it reached the journal (still waiting for its account, say) left nothing behind,
   so the next launch follows the setting for it.
-- While inlark finishes out of sight it stops checking for mail and shows no notifications. If
-  you open inlark again meanwhile (or click a `mailto:` link), it starts again as soon as it has
-  quit.
+- While inlark finishes out of sight, its once-a-minute refresh stops and it shows no
+  notifications (new-mail and copied-code ones). Accounts stay connected, since the emails
+  are being sent over them. If you open inlark again meanwhile (or click a `mailto:` link), it
+  starts again as soon as it has quit, opening only the new `mailto:` link.
+- A second quit request, or the system logging out or shutting down, during that wait goes
+  straight through. Whatever it cuts short is recovered on the next launch as after a kill.
 - **Keep it as a draft:** the waiting emails are not sent and stay in Drafts. Before quitting,
   inlark also saves each one to the server's Drafts folder (Gmail's Drafts), within the same
-  capped wait, so it is in Drafts on every device too.
+  capped wait, so it is in Drafts on every device too. An email whose countdown had already
+  ended, and so had been handed to sending ("Sending…" in the bar), is still sent: Undo was
+  already too late for it.
+- The setting applies to every quit, including one that ends the existing "Finishing sending…"
+  wait, and a "Restart" from Settings.
+
+Quitting and being killed differ for an email with time left on its countdown. A quit with "Send
+it anyway" sends it at once; a kill leaves it on disk, and the next launch resumes its countdown
+with Undo (see below).
 
 ### After a crash or a kill
 
@@ -120,7 +131,11 @@ not quietly retried either.
 
 If a pending send resumed after a relaunch doesn't go out (the draft changed or was deleted, or
 the encryption vault is still locked), the draft in Drafts says why, as for any send that
-failed.
+failed. So does one "Keep it as a draft" keeps on relaunch after its countdown had ended.
+
+An Undo always holds. Should writing it to disk fail, the write is tried again every two seconds
+until it lands, and once more before quitting, so the next launch never finds the undone email
+still waiting. The same goes for a countdown replaced by a second Send.
 
 ### When the draft changed meanwhile
 
@@ -205,6 +220,26 @@ Builder's calls (2026-11-07):
     make changes") and while it is sending.
 27. **"Newest" is the one that leaves last.** If the delay changed between two sends, `Z` undoes
     the one with the later deadline.
+28. **A failed write of the pending sends is retried** (every two seconds, and once more at quit)
+    rather than refusing Undo: Undo must win against the deadline at once, and the retry makes it
+    stick on disk (found in review).
+29. **A server draft save already running at Send is allowed to finish**, then the held copy is
+    saved over it. Waiting for it first would delay the countdown bar. The draft it was saving
+    reaches Gmail's Drafts, since that save began before Send (found in review).
+30. **"Keep it as a draft" for a Send still saving at quit** saves it to the server once the Send
+    has let go of the draft (found in review).
+31. **A second quit, or a system log out or shut down, during the hidden wait goes straight
+    through** instead of being refused for up to two minutes (found in review).
+32. **The quit setting applies at the end of a "Finishing sending…" wait too** (found in
+    review).
+33. **Relaunching happens once, when quitting really goes ahead**, for a Restart and for a
+    request to open during the hidden wait, without the original launch's `mailto:` link
+    (found in review).
+34. **A relaunch with "Keep it as a draft" notes on the draft** that an email whose countdown
+    had ended was kept, not sent (found in review).
+35. **A second Send of the same draft keeps its "still sending" state** when the first one's
+    result comes back. Reopening a not-sent notice or a Needs attention entry for a held draft
+    is refused, like the Drafts list (found in review).
 
 ## How it's built
 
