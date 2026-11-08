@@ -288,6 +288,13 @@ export function App() {
       void queryClient.invalidateQueries({ queryKey: ['drafts'] })
       if (!result.draft) return notify('Not sent. It’s in Drafts.', 'info')
       await localSaveDraft(result.draft)
+      // Another email is being written: it is never swapped out under the cursor.
+      if (composer && composer.id !== draftId)
+        return setToast({
+          text: 'Not sent. It’s in Drafts.',
+          tone: 'info',
+          action: { label: 'Open draft', run: () => void openNotSent(draftId), draftId },
+        })
       setComposer(result.draft)
     } catch (e) {
       fail(e)

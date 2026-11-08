@@ -109,12 +109,13 @@ leaves) is checked as well. Either one is enough to stop a second send.
 
 ### When the draft changed meanwhile
 
-The draft stays in Drafts during the countdown, but opening it from the Drafts list says it is
-still sending, as today. If it was still changed or deleted somehow (another window state, an
-encrypted draft locked meanwhile), the countdown ends without sending:
+The draft stays in Drafts during the countdown. Opening it from the Drafts list says "This
+message is about to be sent. Undo it to make changes." If it was still changed or deleted (for
+example discarded from the Drafts list, or edited through its server copy), the countdown ends
+without sending:
 
-- edited since Send → not sent; it stays in Drafts with your edits, and the bar's notice says so;
-- deleted → nothing is sent;
+- edited since Send → not sent; it stays in Drafts with your edits, and a notice says so;
+- deleted → nothing is sent, and a notice says so;
 - protected draft while the vault is locked (e.g. after a relaunch) → not sent, stays in Drafts.
 
 ## Left out on purpose
@@ -171,6 +172,10 @@ Builder's calls (2026-11-07):
 19. **The setting sits in Settings → General, in a new "Sending" section**, next to the other
     everyday preferences, as Gmail does.
 20. **Changing the setting doesn't affect sends already counting down.**
+21. **Undo while another email is open in the composer doesn't replace it**: the notice says
+    "Not sent. It's in Drafts." with "Open draft", so nothing typed in the open composer is lost.
+22. **During the countdown the draft is not uploaded to Gmail's Drafts** (see the table above);
+    an existing server copy stays there until the email has really been sent.
 
 ## How it's built
 
