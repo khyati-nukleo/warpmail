@@ -86,8 +86,13 @@ hides it, and the countdown carries on as normal.
 - **Send it anyway:** the window closes at once. Every waiting email is sent right away (nobody
   can press Undo any more, so waiting longer would only keep the app running), then inlark waits
   as it already does for sends in progress and Sent copies, and quits. The wait is capped at two
-  minutes so inlark never stays hidden for good; a send cut off by the cap is reported on the next
-  launch by the existing journal ("Delivery unconfirmed"), never resent.
+  minutes so inlark never stays hidden for good. A send the cap cuts off after submission began is
+  reported on the next launch by the existing journal ("Delivery unconfirmed"), never resent; one
+  cut off before it reached the journal (still waiting for its account, say) left nothing behind,
+  so the next launch follows the setting for it.
+- While inlark finishes out of sight it stops checking for mail and shows no notifications. If
+  you open inlark again meanwhile (or click a `mailto:` link), it starts again as soon as it has
+  quit.
 - **Keep it as a draft:** the waiting emails are not sent and stay in Drafts. Before quitting,
   inlark also saves each one to the server's Drafts folder (Gmail's Drafts), within the same
   capped wait, so it is in Drafts on every device too.
@@ -96,16 +101,26 @@ hides it, and the countdown carries on as normal.
 
 On the next launch main reads `undo-sends.json`:
 
-| Record found                                          | What happens                                                                                                             |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `sending`, or the send journal shows the send started | Dropped. The journal already knows what happened and recovers it as today (sent, unconfirmed or not sent). Never resent. |
-| `waiting`, setting "Keep it as a draft"               | Dropped. The draft stays in Drafts and is saved to the server's Drafts once its account connects.                        |
-| `waiting`, "Send it anyway", countdown already over   | Marked `sending`, then sent once its account has connected.                                                              |
-| `waiting`, "Send it anyway", countdown not over yet   | The countdown resumes with the time left, with Undo, as if the app had never stopped.                                    |
+| Record found                                                  | What happens                                                                                                                          |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| The send journal shows an attempt (since the countdown ended) | Dropped. The journal already knows what happened and recovers it as today (sent, unconfirmed or not sent), and says so. Never resent. |
+| No attempt on record, setting "Keep it as a draft"            | Dropped. The draft stays in Drafts and is saved to the server's Drafts once its account connects.                                     |
+| No attempt, "Send it anyway", countdown over (or `sending`)   | Marked `sending`, then sent once its account has connected.                                                                           |
+| No attempt, "Send it anyway", countdown not over yet          | The countdown resumes with the time left, with Undo, as if the app had never stopped.                                                 |
 
-"Never send twice" rests on two independent guards: the record is marked `sending` before the
-send starts, and the send journal (written as `preparing`, then `submitting`, before anything
-leaves) is checked as well. Either one is enough to stop a second send.
+A record marked `sending` with no attempt in the journal never got as far as submitting: the
+journal reaches `preparing` on disk before anything can leave. So nothing left, and it follows the
+setting instead of being silently dropped.
+
+"Never send twice" rests on the send journal, written as `preparing` and then `submitting` before
+anything leaves: a relaunch never starts a send the journal shows was attempted, and today's
+`send` itself refuses to submit a draft whose journal shows a send under way or done. The
+pending record also notes when it was handed over, so an attempt the server refused outright is
+not quietly retried either.
+
+If a pending send resumed after a relaunch doesn't go out (the draft changed or was deleted, or
+the encryption vault is still locked), the draft in Drafts says why, as for any send that
+failed.
 
 ### When the draft changed meanwhile
 
@@ -120,17 +135,19 @@ without sending:
 
 ## Left out on purpose
 
-| Left out                                                     | Why                                                                                                                                         | Decided by     |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| Scheduled send ("send tomorrow at 9")                        | Out of scope. The pending-send store and timer here can carry a later due time when it is built.                                            | Khyati         |
-| Undo after the email has left                                | Impossible: once the server has it, recipients may already have it. The bar never offers it.                                                | Khyati         |
-| A custom delay (e.g. 7 s)                                    | The five choices cover it.                                                                                                                  | Khyati         |
-| The countdown on "Check delivery" for unconfirmed sends      | That sends nothing; it only asks the server.                                                                                                | builder's call |
-| Keeping the countdown going while the app is quit            | A desktop app can't. Quit follows the second setting; a kill follows it on the next launch.                                                 | builder's call |
-| Saving to Gmail's Drafts during the countdown                | It would add a server write to every send that the send then deletes, and slow sending down. Only "Keep it as a draft" saves to the server. | builder's call |
-| A "Sent" notice after a relaunch finished a pending send     | No window was waiting for it. Failures still show on the draft in Drafts and in Needs attention.                                            | builder's call |
-| Undo send in the demo mode                                   | The demo sends nothing; it keeps sending immediately.                                                                                       | builder's call |
-| Changing a pending send's countdown when the setting changes | Each send keeps the delay it started with.                                                                                                  | builder's call |
+| Left out                                                      | Why                                                                                                                                         | Decided by     |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| Scheduled send ("send tomorrow at 9")                         | Out of scope. The pending-send store and timer here can carry a later due time when it is built.                                            | Khyati         |
+| Undo after the email has left                                 | Impossible: once the server has it, recipients may already have it. The bar never offers it.                                                | Khyati         |
+| A custom delay (e.g. 7 s)                                     | The five choices cover it.                                                                                                                  | Khyati         |
+| The countdown on "Check delivery" for unconfirmed sends       | That sends nothing; it only asks the server.                                                                                                | builder's call |
+| Keeping the countdown going while the app is quit             | A desktop app can't. Quit follows the second setting; a kill follows it on the next launch.                                                 | builder's call |
+| Saving to Gmail's Drafts during the countdown                 | It would add a server write to every send that the send then deletes, and slow sending down. Only "Keep it as a draft" saves to the server. | builder's call |
+| A "Sent" notice after a relaunch finished a pending send      | No window was waiting for it. Failures and sends that didn't go out show on the draft in Drafts and in Needs attention.                     | builder's call |
+| Waiting for the vault to be unlocked to send after a relaunch | The draft can't be read until then. It isn't sent and says to unlock and send again.                                                        | builder's call |
+| Resuming a countdown across "Restart" (title bar setting)     | A restart is a quit: it follows the quit setting like any other.                                                                            | builder's call |
+| Undo send in the demo mode                                    | The demo sends nothing; it keeps sending immediately.                                                                                       | builder's call |
+| Changing a pending send's countdown when the setting changes  | Each send keeps the delay it started with.                                                                                                  | builder's call |
 
 ## Decision log
 
@@ -151,12 +168,14 @@ Builder's calls (2026-11-07):
    the draft is not copied. The window only shows the bar and asks to undo.
 8. **A new `sendWithUndo` call**, so today's `send` is untouched and Off is literally today's
    code path.
-9. **Marked `sending` before submission, and the send journal is checked too**, so a relaunch
-   never sends twice even if one of the two writes was lost.
+9. **The send journal decides whether a send was attempted**; the pending record is marked
+   `sending` with its hand-over time, and a `sending` record the journal never saw is followed
+   per the setting rather than dropped (found in review: it was silently dropped at first).
 10. **Quit with "Send it anyway" sends at once** instead of waiting out the countdown: Undo is
     unreachable without a window, and quitting sooner leaves less time to be cut off.
 11. **The hidden wait is capped at two minutes** (today's visible wait is 30 seconds). A send
-    still running at the cap is recovered by the journal on the next launch.
+    still running at the cap is recovered by the journal on the next launch. During the wait
+    inlark doesn't check mail or notify, and a request to open it relaunches it afterwards.
 12. **"Keep it as a draft" also saves the draft to the server's Drafts**: at quit within the same
     capped wait, after a kill once the account connects.
 13. **A relaunch with time left resumes the countdown with Undo** (send it anyway) rather than
@@ -174,8 +193,18 @@ Builder's calls (2026-11-07):
 20. **Changing the setting doesn't affect sends already counting down.**
 21. **Undo while another email is open in the composer doesn't replace it**: the notice says
     "Not sent. It's in Drafts." with "Open draft", so nothing typed in the open composer is lost.
-22. **During the countdown the draft is not uploaded to Gmail's Drafts** (see the table above);
-    an existing server copy stays there until the email has really been sent.
+22. **During the countdown the draft is not uploaded to Gmail's Drafts** (see the table above):
+    background draft saves leave a held draft alone. An existing server copy stays there until
+    the email has really been sent.
+23. **The draft is read again after waiting for its account**, just before it is handed to
+    sending, so an edit or a delete during that wait is still honoured (found in review).
+24. **A Send arriving while quitting follows the quit setting**, and a quit right after Send
+    waits for that Send to be recorded first (found in review).
+25. **Undo while a second Send of the same draft is still saving cancels that Send.**
+26. **Opening a held draft from the Drafts list is refused** while it counts down ("Undo it to
+    make changes") and while it is sending.
+27. **"Newest" is the one that leaves last.** If the delay changed between two sends, `Z` undoes
+    the one with the later deadline.
 
 ## How it's built
 

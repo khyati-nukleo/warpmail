@@ -368,7 +368,14 @@ export class MailService {
           return draft?.encryption === 'encrypt' && !this.protectedLoaded.has(id) ? 'locked' : draft
         },
         send: (draft) => this.send(draft),
-        started: (id) => this.claimedBySend(id),
+        started: (id, since) => {
+          const journal = this.journals.get(id)
+          return (
+            this.sending.has(id) ||
+            (!!journal && (journal.state !== 'rejected' || (!!since && journal.at >= since)))
+          )
+        },
+        notSent: (id, message) => this.noteNotSent(id, message),
         connecting: (accountId) =>
           this.accounts.find((a) => a.id === accountId)?.status === 'connecting',
         keep: (draft) => this.syncDraft(draft),
@@ -1567,7 +1574,11 @@ export class MailService {
   /** A draft being sent, or with a send on record, belongs to the send, not to draft saves. */
   private claimedBySend(id: string) {
     const journal = this.journals.get(id)
-    return this.sending.has(id) || (!!journal && journal.state !== 'rejected')
+    return (
+      this.sending.has(id) ||
+      (!!journal && journal.state !== 'rejected') ||
+      this.undoSends.holds(id) // Undo send: counting down
+    )
   }
   syncDraft = async (input: Draft): Promise<Draft> => {
     if (this.protectionTransition) throw new Error('The vault is locking.')
@@ -1927,7 +1938,16 @@ export class MailService {
   undoSend = (draftId: string) => this.undoSends.undo(draftId)
   heldSends = async () => this.undoSends.heldSends()
   /** Quitting: sends or keeps pending emails per the setting. Undefined when none are pending. */
-  heldSendsOnQuit = () => this.undoSends.onQuit()
+  heldSendsOnQuit = () => {
+    const held = this.undoSends.onQuit()
+    if (held) {
+      // Out of sight from here on: no more checking for mail, no notifications.
+      if (this.timer) clearInterval(this.timer)
+      this.timer = undefined
+      this.settings = { ...this.settings, notifications: false, autoCopyAuth: false }
+    }
+    return held
+  }
   /**
    * Records why a draft was not sent, as a refused attempt, and (unless `onDraft` is false)
    * notes it on the saved draft. The draft's content is left exactly as saved.

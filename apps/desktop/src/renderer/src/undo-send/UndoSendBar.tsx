@@ -12,10 +12,13 @@ import { heldRows } from './held-text'
 export function UndoSendBar({
   sends,
   accounts,
+  shortcut = true,
   onUndo,
 }: {
   sends: HeldSend[]
   accounts: { id: string; name: string }[]
+  /** Whether the Undo shortcut undoes the newest send now (not the toast's action). */
+  shortcut?: boolean
   onUndo: (draftId: string) => void
 }) {
   const [now, setNow] = useState(() => Date.now())
@@ -54,7 +57,7 @@ export function UndoSendBar({
               onClick={() => onUndo(row.draftId)}
             >
               Undo
-              {row.draftId === newest && <ShortcutHint id="undo" />}
+              {shortcut && row.draftId === newest && <ShortcutHint id="undo" />}
             </button>
           )}
         </div>

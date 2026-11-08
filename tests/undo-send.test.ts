@@ -49,6 +49,7 @@ let store: ReturnType<typeof memoryStore>
 let host: UndoSendHost & {
   send: ReturnType<typeof vi.fn<(draft: Draft) => Promise<SendResult>>>
   keep: ReturnType<typeof vi.fn<(draft: Draft) => Promise<unknown>>>
+  notSent: ReturnType<typeof vi.fn<(id: string, message: string) => Promise<void>>>
   emit: ReturnType<typeof vi.fn>
 }
 let undoSend: UndoSend
@@ -80,6 +81,7 @@ beforeEach(async () => {
     started: (draftId) => started.has(draftId),
     connecting: (accountId) => connecting.has(accountId),
     keep: vi.fn(async (draft: Draft) => draft),
+    notSent: vi.fn(async () => {}),
     emit: vi.fn(),
     log: () => {},
   }
@@ -389,7 +391,11 @@ describe('Undo send: relaunching after the app was killed', () => {
     expect(host.send).not.toHaveBeenCalled()
   })
   it('never sends again when the kill came after sending started', async () => {
-    host.send.mockImplementationOnce(() => new Promise(() => {}))
+    // Like today's send: the journal records the attempt before anything leaves.
+    host.send.mockImplementationOnce((draft) => {
+      started.add(draft.id)
+      return new Promise(() => {})
+    })
     void undoSend.hold(base)
     await vi.advanceTimersByTimeAsync(10_000)
     expect(records()).toMatchObject([{ state: 'sending' }])
@@ -425,5 +431,101 @@ describe('Undo send: relaunching after the app was killed', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(host.send).not.toHaveBeenCalled()
     expect(records()).toEqual([])
+  })
+  it('sends a record marked sending that never reached the journal, as nothing left', async () => {
+    connecting.add('work')
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(10_000)
+    // Killed while waiting for the account: marked sending, but no attempt on record.
+    expect(records()).toMatchObject([{ state: 'sending' }])
+    expect(host.send).not.toHaveBeenCalled()
+    await kill()
+    connecting.delete('work')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.send).toHaveBeenCalledTimes(1)
+  })
+  it('keeps such a record as a draft when that is the setting', async () => {
+    connecting.add('work')
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(10_000)
+    settings = { undoSendOnQuit: 'draft' }
+    await kill()
+    connecting.delete('work')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.send).not.toHaveBeenCalled()
+    expect(host.keep).toHaveBeenCalledWith(base)
+  })
+  it('re-reads the draft after waiting for the connection: edited or deleted meanwhile, not sent', async () => {
+    void undoSend.hold(base)
+    void undoSend.hold({ ...base, id: other })
+    await vi.advanceTimersByTimeAsync(3_000)
+    undoSend.dispose()
+    await vi.advanceTimersByTimeAsync(60_000)
+    connecting.add('work')
+    await start()
+    drafts.set(id, { ...base, text: 'Changed', updatedAt: '2026-11-07T10:01:00.000Z' })
+    drafts.delete(other)
+    connecting.delete('work')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(host.send).not.toHaveBeenCalled()
+    // Nobody is waiting on these after a relaunch, so the draft itself says why.
+    expect(host.notSent).toHaveBeenCalledWith(id, expect.stringContaining('changed'))
+  })
+})
+
+describe('Undo send: edges found in review', () => {
+  it('an Undo while a second Send of the draft is still saving cancels that Send', async () => {
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(2_000)
+    let saved!: () => void
+    host.save.mockImplementationOnce(
+      (draft: Draft) => new Promise((resolve) => (saved = () => resolve(draft))),
+    )
+    const again = undoSend.hold({ ...base, updatedAt: '2026-11-07T10:00:07.000Z' })
+    const undo = undoSend.undo(id)
+    saved()
+    expect(await undo).toMatchObject({ undone: true })
+    expect(await again).toMatchObject({ status: 'undone' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(host.send).not.toHaveBeenCalled()
+    expect(records()).toEqual([])
+  })
+  it('a quit while a Send is still saving waits for it, and keeps it when that is the setting', async () => {
+    settings = { undoSendOnQuit: 'draft' }
+    let saved!: () => void
+    host.save.mockImplementationOnce(
+      (draft: Draft) => new Promise((resolve) => (saved = () => resolve(draft))),
+    )
+    const result = undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(0)
+    const quit = undoSend.onQuit()
+    expect(quit).toBeDefined()
+    saved()
+    await quit
+    expect(await result).toMatchObject({ status: 'unsent' })
+    expect(host.keep).toHaveBeenCalledWith(base)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(host.send).not.toHaveBeenCalled()
+  })
+  it('a quit while a Send is still saving sends it before settling, with "Send it anyway"', async () => {
+    let saved!: () => void
+    host.save.mockImplementationOnce(
+      (draft: Draft) => new Promise((resolve) => (saved = () => resolve(draft))),
+    )
+    void undoSend.hold(base)
+    await vi.advanceTimersByTimeAsync(0)
+    let done = false
+    void undoSend.onQuit()!.then(() => (done = true))
+    saved()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.send).toHaveBeenCalledTimes(1)
+    expect(done).toBe(true)
+  })
+  it('claims the draft from background saves while it is held', async () => {
+    expect(undoSend.holds(id)).toBe(false)
+    void undoSend.hold(base)
+    expect(undoSend.holds(id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(undoSend.holds(id)).toBe(false)
   })
 })

@@ -301,6 +301,17 @@ describe('Undo send through the mail service', () => {
     expect(submit).not.toHaveBeenCalled()
     expect(await localDraft()).toMatchObject({ text: 'Changed' })
   })
+  it('background draft saves leave a held draft alone: nothing reaches Drafts on the server', async () => {
+    const result = service.sendWithUndo(draft)
+    await settle()
+    // The periodic save of drafts idle for 10 seconds, and a save asked for directly.
+    await (service as unknown as { syncPendingDrafts(): Promise<void> }).syncPendingDrafts()
+    await service.syncDraft(draft)
+    await settle()
+    expect(server.box('Drafts').messages).toHaveLength(0)
+    clock.advance(10_000)
+    expect(await result).toMatchObject({ status: 'sent' })
+  })
   it('a draft deleted during the countdown is not sent', async () => {
     const result = service.sendWithUndo(draft)
     await settle()

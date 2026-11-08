@@ -49,6 +49,10 @@ let unreadCount = 0,
 // Keep the current window's mode while a saved preference waits for the next restart.
 let windowUsesSystemTitleBar = false
 let restartQueued = false
+// Undo send: finishing pending emails out of sight after a quit (see `before-quit`).
+let heldQuit: 'waiting' | 'done' | undefined
+let reopenAfterQuit = false
+const reopenArgs: string[] = []
 let service: MailService
 const updates = new UpdateManager((status) => send({ type: 'update', status }))
 const pendingEvents: AppEvent[] = []
@@ -59,6 +63,7 @@ if (smoke && !process.env.INLARK_DATA_DIR)
   throw new Error('Smoke tests require a separate INLARK_DATA_DIR.')
 const devURL = process.env.ELECTRON_RENDERER_URL
 function send(event: AppEvent) {
+  if (event.type === 'mailto' && heldQuit === 'waiting') reopenArgs.push(event.url) // Undo send
   if (event.type === 'open' || event.type === 'mailto') show()
   if (window && rendererReady) window.webContents.send('mail:event', event)
   else if (event.type === 'open' || event.type === 'mailto') pendingEvents.push(event)
@@ -82,6 +87,8 @@ function send(event: AppEvent) {
   }
 }
 function show() {
+  // Undo send: quitting out of sight. Asked to open meanwhile, inlark starts again afterwards.
+  if (heldQuit === 'waiting') return void (reopenAfterQuit = true)
   if (!window) createWindow()
   window?.show()
   window?.focus()
@@ -413,7 +420,6 @@ const quitSendWaitMs = 30_000
 /** Undo send: how long inlark stays running out of sight to finish pending emails. */
 const quitHeldWaitMs = 2 * 60_000
 let quitWaiting = false
-let heldQuit: 'waiting' | 'done' | undefined
 app.on('before-quit', (event) => {
   quitting = true
   // Undo send: a countdown still running follows "If you close the app during the countdown".
@@ -434,6 +440,8 @@ app.on('before-quit', (event) => {
       clearTimeout(timer)
       heldQuit = 'done'
       quitWaiting = true
+      if (reopenAfterQuit && !restartQueued)
+        app.relaunch({ args: [...process.argv.slice(1), ...reopenArgs] })
       app.quit()
     })
     return

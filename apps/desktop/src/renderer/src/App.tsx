@@ -286,7 +286,7 @@ export function App() {
           'info',
         )
       void queryClient.invalidateQueries({ queryKey: ['drafts'] })
-      if (!result.draft) return notify('Not sent. It’s in Drafts.', 'info')
+      if (!result.draft) return notify('Not sent.', 'info')
       await localSaveDraft(result.draft)
       // Another email is being written: it is never swapped out under the cursor.
       if (composer && composer.id !== draftId)
@@ -881,7 +881,10 @@ export function App() {
       held.some((s) => s.draftId === item.draft.id && s.state === 'waiting')
     )
       return notify('This message is about to be sent. Undo it to make changes.', 'info')
-    if (item.kind === 'local' && outbox.has(item.draft.id))
+    if (
+      item.kind === 'local' &&
+      (outbox.has(item.draft.id) || held.some((s) => s.draftId === item.draft.id))
+    )
       return notify('This message is still sending.', 'info')
     if (item.kind === 'local') return setComposer(item.draft)
     try {
@@ -2654,7 +2657,12 @@ export function App() {
         </div>
       )}
       {/* Undo send */}
-      <UndoSendBar sends={held} accounts={accounts} onUndo={(id) => void undoHeld(id)} />
+      <UndoSendBar
+        sends={held}
+        accounts={accounts}
+        shortcut={undoSendFirst}
+        onUndo={(id) => void undoHeld(id)}
+      />
       <Suspense
         fallback={
           <div
