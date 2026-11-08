@@ -13,7 +13,8 @@ const list = (values: readonly unknown[]) => JSON.stringify(values)
 
 // Filter keys whose absence keeps every inbox row of a thread in its group. Any other key set,
 // including one added later, sends Important to the EXISTS form, which is right for any filter.
-const groupSafe = new Set(['mailboxIds', 'split'])
+// Reminders: `boost` only reorders.
+const groupSafe = new Set(['mailboxIds', 'split', 'boost'])
 
 /**
  * The tab as conditions on the inbox messages `m` of a query grouped by `m.thread_id`, or
@@ -98,7 +99,7 @@ function ruleThreads(
  * `messages_mailbox_person`, so it is read by `seq`, and only for always senders with words.
  * Every list is one JSON parameter, so the expression is the same size for 1 sender or 500.
  */
-function person(scope: Important, alias: string): SqlFragment {
+export function person(scope: Important, alias: string): SqlFragment {
   const params: SQLInputValue[] = []
   const terms = [`${alias}.automated = 0`]
   // `from_email` is one of `addresses`. One address, the usual case, is a plain comparison: an

@@ -110,6 +110,9 @@ import { emptyListState } from './empty-states'
 import { TabDialogs } from './split/TabEditor'
 import { TabEmptyState, TabRow } from './split/TabRow'
 import { useSplitInbox } from './split/useSplitInbox'
+import { useReminders } from './reminders/useReminders'
+import { returnedToast } from './reminders/reminder-actions'
+import { SnoozePicker } from './snooze/SnoozePicker'
 import { AccountMark } from './AccountMark'
 import { lockVault, useEncryption } from './encryption-ui'
 import { useUnlock } from './encryption-actions'
@@ -450,6 +453,13 @@ export function App() {
   const listed = conversations.find(
     (c) => c.id === route.thread && c.accountId === route.threadAccount,
   )
+  // Reminders: the open conversation, else the focused row.
+  const reminders = useReminders({
+    settings,
+    conversation: () => (route.thread ? listed : conversations.find((c) => c.key === focused)),
+    notify,
+    showToast: setToast,
+  })
   // Watched, never fetched here, so a read-ahead that lands while the conversation opens shows.
   const ahead = useQuery<Message[]>({
     queryKey: readAheadKey(route.threadAccount, route.thread),
@@ -479,7 +489,8 @@ export function App() {
     !!folderDialog ||
     !!moveTargets ||
     !!confirmAction ||
-    split.dialogOpen
+    split.dialogOpen ||
+    reminders.pickerOpen
   const go = (next: Partial<typeof route>, reset = true) => {
     if (reset) {
       setSelected(new Set())
@@ -988,6 +999,7 @@ export function App() {
       if (event.type === 'update') setUpdateStatus(event.status)
       if (event.type === 'readStatus')
         void queryClient.invalidateQueries({ queryKey: ['readStatus'] }) // Read status
+      if (event.type === 'remindersReturned') setToast(returnedToast(event))
     })
     if (boot.data) {
       void api
@@ -1210,6 +1222,7 @@ export function App() {
       goTrash: { run: () => go({ view: 'trash' }) },
       goAll: { run: () => go({ view: 'all' }) },
       ...split.shortcutHandlers,
+      ...reminders.shortcutHandlers,
     },
     !blocked,
   )
@@ -1378,6 +1391,7 @@ export function App() {
         ]
       : []),
     ...conversationCommands,
+    ...reminders.commands,
     {
       id: 'compose',
       group: 'Mail',
@@ -1755,6 +1769,7 @@ export function App() {
               onAddToTab={split.addSender}
               alwaysShow={split.important?.alwaysShow}
               neverShow={split.important?.neverShow}
+              reminder={reminders.reader}
               onUnlock={() => void unlock()}
               onOpenEncryption={() => openSettings('encryption')}
             />
@@ -2664,6 +2679,7 @@ export function App() {
         }}
       />
       <TabDialogs {...split.dialogs} />
+      <SnoozePicker {...reminders.picker} />
       <ConfirmActionDialog
         action={confirmAction}
         count={allMatching ? total : targets().length}

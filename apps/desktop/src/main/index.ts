@@ -356,6 +356,9 @@ else {
         readStatusInfo: service.readStatusInfo,
         setReadStatusPassword: service.setReadStatusPassword,
         testReadStatus: service.testReadStatus,
+        // Reminders
+        dismissReminder: service.dismissReminder,
+        restoreReminder: service.restoreReminder,
       }
       for (const [name, schema] of Object.entries(ipcSchemas))
         ipcMain.handle('mail:' + name, async (event, ...args: unknown[]) => {
@@ -386,7 +389,7 @@ else {
       } catch {
         tray = null
       }
-      powerMonitor.on('resume', () => void service.refresh())
+      powerMonitor.on('resume', () => void service.resume()) // Reminders: was refresh()
       if (!demo && !smoke) updates.start()
       app.on('activate', show)
       mailtoFromArgs(process.argv)

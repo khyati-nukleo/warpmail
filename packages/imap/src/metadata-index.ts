@@ -1,4 +1,4 @@
-import type { Address, AddressSeen, SplitScope } from '@inlark/core'
+import type { Address, AddressSeen, ReminderFacts, ReminderLabel, SplitScope } from '@inlark/core'
 
 /**
  * Persistent IMAP metadata, injected into the provider. The desktop app implements this with
@@ -113,6 +113,18 @@ export interface MetadataIndex {
     sinceMs: number,
     term: string,
   ): Promise<AddressSeen[]>
+  // Reminders
+  /** Per recent thread, what reminders are derived from: its latest message from a person. */
+  reminderFacts(accountId: string, query: ReminderFactsQuery): Promise<ReminderFacts[]>
+  /** Sent mail since `sinceMs` with a Message-ID and no stored ask-check, newest first. */
+  askChecksNeeded(
+    accountId: string,
+    sentId: string,
+    sinceMs: number,
+    limit: number,
+  ): Promise<{ id: string; messageId: string }[]>
+  /** Stores ask-checks by Message-ID, so Gmail's copies share one answer. */
+  setAskChecks(accountId: string, rows: { messageId: string; asks: boolean }[]): Promise<void>
   /** Total and unread message counts stored for the account, for progress reporting. */
   counts(accountId: string): Promise<{ messages: number }>
 
@@ -262,11 +274,17 @@ export interface ConversationFilter {
   before?: string
   /** Only conversations in this tab. Needs exactly one `mailboxIds` entry: the inbox. */
   split?: SplitScope
+  // Reminders
+  /** Threads in the result sort by `sortMs` (ms) when it is after their latest date; adds none. */
+  boost?: { threadId: string; sortMs: number }[]
 }
 
 export interface ConversationCursor {
   receivedAt: string
   threadId: string
+  // Reminders
+  /** The row's boosted sort time, when it had one. */
+  sortMs?: number
 }
 
 export interface ConversationRow {
@@ -275,4 +293,25 @@ export interface ConversationRow {
   latest: IndexedMessage
   /** Emails in the whole conversation, matching or not, counting each server identity once. */
   count: number
+  // Reminders
+  /** Set only when a boost moved the row: the time it sorts by. */
+  sortMs?: number
+}
+
+// Reminders
+export interface ReminderFactsQuery {
+  inboxId: string
+  /** The archive role's folder: returns move mail back from it. */
+  archiveId?: string
+  /** Mailboxes whose messages count: not Drafts, Trash, Junk or the label folders. */
+  mailboxIds: string[]
+  labelIds: Partial<Record<ReminderLabel, string>>
+  important: Extract<SplitScope, { kind: 'important' }>
+  /** Threads with mail in `mailboxIds` since then; older ones only when in `threadIds`. */
+  sinceMs: number
+  threadIds?: string[]
+  /** Emails with a copy here are unsent drafts (Gmail lists them in All Mail too). */
+  draftsId?: string
+  /** My addresses, lowercase: what tells my messages from everyone else's. */
+  own?: string[]
 }

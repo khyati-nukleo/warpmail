@@ -180,6 +180,7 @@ export const draftSchema = z.object({
   encryptionRequired: z.boolean().optional(),
   downgradeConfirmed: z.boolean().optional(),
   earlierPlaintext: z.boolean().optional(),
+  followUp: z.boolean().optional(), // Reminders
   status: z.enum(['local', 'saving', 'synced', 'error', 'sending', 'uncertain', 'sent']),
   error: z.string().optional(),
   errorKind: z
@@ -242,6 +243,27 @@ export const settingsSchema = z.object({
       workerUrl: z.string().max(2048).optional(),
       previousWorkerUrls: z.array(z.string().max(2048)).max(10).optional(),
     })
+    .optional(),
+  // Reminders
+  reminders: z
+    .object({
+      enabled: z.boolean().optional(),
+      followUp: z.boolean().optional(),
+      forgotToReply: z.boolean().optional(),
+      followUpDays: z.number().int().min(1).max(30).optional(),
+      replyDays: z.number().int().min(1).max(30).optional(),
+    })
+    .optional(),
+  reminderSnoozes: z
+    .array(
+      z.object({
+        accountId: id,
+        threadId: id,
+        messageId: z.string().max(998),
+        until: z.number().int(),
+      }),
+    )
+    .max(500)
     .optional(),
 })
 export const ipcSchemas = {
@@ -373,4 +395,11 @@ export const ipcSchemas = {
   readStatusInfo: z.tuple([]),
   setReadStatusPassword: z.tuple([z.string().min(1).max(4096).nullable()]),
   testReadStatus: z.tuple([z.string().max(2048), z.string().max(4096).optional()]),
+  // Reminders
+  dismissReminder: z.tuple([
+    z.object({ accountId: id, threadId: id, messageId: z.string().min(1).max(998) }),
+  ]),
+  restoreReminder: z.tuple([
+    z.object({ accountId: id, threadId: id, messageId: z.string().min(1).max(998) }),
+  ]),
 } satisfies Record<Exclude<keyof DesktopMailAPI, 'onEvent'>, z.ZodType>

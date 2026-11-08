@@ -32,6 +32,8 @@ import {
   type SubmissionTracking,
   addPixel,
   trackedRecipients,
+  type ReminderFacts,
+  type ReminderLabel,
 } from '@inlark/core'
 import {
   attachmentsOf,
@@ -51,6 +53,7 @@ import {
 import { inspectCertificate } from './certificate'
 import { isInbox, reviewFolders, rolesByPath } from './folders'
 import { ImapFlowPort } from './imapflow-port'
+import { isWarpmailFolder, labelPath } from './labels'
 import type {
   ConversationCursor,
   ConversationFilter,
@@ -168,7 +171,8 @@ const byMailbox = <T extends { mailboxId: string }>(items: T[]) => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /**
  * How well a location represents an email that exists in several folders (Gmail labels): the
- * folder being viewed, then Inbox, then ordinary folders, then virtual ones like All Mail.
+ * folder being viewed, then Inbox, then ordinary folders, then virtual ones like All Mail, and
+ * last the hidden Warpmail label folders.
  */
 function locationRank(boxes: IndexedMailbox[], preferred?: string) {
   const byId = new Map(boxes.map((b) => [b.id, b]))
@@ -176,6 +180,7 @@ function locationRank(boxes: IndexedMailbox[], preferred?: string) {
     const box = byId.get(mailboxId)
     if (!box) return 4
     if (mailboxId === preferred) return 0
+    if (isWarpmailFolder(box.path, box.delimiter)) return 5
     if (isInbox(box.path)) return 1
     return ['\\All', '\\Flagged', '\\Important'].includes(box.specialUse || '') ? 3 : 2
   }
@@ -239,6 +244,13 @@ export class ImapProvider implements MailProvider {
   private wakeLoop?: () => void
   private pending: 'none' | 'inbox' | 'all' = 'none'
   private lastSync = 0
+  // Reminders: a full pass has run since this connection; inbox-only passes set lastSync too.
+  private connection = 0
+  private fullSince = -1
+  /** When that full pass started: the index has every change made before then. */
+  private fullStart = 0
+  /** A return waits for the next full pass, which then announces itself. */
+  private held = false
   private lastFull = new Map<string, number>()
   private uidLists = new Map<string, number[]>()
   private searches = new Map<string, { ids: string[]; incomplete: boolean; at: number }>()
@@ -330,7 +342,9 @@ export class ImapProvider implements MailProvider {
     this.connecting ??= (async () => {
       const port = this.ports(this.imapSettings(), 'command')
       port.on('close', () => {
-        if (this.command === port) this.command = undefined
+        if (this.command !== port) return
+        this.command = undefined
+        this.connection++ // Reminders: changes may be missed until it reconnects
       })
       try {
         await port.connect()
@@ -358,6 +372,7 @@ export class ImapProvider implements MailProvider {
 
   async connect(): Promise<Account[]> {
     this.disposed = false
+    this.connection++ // Reminders
     await this.run(async (port) => {
       const boxes = await this.refreshFolders(port)
       this.readStatus = readStatusServer(port, boxes)
@@ -428,7 +443,9 @@ export class ImapProvider implements MailProvider {
     const roles = rolesByPath(this.review(boxes))
     const byPath = new Map(boxes.map((b) => [b.path, b]))
     const move = !this.limits.move
-    return boxes.map((box) => {
+    // Reminders: the Warpmail label folders stay hidden.
+    const shown = boxes.filter((b) => !isWarpmailFolder(b.path, b.delimiter))
+    return shown.map((box) => {
       const role = isInbox(box.path) ? 'inbox' : roles.get(box.path) || null
       return {
         id: box.id,
@@ -566,6 +583,9 @@ export class ImapProvider implements MailProvider {
         if (!this.disposed && this.pending === 'none') await this.wait(this.timing.reconcileMs)
       } catch (error) {
         if (this.disposed) break
+        // Reminders: changes may be missed while the connection is down.
+        if (isProviderError(error, 'network', 'authentication', 'tls', 'certificate', 'offline'))
+          this.connection++
         if (isProviderError(error, 'authentication')) this.setState('authentication', error.message)
         else if (isProviderError(error, 'network', 'tls', 'certificate'))
           this.setState('offline', error.message)
@@ -606,6 +626,8 @@ export class ImapProvider implements MailProvider {
     return boxes.filter((b) => !b.noSelect).sort((a, b) => rank(a) - rank(b))
   }
   private async syncPass(scope: 'inbox' | 'all') {
+    const connection = this.connection, // Reminders
+      startedAt = Date.now()
     const boxes = await this.run(async (port) => this.refreshFolders(port), true)
     let changed = false
     for (const box of this.ordered(boxes)) {
@@ -614,7 +636,11 @@ export class ImapProvider implements MailProvider {
       changed = (await this.run((port) => this.syncMailbox(port, box), true)) || changed
     }
     this.lastSync = Date.now()
-    if (changed) this.emit({ type: 'changed', accountId: this.accountId })
+    // Reminders: the first full pass, and one a return waits for, announce themselves.
+    const full = scope === 'all' && connection === this.connection
+    const ready = full && (this.fullSince !== connection || this.held)
+    if (full) [this.fullSince, this.fullStart, this.held] = [connection, startedAt, false]
+    if (changed || ready) this.emit({ type: 'changed', accountId: this.accountId })
     await this.emitProgress()
   }
   private async emitProgress() {
@@ -974,7 +1000,10 @@ export class ImapProvider implements MailProvider {
       // A missing role yields no messages, never the entire account.
       return box ? { boxes: [box], filter: { mailboxIds: [box.id] } } : undefined
     }
-    const excluded = selectable.filter((b) => ['junk', 'trash'].includes(roleOf(b) || ''))
+    // Reminders: label copies never add rows to All mail, Starred or search.
+    const excluded = selectable.filter(
+      (b) => ['junk', 'trash'].includes(roleOf(b) || '') || isWarpmailFolder(b.path, b.delimiter),
+    )
     return {
       boxes: selectable.filter((b) => !excluded.includes(b)),
       filter: excluded.length ? { excludeMailboxIds: excluded.map((b) => b.id) } : {},
@@ -1007,6 +1036,169 @@ export class ImapProvider implements MailProvider {
       term,
     )
   }
+  // Reminders
+  /**
+   * Whether the index has every change made up to `dueMs`: a full pass since connecting that
+   * started then or later. A connection that came back on its own may have missed changes, and
+   * label folders sync only on full passes.
+   */
+  readyForReminders(dueMs: number): boolean {
+    return this.fullSince === this.connection && dueMs <= this.fullStart
+  }
+  /** A return waits on a full pass: run one soon, and announce it even with nothing new. */
+  awaitFullSync() {
+    this.held = true
+    this.requestSync('all')
+  }
+  /** After sleep: mail may have changed meanwhile, so wait for a full pass again. */
+  resumed() {
+    this.connection++
+    this.requestSync('all')
+  }
+  /**
+   * Counted mail is every selectable folder but Drafts, Trash, Junk and the Warpmail label
+   * folders; Drafts still goes along, since Gmail lists drafts in All Mail too.
+   */
+  async reminderFacts(
+    _account: Account,
+    query: {
+      important: Extract<SplitScope, { kind: 'important' }>
+      sinceMs: number
+      threadIds?: string[]
+      own?: string[]
+    },
+  ): Promise<ReminderFacts[]> {
+    const boxes = (await this.index.listMailboxes(this.accountId)).filter((b) => !b.noSelect)
+    const roles = rolesByPath(this.review(boxes))
+    const inbox = boxes.find((b) => isInbox(b.path))
+    if (!inbox) return []
+    const labelIds: Partial<Record<ReminderLabel, string>> = {}
+    for (const label of ['noReminder', 'followUp', 'returned'] as const) {
+      const box = boxes.find((b) => b.path === labelPath(label, b.delimiter))
+      if (box) labelIds[label] = box.id
+    }
+    const mailboxIds = boxes
+      .filter(
+        (b) =>
+          !['drafts', 'trash', 'junk'].includes(roles.get(b.path) || '') &&
+          !isWarpmailFolder(b.path, b.delimiter),
+      )
+      .map((b) => b.id)
+    return this.index.reminderFacts(this.accountId, {
+      inboxId: inbox.id,
+      archiveId: boxes.find((b) => roles.get(b.path) === 'archive')?.id,
+      mailboxIds,
+      labelIds,
+      important: query.important,
+      sinceMs: query.sinceMs,
+      threadIds: query.threadIds,
+      draftsId: boxes.find((b) => roles.get(b.path) === 'drafts')?.id,
+      own: query.own,
+    })
+  }
+  async askChecksNeeded(
+    _account: Account,
+    sinceMs: number,
+    limit: number,
+  ): Promise<{ id: string; messageId: string }[]> {
+    const sent = await this.roleBox('sent')
+    if (!sent || sent.noSelect) return []
+    return this.index.askChecksNeeded(this.accountId, sent.id, sinceMs, limit)
+  }
+  setAskChecks(_account: Account, rows: { messageId: string; asks: boolean }[]): Promise<void> {
+    return this.index.setAskChecks(this.accountId, rows)
+  }
+  /**
+   * A reminder label is a Gmail label, which IMAP shows as a folder: adding it copies the email
+   * there, removing it expunges that copy (Gmail then drops only the label).
+   */
+  labelMessage(
+    _account: Account,
+    label: ReminderLabel,
+    messageId: string,
+    add: boolean,
+  ): Promise<void> {
+    const gone = () => new ProviderError('notFound', 'This email is no longer on the server.')
+    const refused = () => new ProviderError('command', 'The server did not save this choice.')
+    return this.run(async (port) => {
+      let boxes = await this.index.listMailboxes(this.accountId)
+      const path = labelPath(label, boxes.find((b) => isInbox(b.path))?.delimiter || '/')
+      let target = boxes.find((b) => b.path === path)
+      const rows = await this.index.findByMessageId(this.accountId, messageId)
+      if (!add) {
+        if (!target) return
+        const selected = await port.select(target.path)
+        const known = rows
+          .filter((r) => r.mailboxId === target!.id && r.uidValidity === selected.uidValidity)
+          .map((r) => r.uid)
+        const found = selected.exists
+          ? await this.withMessageId(port, messageId, selected.uidNext)
+          : []
+        const uids = [...new Set([...known, ...found])]
+        if (!uids.length) return
+        if (!(await port.expunge(uids))) throw refused()
+        if (target.uidValidity === selected.uidValidity) {
+          await this.index.removeUids(this.accountId, target.id, uids)
+          this.sources.forget(target.id, uids)
+        } else this.requestSync('all') // its stored rows are stale and would keep the label
+        this.emit({ type: 'changed', accountId: this.accountId })
+        return
+      }
+      // All Mail holds every email on Gmail; then Inbox, then Sent; never another label folder,
+      // Trash or Junk.
+      const review = this.review(boxes)
+      const roles = rolesByPath(review)
+      const sent = review.mappings.sent?.path
+      const order = (b: IndexedMailbox) =>
+        b.specialUse === '\\All' ? 0 : isInbox(b.path) ? 1 : b.path === sent ? 2 : 3
+      const sources = rows
+        .map((row) => ({ row, box: boxes.find((b) => b.id === row.mailboxId) }))
+        .filter(
+          (s): s is { row: IndexedMessage; box: IndexedMailbox } =>
+            !!s.box &&
+            !s.box.noSelect &&
+            !isWarpmailFolder(s.box.path, s.box.delimiter) &&
+            !['trash', 'junk'].includes(roles.get(s.box.path) || ''),
+        )
+        .sort((a, b) => order(a.box) - order(b.box))
+      if (!sources.length) throw gone()
+      if (!target) {
+        // Another device may have made it since the last folder sync.
+        boxes = await this.refreshFolders(port)
+        if (!boxes.some((b) => b.path === path)) {
+          await port.createMailbox(path)
+          boxes = await this.refreshFolders(port)
+        }
+        target = boxes.find((b) => b.path === path)
+        if (!target) throw new ProviderError('folder', 'The reminder label could not be created.')
+      }
+      const selected = await port.select(target.path)
+      const labelled =
+        selected.exists > 0 && (await this.withMessageId(port, messageId, selected.uidNext)).length
+      const indexed = async () =>
+        (await this.index.findByMessageId(this.accountId, messageId, target!.id)).length > 0
+      // Already labelled and indexed: nothing changes, so nothing is announced.
+      if (labelled && (await indexed())) return
+      if (!labelled) {
+        let copied = false
+        for (const { row, box } of sources) {
+          // A stored UID means nothing once the folder's UIDVALIDITY changed.
+          if ((await port.select(box.path)).uidValidity !== row.uidValidity) continue
+          if (!(await port.copy([row.uid], target.path))) throw refused()
+          copied = true
+          break
+        }
+        if (!copied) {
+          this.requestSync('all')
+          throw gone()
+        }
+      }
+      // Index the copy now, so reminders see the label at once.
+      await this.syncMailbox(port, target)
+      if (!(await indexed())) throw gone()
+      this.emit({ type: 'changed', accountId: this.accountId })
+    })
+  }
   async query(
     account: Account,
     query: ProviderQuery,
@@ -1027,6 +1219,20 @@ export class ImapProvider implements MailProvider {
       ...(query.before ? { before: query.before } : {}),
       ...(query.split && inboxOnly ? { split: query.split } : {}),
     }
+    // Reminders: due ones lift their threads to the top of the inbox and its tabs, nowhere else.
+    const due = new Map<
+      string,
+      NonNullable<ProviderQuery['reminders']>[number] & { sortMs: number }
+    >()
+    for (const r of inboxOnly ? (query.reminders ?? []) : []) {
+      const sortMs = Date.parse(r.dueAt),
+        seen = due.get(r.threadId)
+      // One per thread, the latest, as the index sorts it.
+      if (Number.isFinite(sortMs) && (!seen || sortMs > seen.sortMs))
+        due.set(r.threadId, { ...r, sortMs })
+    }
+    if (due.size)
+      filter.boost = [...due.values()].map(({ threadId, sortMs }) => ({ threadId, sortMs }))
     let incomplete = scope.boxes.some((b) => !b.complete)
     if (search) {
       const found = await this.search(query, scope.boxes)
@@ -1068,6 +1274,14 @@ export class ImapProvider implements MailProvider {
       c.subject = row.latest.subject || '(No subject)'
       c.preview = toMessage(account.id, row.latest).preview
       c.count = row.count
+      const reminder = due.get(row.threadId)
+      // As ISO from the time it sorted by, so lists merge it in the same order.
+      if (reminder)
+        c.reminder = {
+          kind: reminder.kind,
+          dueAt: new Date(reminder.sortMs).toISOString(),
+          messageId: reminder.messageId,
+        }
       return c
     })
     const end = position + items.length
@@ -1076,6 +1290,7 @@ export class ImapProvider implements MailProvider {
       this.cursors.set(key + '@' + end, {
         receivedAt: last.latest.receivedAt,
         threadId: last.threadId,
+        ...(last.sortMs !== undefined ? { sortMs: last.sortMs } : {}),
       })
       if (this.cursors.size > 500) this.cursors.delete(this.cursors.keys().next().value!)
     }
@@ -1169,13 +1384,26 @@ export class ImapProvider implements MailProvider {
     )
   }
   async conversationMetadata(account: Account, threadIds: string[]): Promise<Message[]> {
-    const rows = await this.index.threadMessages(this.accountId, threadIds)
+    // Reminders: label copies stay out of mutations, so moving a conversation keeps its labels.
+    const hidden = new Set(
+      (await this.index.listMailboxes(this.accountId))
+        .filter((b) => isWarpmailFolder(b.path, b.delimiter))
+        .map((b) => b.id),
+    )
+    const rows = (await this.index.threadMessages(this.accountId, threadIds)).filter(
+      (m) => !hidden.has(m.mailboxId),
+    )
     return (await this.current(rows)).map((m) => toMessage(account.id, m))
   }
-  async messages(account: Account, ids: string[], bodies = false): Promise<Message[]> {
+  async messages(
+    account: Account,
+    ids: string[],
+    bodies = false,
+    options?: { background?: boolean },
+  ): Promise<Message[]> {
     const rows = await this.current(await this.index.messages(this.accountId, [...new Set(ids)]))
     if (!bodies) return rows.map((m) => toMessage(account.id, m))
-    return this.withBodies(account, rows)
+    return this.withBodies(account, rows, false, options?.background)
   }
   async conversation(
     account: Account,

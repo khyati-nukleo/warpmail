@@ -77,6 +77,9 @@ const methods = [
   'readStatusInfo',
   'setReadStatusPassword',
   'testReadStatus',
+  // Reminders
+  'dismissReminder',
+  'restoreReminder',
 ] as const satisfies readonly (keyof DesktopMailAPI)[]
 // Fails to compile when an API method is missing from the allowlist above.
 type Missing = Exclude<keyof DesktopMailAPI, 'onEvent' | (typeof methods)[number]>

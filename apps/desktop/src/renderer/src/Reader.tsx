@@ -62,6 +62,7 @@ import { offersAction } from './view-actions'
 import { SecuritySummary, WithheldBody, withheld } from './MessageSecurity'
 import { ReadStatusPanel } from './read-status/ReadStatusPanel' // Read status
 import { useReadStatus } from './read-status/useReadStatus'
+import { ReminderBar, ReminderMenuItems, type ReminderBarProps } from './reminders/ReminderBar'
 
 const formatAddress = (a: { name: string; email: string }) =>
   a.name ? a.name + ' <' + a.email + '>' : a.email
@@ -643,6 +644,8 @@ interface ReaderProps {
   /** "Always show in Important…" and "Never show in Important" for this conversation's sender. */
   alwaysShow?: { label: string; run: () => void }
   neverShow?: { label: string; run: () => void }
+  /** Reminders: dismiss and snooze, when this conversation has a due reminder. */
+  reminder?: ReminderBarProps
   /** Messages are list summaries while the full conversation loads. */
   loading?: boolean
   onUnlock?: () => void
@@ -734,6 +737,7 @@ export function Reader({
   onAddToTab,
   alwaysShow,
   neverShow,
+  reminder,
   loading = false,
   onUnlock,
   onOpenEncryption,
@@ -888,6 +892,7 @@ export function Reader({
               {neverShow.label}
             </MenuItem>
           )}
+          {reminder && <ReminderMenuItems {...reminder} />}
           {offersAction(view, 'spam') && (
             <MenuItem onClick={() => onAction('spam')} disabled={!!moveLimit}>
               <ShieldX size={14} />
@@ -986,6 +991,7 @@ export function Reader({
             </span>
           </div>
           <h1>{newest.subject || '(No subject)'}</h1>
+          {reminder && <ReminderBar {...reminder} />}
           <div className="conversation-messages">
             {[...history, ...drafts].map((message) => {
               if (foldedIds.has(message.id))

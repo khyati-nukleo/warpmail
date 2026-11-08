@@ -33,6 +33,8 @@ import {
   type MailAction,
   type MutationInput,
   type MutationResult,
+  type MutationTarget, // Reminders
+  type ReminderTarget, // Reminders
   type Draft,
   type DraftErrorKind,
   type Attachment,
@@ -65,6 +67,7 @@ import {
   type CopyOutcome,
   type SubmissionOutcome,
   type SubmissionTracking,
+  tabApplies, // Reminders
 } from '@inlark/core'
 import { JmapProvider } from '@inlark/jmap'
 import { publicFetch } from './public-fetch'
@@ -90,6 +93,7 @@ import { ReadStatusSecret } from './read-status/secret'
 import { ReadStatusCollector } from './read-status/collector'
 import { testWorker } from './read-status/worker-client'
 import { recoverCopies, settleCopies, type JournalCopy } from './read-status/tracked-send'
+import { ReminderEngine } from './reminders/engine' // Reminders
 
 export type Connection = {
   id: string
@@ -312,6 +316,8 @@ export class MailService {
   private protectedLoaded = new Set<string>()
   private protectionTransition = false
   private draftWrites: Promise<unknown> = Promise.resolve()
+  // Reminders
+  private reminders: ReminderEngine
   constructor(
     private store: JsonStore,
     private emit: (event: AppEvent) => void,
@@ -328,6 +334,19 @@ export class MailService {
       () => this.emit({ type: 'readStatus' }),
       { fetch: options.readStatusFetch },
     )
+    // Reminders
+    this.reminders = new ReminderEngine({
+      accounts: () => this.accounts,
+      settings: () => this.settings,
+      provider: (accountId) => {
+        const account = this.accounts.find((a) => a.id === accountId)
+        return account && this.providers.get(account.connectionId)
+      },
+      returnToInbox: (targets) => this.returnToInbox(targets),
+      emit: (event) => this.emit(event),
+      store: this.store,
+      log: (event) => this.log(event),
+    })
     this.encryption = new EncryptionService(store, options.crypto, (accountId, email) =>
       this.guard(
         accountId,
@@ -409,6 +428,7 @@ export class MailService {
     await this.persistDrafts()
     await this.persistJournal()
     void Promise.allSettled(this.connections.map((c) => this.reconnect(c.id)))
+    this.reminders.start() // Reminders: catch up; accounts that connect later invalidate
     this.timer = setInterval(() => void this.refresh(), 60_000)
     this.collector.start() // Read status
   }
@@ -801,10 +821,12 @@ export class MailService {
         this.status(id, event.state, event.message)
         return
       }
+      this.reminders.invalidate(event.accountId) // Reminders
       this.emit({ type: 'changed', accountId: event.accountId })
       // Historical indexing adds older mail; only live changes may produce notifications.
       if (!event.historical) void this.refreshConnection(id)
     })
+    for (const a of accounts) this.reminders.invalidate(a.id) // Reminders
     this.status(id, 'connected')
     if (!reconnecting) this.outgoing(id, undefined)
     void this.refreshConnection(id)
@@ -1050,13 +1072,26 @@ export class MailService {
       return { items: [], total: 0, failedAccounts: [] }
     const sent = tab && 'split' in tab ? { ...query, split: tab.split } : query
     const settled = await Promise.allSettled(
-      accounts.map(async (a) => ({
-        accountId: a.id,
-        position: cursor?.[a.id] || 0,
-        page: await this.guard(a.id, (p, account) =>
-          p.query(account, sent, cursor?.[a.id] || 0, 50),
-        ),
-      })),
+      accounts.map(async (a) => {
+        // Reminders: due ones lift their conversations in the inbox and its tabs.
+        const reminders =
+          tabApplies(query) && isImap(a)
+            ? (await this.reminders.due(a.id)).map((r) => ({
+                threadId: r.threadId,
+                kind: r.kind,
+                dueAt: new Date(r.dueMs).toISOString(),
+                messageId: r.messageId,
+              }))
+            : []
+        const asked = reminders.length ? { ...sent, reminders } : sent
+        return {
+          accountId: a.id,
+          position: cursor?.[a.id] || 0,
+          page: await this.guard(a.id, (p, account) =>
+            p.query(account, asked, cursor?.[a.id] || 0, 50),
+          ),
+        }
+      }),
     )
     const pages = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []))
     if (!pages.length)
@@ -1128,10 +1163,18 @@ export class MailService {
         await this.exclusive(accountId, async () => {
           const { provider, account } = this.provider(accountId)
           const boxes = await provider.mailboxes(account)
-          const messages = await provider.conversationMetadata(
+          let messages = await provider.conversationMetadata(
             account,
             input.targets.filter((t) => t.accountId === accountId).map((t) => t.threadId),
           )
+          // Reminders: only the locations in these roles take part.
+          if (input.fromRoles) {
+            const roles = new Set(input.fromRoles)
+            const from = new Set(boxes.filter((b) => b.role && roles.has(b.role)).map((b) => b.id))
+            messages = messages.filter((m) =>
+              Object.keys(m.mailboxIds).some((id) => m.mailboxIds[id] && from.has(id)),
+            )
+          }
           const expectedState = provider.getStateToken(account)
           const plan = planMutation(messages, boxes, input.action, input.mailboxId, {
             exclusiveMailboxes: provider.capabilities.exclusiveMailboxes,
@@ -1158,6 +1201,48 @@ export class MailService {
       if (this.undos.size > 20) this.undos.delete(this.undos.keys().next().value!)
     }
     return result
+  }
+  // Reminders
+  /** Hides a reminder on every device by labelling its email; `restoreReminder` undoes it. */
+  dismissReminder = (target: ReminderTarget): Promise<void> =>
+    this.guard(target.accountId, () => this.reminders.dismiss(target))
+  restoreReminder = (target: ReminderTarget): Promise<void> =>
+    this.guard(target.accountId, () => this.reminders.restore(target))
+  /**
+   * Moves each thread's archived mail back to its account's inbox, with one undo for all.
+   * One move per thread: each account's inbox differs. `moved` lists the threads with mail
+   * moved, even when part of it failed: they are back in the inbox, and the undo covers what moved.
+   * One with nothing moved stays out, so it is tried again later.
+   */
+  private async returnToInbox(targets: MutationTarget[]) {
+    const moved: MutationTarget[] = [],
+      undo: UndoEntry[] = []
+    for (const target of targets)
+      try {
+        const { provider, account } = this.provider(target.accountId)
+        const inbox = (await provider.mailboxes(account)).find((b) => b.role === 'inbox')
+        if (!inbox) continue
+        const result = await this.mutate({
+          targets: [target],
+          action: 'move',
+          mailboxId: inbox.id,
+          fromRoles: ['archive'],
+        })
+        if (result.undoId) {
+          if (result.changed) undo.push(...(this.undos.get(result.undoId) || []))
+          this.undos.delete(result.undoId)
+        }
+        if (result.changed) moved.push(target)
+      } catch {
+        // Disconnected: tried again on a later pass.
+      }
+    let undoId: string | undefined
+    if (undo.length) {
+      undoId = randomUUID()
+      this.undos.set(undoId, undo)
+      if (this.undos.size > 20) this.undos.delete(this.undos.keys().next().value!)
+    }
+    return { moved, undoId }
   }
   mutateAll = async (query: MailQuery, action: MailAction): Promise<MutationResult> => {
     if (!['archive', 'trash', 'spam', 'read', 'unread', 'star', 'unstar'].includes(action))
@@ -2092,6 +2177,14 @@ export class MailService {
       // The old draft goes first: until then it could be opened and sent a second time.
       await this.removeReplacedDraft(journal)
       if (journal.sentCopy) await this.fileSentCopy(journal, outgoing)
+      void this.reminders.afterSend({
+        accountId: journal.accountId,
+        messageId: journal.messageId!,
+        sentCopy: journal.sentCopy,
+        followUp: draft.followUp,
+        html: draft.html,
+        text: draft.text,
+      }) // Reminders
     } catch {
       // Filing and cleanup record their own failures; the next refresh retries them.
       this.log('sent-finish-failed')
@@ -2591,6 +2684,7 @@ export class MailService {
       JSON.stringify(this.settings.readStatus) !== JSON.stringify(settings.readStatus)
     this.settings = settings
     if (readStatusChanged) void this.collector.collectNow() // Read status
+    this.reminders.invalidate() // Reminders
     return settings
   }
   // Read status
@@ -2887,6 +2981,12 @@ export class MailService {
       }
     }
   }
+  // Reminders
+  /** Waking from sleep: providers learn their index may be stale, then a refresh as before. */
+  async resume() {
+    for (const provider of this.providers.values()) provider.resumed?.()
+    await this.refresh()
+  }
   async refresh() {
     await Promise.allSettled(
       this.connections.map(async (c) => {
@@ -2905,6 +3005,7 @@ export class MailService {
   }
   dispose() {
     this.disposed = true
+    this.reminders.dispose() // Reminders
     void this.encryption.lock()
     if (this.timer) clearInterval(this.timer)
     this.collector.stop() // Read status

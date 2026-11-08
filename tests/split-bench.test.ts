@@ -6,7 +6,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { domainKey, type SplitScope } from '@inlark/core'
 import { SqliteMetadataIndex } from '../apps/desktop/src/main/imap-index/sqlite-index'
-import type { FolderListing, NewMessage } from '@inlark/imap'
+import type {
+  ConversationCursor,
+  ConversationFilter,
+  FolderListing,
+  NewMessage,
+} from '@inlark/imap'
 
 // Run with INLARK_BENCH=1. Prints timings only: never addresses or subjects.
 const RUNS = 20
@@ -116,6 +121,7 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
   let directory: string
   let index: SqliteMetadataIndex
   let inbox: string
+  let mailboxIds: string[]
 
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), 'inlark-bench-'))
@@ -126,6 +132,7 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
       folder('Sent'),
     ])
     inbox = i!.id
+    mailboxIds = [inbox, archive!.id, sent!.id]
     for (let start = 0; start < MESSAGES; start += 1000) {
       const batch: NewMessage[] = []
       for (let uid = start + 1; uid <= start + 1000; uid++)
@@ -182,6 +189,50 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench', () => {
     results.migrationV3toV4 = await migrationMedian(directory, 'bench.sqlite')
     index = new SqliteMetadataIndex(join(directory, 'bench.sqlite'))
     console.log(`split bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
+  }, 600_000)
+
+  // Reminders
+  it('keeps the inbox page with due reminders near the plain one', () => {
+    const important: SplitScope = { kind: 'important', always: [], never: [] }
+    const all = index.conversations('a', { mailboxIds: [inbox] }, { limit: 100_000 })
+    // 50 threads spread through the inbox, due after all of its mail.
+    const due = Date.parse(all.items[0]!.latest.receivedAt) + 3600_000
+    const boost = all.items
+      .filter((_, n) => n % 300 === 7)
+      .slice(0, 50)
+      .map((row, n) => ({ threadId: row.threadId, sortMs: due + n * 60_000 }))
+    expect(boost).toHaveLength(50)
+    const page = (filter: ConversationFilter, after?: ConversationCursor) =>
+      index.conversations('a', filter, { limit: 50, after })
+    const first = page({ mailboxIds: [inbox], boost })
+    expect(first.items.map((r) => r.threadId)).toEqual(boost.map((b) => b.threadId).reverse())
+    const last = first.items.at(-1)!
+    const cursor = {
+      receivedAt: last.latest.receivedAt,
+      threadId: last.threadId,
+      sortMs: last.sortMs,
+    }
+    const sinceMs = Date.parse(all.items[0]!.latest.receivedAt) - 30 * 86_400_000
+    const facts = () =>
+      index.reminderFacts('a', {
+        inboxId: inbox,
+        mailboxIds,
+        labelIds: {},
+        important: { kind: 'important', always: [], never: [] },
+        sinceMs,
+        own: ['me@example.com'],
+      })
+    expect(facts().length).toBeGreaterThan(0)
+    const results: Record<string, number> = {
+      inboxPage: median(() => page({ mailboxIds: [inbox] })),
+      inboxBoostedPage: median(() => page({ mailboxIds: [inbox], boost })),
+      inboxBoostedNextPage: median(() => page({ mailboxIds: [inbox], boost }, cursor)),
+      importantPage: median(() => page({ mailboxIds: [inbox], split: important })),
+      importantBoostedPage: median(() => page({ mailboxIds: [inbox], split: important, boost })),
+      reminderFacts30d: median(facts),
+    }
+    console.log(`reminders bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
+    expect(results.inboxBoostedPage).toBeLessThan(results.inboxPage * 1.2)
   }, 600_000)
 })
 
@@ -266,5 +317,91 @@ describe.skipIf(!process.env.INLARK_BENCH)('split inbox bench: a heavy sender', 
     results.migrationV3toV4 = await migrationMedian(directory, 'heavy.sqlite')
     index = new SqliteMetadataIndex(join(directory, 'heavy.sqlite'))
     console.log(`heavy sender bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
+  }, 600_000)
+})
+
+// Reminders: a Gmail-shaped account. Inbox, Sent, Starred, Important, Drafts, the two
+// Warpmail label folders and a label per client, with every email also in All Mail.
+const CLIENTS = 23
+const ME = 'me@example.com'
+
+describe.skipIf(!process.env.INLARK_BENCH)('reminders bench: a Gmail-shaped account', () => {
+  let directory: string
+  let index: SqliteMetadataIndex
+  let ids: Record<string, string>
+  let clients: string[]
+
+  beforeAll(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'inlark-bench-'))
+    index = new SqliteMetadataIndex(join(directory, 'gmail.sqlite'))
+    const names = ['INBOX', 'All Mail', 'Sent', 'Starred', 'Important', 'Drafts']
+    const labels = ['Warpmail/No reminder', 'Warpmail/Follow up']
+    const clientNames = Array.from({ length: CLIENTS }, (_, n) => 'Client ' + n)
+    const boxes = index.syncMailboxes(
+      'a',
+      [...names, ...labels, ...clientNames].map((p) => folder(p)),
+    )
+    ids = Object.fromEntries(boxes.map((b) => [b.path, b.id]))
+    clients = clientNames.map((p) => ids[p]!)
+    expect(boxes.length).toBe(31)
+    const uids = new Map<string, number>()
+    const at = (mailboxId: string, base: NewMessage): NewMessage => {
+      const uid = (uids.get(mailboxId) ?? 0) + 1
+      uids.set(mailboxId, uid)
+      return { ...base, mailboxId, uid }
+    }
+    for (let start = 0; start < MESSAGES; start += 1000) {
+      const batch: NewMessage[] = []
+      for (let n = start + 1; n <= start + 1000; n++) {
+        const base = message(ids['All Mail']!, n)
+        // One in five is mine, to one of the senders.
+        const email: NewMessage =
+          n % 5 === 4
+            ? { ...base, from: [{ name: 'Me', email: ME }], unsubscribe: undefined }
+            : base
+        batch.push(at(ids['All Mail']!, email))
+        if (n % 5 === 4) batch.push(at(ids.Sent!, email))
+        else if (n % 5 < 2) batch.push(at(ids.INBOX!, email))
+        if (n % 3 === 0) batch.push(at(clients[n % CLIENTS]!, email))
+        if (n % 7 === 0) batch.push(at(ids.Important!, email))
+        if (n % 29 === 0) batch.push(at(ids.Starred!, email))
+      }
+      index.upsertMessages('a', batch)
+      await tick()
+    }
+    // Half of my mail asks.
+    const checks: { messageId: string; asks: boolean }[] = []
+    for (let n = 4; n <= MESSAGES; n += 5)
+      checks.push({ messageId: 'm' + n + '@example.com', asks: n % 10 === 4 })
+    index.setAskChecks('a', checks)
+  }, 600_000)
+  afterAll(async () => {
+    index?.close()
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  it('times reminder facts over 30 days', () => {
+    const counted = Object.entries(ids)
+      .filter(([path]) => path !== 'Drafts' && !path.startsWith('Warpmail/'))
+      .map(([, id]) => id)
+    const newest = Date.UTC(2020, 0, 1) + MESSAGES * 600_000
+    const facts = () =>
+      index.reminderFacts('a', {
+        inboxId: ids.INBOX!,
+        mailboxIds: counted,
+        labelIds: { noReminder: ids['Warpmail/No reminder'], followUp: ids['Warpmail/Follow up'] },
+        important: { kind: 'important', always: [], never: [] },
+        sinceMs: newest - 30 * 86_400_000,
+        draftsId: ids.Drafts,
+        own: [ME],
+      })
+    const found = facts()
+    expect(found.length).toBeGreaterThan(500)
+    const results = {
+      mailboxes: counted.length,
+      threads: found.length,
+      reminderFacts30d: median(facts),
+    }
+    console.log(`gmail reminders bench (median ms over ${RUNS} runs):`, JSON.stringify(results))
   }, 600_000)
 })

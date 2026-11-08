@@ -62,6 +62,7 @@ Khyati's choices are saved in Gmail, so both laptops respect them:
 
 - **"Warpmail/No reminder"** marks a dismissed reminder, or a sent email whose follow-up Khyati switched off. The label is visible in Gmail on the web.
 - **"Warpmail/Follow up"** marks a sent email whose follow-up Khyati switched on by hand when the guess said off. Without it, the other laptop's own check would come out off.
+- **"Warpmail/Returned"** marks a sent email whose follow-up came back to the inbox. A follow-up comes back once, on whichever laptop is open when it falls due; archiving it afterwards means it's handled, so the other laptop leaves it alone. Only a snooze that ends later can bring it back again, on the computer where it was snoozed.
 
 **Snoozes stay on the computer where they're set**, since they're short-lived.
 
@@ -92,7 +93,7 @@ Each was decided, not forgotten. Revisit any of them later.
 | "Forgot to reply" for archived mail                  | Archiving counts as handled.                                                                             | Khyati             |
 | Reminders about automated mail                       | Same rule as Important.                                                                                  | Claude             |
 | Holidays as non-working days                         | Monday to Friday only for now.                                                                           | Claude             |
-| Syncing snoozes between laptops                      | Short-lived. Dismissals and switches do sync, through Gmail labels.                                      | Claude             |
+| Syncing snoozes between laptops                      | Short-lived. Dismissals, switches and returns do sync, through Gmail labels.                             | Claude             |
 | Reminders running while the app is closed            | The app is desktop-only, with no server. Missed reminders appear on the next launch.                     | Roadmap constraint |
 | Only replies from the To line cancelling a follow-up | A colleague answering for the client counts too: any reply except Khyati's cancels it.                   | Khyati             |
 
@@ -127,6 +128,7 @@ Builder-level calls by Claude (can be overridden):
 
 20. A second label, "Warpmail/Follow up", for follow-ups switched on by hand, so the other laptop doesn't re-guess them as off.
 21. Snoozes are stored locally, with the other settings.
+22. (2026-11-07) A third label, "Warpmail/Returned", on the ask whose follow-up came back to the inbox, so a returned follow-up comes back once across both laptops; archiving it afterwards means handled. Before, only the computer that moved it remembered, so the other laptop moved it back again. Created on first use; hidden from Warpmail's folder list; visible in Gmail on the web.
 
 ## How it's built (for the builder)
 
@@ -150,7 +152,7 @@ From that, plus working days and the waits, compute "due at". Only Khyati's choi
 **The ask-check** runs at send time on the draft's own text, as a pure, tested function that strips quoted text, the signature and a plain closing.
 
 - The other laptop runs the same function on the Sent copy. Sent mail from the last 30 days is already downloaded ahead of time by the speed work, so no extra download is needed for recent mail.
-- The two labels override the result.
+- The No reminder and Follow up labels override the result.
 
 **Gmail labels over IMAP.** Gmail shows labels as folders, so adding a label means copying the message to the label's folder. imapflow can also set `X-GM-LABELS` directly.
 

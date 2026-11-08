@@ -10,17 +10,16 @@ import {
 } from 'react'
 import type { Ref, RefObject } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { Account, Conversation, MailAction, View } from '@inlark/core'
+import type { Account, Conversation, MailAction, ReminderSettings, View } from '@inlark/core'
 import { Spinner } from '@inlark/ui'
 import { ConversationRow, senderLabel } from './ConversationRow'
-import { day } from './mail-date'
+import { listRows } from './list-rows'
 import { offersAction } from './view-actions'
+import { useReminderSettings } from './reminders/ReminderLabel' // Reminders
 
 export type ConversationListHandle = {
   scrollToConversation: (key: string) => void
 }
-
-type Row = { group: string } | { conversation: Conversation }
 
 const ListConversationRow = memo(function ListConversationRow({
   conversation,
@@ -34,6 +33,7 @@ const ListConversationRow = memo(function ListConversationRow({
   onFocus,
   onSelect,
   onAction,
+  reminderSettings, // Reminders
 }: {
   conversation: Conversation
   account?: Account
@@ -46,9 +46,11 @@ const ListConversationRow = memo(function ListConversationRow({
   onFocus: (key: string) => void
   onSelect: (key: string, range: boolean) => void
   onAction: (action: MailAction, conversation: Conversation) => void
+  reminderSettings: ReminderSettings // Reminders
 }) {
   return (
     <ConversationRow
+      reminderSettings={reminderSettings}
       conversation={conversation}
       account={account}
       selected={selected}
@@ -123,19 +125,8 @@ export function ConversationList({
     () => new Map(accounts.map((account) => [account.id, account])),
     [accounts],
   )
-  const rows = useMemo(() => {
-    const result: Row[] = []
-    let previous = ''
-    for (const conversation of conversations) {
-      const group = day(conversation.receivedAt)
-      if (group !== previous) {
-        result.push({ group })
-        previous = group
-      }
-      result.push({ conversation })
-    }
-    return result
-  }, [conversations])
+  const rows = useMemo(() => listRows(conversations), [conversations])
+  const reminderSettings = useReminderSettings() // Reminders: once for every row
   const senderCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const conversation of conversations) {
@@ -313,6 +304,7 @@ export function ConversationList({
                   onFocus={onFocus}
                   onSelect={onSelect}
                   onAction={onAction}
+                  reminderSettings={reminderSettings}
                 />
               )}
             </div>

@@ -98,6 +98,14 @@ export const shortcutDefinitions = [
     defaults: [['Mod+U']],
   },
   { id: 'addToTab', section: 'Organize', label: 'Add sender to tab…', defaults: [['Shift+T']] },
+  // Reminders
+  {
+    id: 'dismissReminder',
+    section: 'Organize',
+    label: 'Dismiss reminder',
+    defaults: [['Shift+D']],
+  },
+  { id: 'snoozeReminder', section: 'Organize', label: 'Snooze reminder…', defaults: [['Shift+H']] },
   { id: 'star', section: 'Organize', label: 'Star or unstar', defaults: [['S']] },
   { id: 'unread', section: 'Organize', label: 'Mark as unread', defaults: [['U'], ['Shift+U']] },
   { id: 'read', section: 'Organize', label: 'Mark as read', defaults: [['Shift+I']] },
@@ -131,6 +139,14 @@ export const shortcutDefinitions = [
     label: 'Improve draft',
     description: 'While composing. Shows the changes before anything is replaced.',
     defaults: [['Mod+J']],
+  },
+  // Reminders
+  {
+    id: 'toggleFollowUp',
+    section: 'Write',
+    label: 'Follow-up on or off',
+    description: 'While composing, in an IMAP account.',
+    defaults: [['Mod+Shift+O']],
   },
   { id: 'showCc', section: 'Write', label: 'Show and focus Cc', defaults: [['Mod+Shift+C']] },
   { id: 'showBcc', section: 'Write', label: 'Show and focus Bcc', defaults: [['Mod+Shift+B']] },

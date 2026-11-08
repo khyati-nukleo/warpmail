@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { X509Certificate } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('electron', () => ({
@@ -555,6 +555,23 @@ describe('IMAP sending', () => {
     expect((await service.drafts())[0]).toMatchObject({ status: 'error', errorKind: 'certificate' })
     expect((await journal()).state).toBe('rejected')
   })
+  // Reminders
+  it('saves a follow-up switch turned off on a question as a label on the Sent copy', async () => {
+    const asking = { ...draft, html: '<p>Can you send it?</p>', text: 'Can you send it?' }
+    expect((await service.send({ ...asking, followUp: false })).status).toBe('sent')
+    await vi.waitFor(async () => expect((await journal()).sentCopy).toBe('filed'))
+    const { messageId } = await journal()
+    // The sync that indexes the Sent copy lets the label find it.
+    const provider = (service as any).provider(accountId).provider as ImapProvider
+    await (provider as any).syncPass('all')
+    await vi.waitFor(
+      () =>
+        expect(server.box('Warpmail/No reminder').messages.map((m) => m.input.messageId)).toEqual([
+          messageId,
+        ]),
+      { timeout: 3000 },
+    )
+  })
 })
 
 describe('IMAP drafts', () => {
@@ -754,6 +771,12 @@ describe('IMAP reading', () => {
     await (provider() as any).syncPass('all')
     return (await service.query({ view: 'inbox' })).items[0]
   }
+  /** The engine sees a due follow-up, holds it, and the full pass it asks for then runs. */
+  const seenThenSynced = async () => {
+    ;(service as any).reminders.invalidate(accountId)
+    await new Promise((r) => setTimeout(r, 700))
+    await (provider() as any).syncPass('all')
+  }
 
   it('downloads each message once when opening a conversation', async () => {
     thread()
@@ -801,5 +824,531 @@ describe('IMAP reading', () => {
     const [opened] = await service.conversation(accountId, id)
     expect(source).toHaveBeenCalledTimes(1)
     expect(opened!.text).toContain('Big report.')
+  })
+  // Reminders
+  it('moves only the locations in the given roles', async () => {
+    const sent = {
+      emailId: 'e1',
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: '2026-09-20T10:00:00Z',
+      text: 'Can you confirm?',
+    }
+    server.deliver('Sent', sent)
+    server.deliver('Archive', sent)
+    await (provider() as any).syncPass('all')
+    const { id } = (await service.query({ view: 'sent' })).items[0]!
+    const inbox = (await service.mailboxes(accountId)).find((b) => b.role === 'inbox')!
+    const result = await service.mutate({
+      targets: [{ accountId, threadId: id }],
+      action: 'move',
+      mailboxId: inbox.id,
+      fromRoles: ['archive'],
+    })
+    expect(result.changed).toBe(1)
+    expect(server.box('Sent').messages).toHaveLength(1)
+    expect(server.box('Archive').messages).toHaveLength(0)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+  })
+  it('on Gmail with archive mapped to All Mail, moves only the All Mail copy', async () => {
+    server.addMailbox('[Gmail]/All Mail', '\\All')
+    await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
+    const sent = {
+      emailId: 'e1',
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: '2026-09-20T10:00:00Z',
+      text: 'Can you confirm?',
+    }
+    server.deliver('Sent', sent)
+    server.deliver('[Gmail]/All Mail', sent)
+    await (provider() as any).syncPass('all')
+    const { id } = (await service.query({ view: 'sent' })).items[0]!
+    const inbox = (await service.mailboxes(accountId)).find((b) => b.role === 'inbox')!
+    const result = await service.mutate({
+      targets: [{ accountId, threadId: id }],
+      action: 'move',
+      mailboxId: inbox.id,
+      fromRoles: ['archive'],
+    })
+    expect(result.changed).toBe(1)
+    expect(server.box('Sent').messages).toHaveLength(1)
+    expect(server.box('[Gmail]/All Mail').messages).toHaveLength(0)
+    expect(server.box('INBOX').messages.map((m) => m.input.messageId)).toEqual(['ask@x'])
+  })
+  it('returns archived threads to the inbox with one undo for all of them', async () => {
+    for (const n of [1, 2])
+      server.deliver('Archive', {
+        messageId: 'ask' + n + '@x',
+        subject: 'Plans ' + n,
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: '2026-09-20T10:0' + n + ':00Z',
+        text: 'Can you confirm?',
+      })
+    await (provider() as any).syncPass('all')
+    const threads = (await service.query({ view: 'archive' })).items.map((c) => c.id)
+    const back = await (service as any).returnToInbox(
+      threads.map((threadId) => ({ accountId, threadId })),
+    )
+    expect(back).toMatchObject({ undoId: expect.any(String) })
+    expect(back.moved).toHaveLength(2)
+    expect(server.box('INBOX').messages).toHaveLength(2)
+    await service.undo(back.undoId)
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(server.box('Archive').messages).toHaveLength(2)
+  })
+  it('returns nothing on the index left from last time until a full sync since connecting', async () => {
+    const ask = {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    }
+    server.deliver('Archive', ask)
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    // Pat answers while the app is closed.
+    server.deliver('INBOX', {
+      messageId: 'answer@x',
+      references: ['ask@x'],
+      subject: 'Re: Plans',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(Date.now() - 86_400_000).toISOString(),
+      text: 'Confirmed.',
+    })
+    await restart()
+    // Long enough for the launch catch-up (half a second) to have run.
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('Archive').messages).toHaveLength(1)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+    // The full pass sees the answer, so there is still nothing to return.
+    await (provider() as any).syncPass('all')
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('Archive').messages).toHaveLength(1)
+    expect(server.box('INBOX').messages).toHaveLength(1)
+  })
+  it('returns a due follow-up once a full sync since connecting has run', async () => {
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await restart()
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('inbox')
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('all')
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+  })
+  it('on launch, holds returns through a full pass that fails partway', async () => {
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await restart()
+    // The pass after launch loses the connection halfway through the folders.
+    server.hooks.set('STATUS:before', () => {
+      throw new ProviderError('network', 'Connection reset.')
+    })
+    await expect((provider() as any).syncPass('all')).rejects.toThrow('Connection reset.')
+    ;(service as any).reminders.invalidate(accountId)
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    await (provider() as any).syncPass('all')
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+  })
+  it('after sleep, holds returns until mail has synced, and a reply sent meanwhile cancels it', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      // Asked an hour ago: due in three working days, so nothing moves before the laptop sleeps.
+      server.deliver('Archive', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 3600_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      await (provider() as any).syncPass('all')
+      expect(provider().readyForReminders(start - 3600_000)).toBe(true)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      // Asleep for ten days; Pat answers meanwhile.
+      vi.setSystemTime(start + 10 * 86_400_000)
+      server.deliver('INBOX', {
+        messageId: 'answer@x',
+        references: ['ask@x'],
+        subject: 'Re: Plans',
+        from: [{ name: 'Pat', email: 'pat@example.org' }],
+        to: [{ name: 'Me', email: 'me@example.com' }],
+        date: new Date(start + 86_400_000).toISOString(),
+        text: 'Confirmed.',
+      })
+      await service.resume()
+      // As the engine's wake-up timer firing late after the sleep would.
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      expect(server.box('INBOX').messages).toHaveLength(1)
+      // The first full pass sees the answer: nothing to return, and no follow-up (Pat's
+      // answer is now waiting on me instead).
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      expect(server.box('INBOX').messages).toHaveLength(1)
+      const due = await (service as any).reminders.due(accountId)
+      expect(due.map((r: { kind: string; messageId: string }) => [r.kind, r.messageId])).toEqual([
+        ['reply', 'answer@x'],
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('holds a return that came due after the last full pass, though the connection never dropped', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      // Due in three working days: nothing moves at first.
+      server.deliver('Archive', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 3600_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('Archive').messages).toHaveLength(1)
+      // Ten days on, the connections came back on their own after a sleep; Pat answered and a
+      // filter on the server filed the answer straight into Archive, away from the Inbox.
+      vi.setSystemTime(start + 10 * 86_400_000)
+      server.deliver('Archive', {
+        messageId: 'answer@x',
+        references: ['ask@x'],
+        subject: 'Re: Plans',
+        from: [{ name: 'Pat', email: 'pat@example.org' }],
+        to: [{ name: 'Me', email: 'me@example.com' }],
+        date: new Date(start + 86_400_000).toISOString(),
+        text: 'Confirmed.',
+      })
+      // The engine's wake-up timer, and an inbox-only pass from the idle connection.
+      ;(service as any).reminders.invalidate(accountId)
+      await (provider() as any).syncPass('inbox')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      // The next full pass sees the answer: nothing comes back.
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      expect(server.box('Archive').messages).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('returns a held follow-up once the next full pass finishes, with nothing else to announce', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      server.deliver('Archive', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 3600_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      vi.setSystemTime(start + 10 * 86_400_000)
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      // Nothing changed on the server, yet the pass re-checks the held return.
+      await (provider() as any).syncPass('all')
+      await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), {
+        timeout: 3000,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('returns a follow-up once across two laptops, by a Returned label in Gmail', async () => {
+    const ask = {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    }
+    server.deliver('Archive', ask)
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await seenThenSynced()
+    await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), { timeout: 3000 })
+    await vi.waitFor(() => expect(server.boxes.get('Warpmail/Returned')?.messages).toHaveLength(1))
+    // Hidden like the other reminder labels.
+    expect((await service.mailboxes(accountId)).map((b) => b.name)).not.toContain('Returned')
+    // She archives it: handled.
+    const { id } = (await service.query({ view: 'inbox' })).items[0]!
+    await service.mutate({ targets: [{ accountId, threadId: id }], action: 'archive' })
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    // The other laptop, closed when it fell due: its own index and nothing stored locally.
+    service.dispose()
+    await new Promise((r) => setTimeout(r, 20))
+    for (const file of await readdir(directory))
+      if (file.startsWith('imap-connection.sqlite')) await rm(join(directory, file))
+    await store.write('reminders-returned', [])
+    await restart()
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    await seenThenSynced()
+    await new Promise((r) => setTimeout(r, 900))
+    expect(server.box('INBOX').messages).toHaveLength(0)
+  })
+  it('leaves a follow-up due while the archive folder holds none of it, and returns it once mapped', async () => {
+    const start = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: start })
+    try {
+      // Gmail, with archive still mapped to a folder that holds none of the thread.
+      server.addMailbox('[Gmail]/All Mail', '\\All')
+      server.deliver('[Gmail]/All Mail', {
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(start - 10 * 86_400_000).toISOString(),
+        text: 'Can you confirm?',
+      })
+      await (provider() as any).syncPass('all')
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      const mutate = vi.spyOn(service, 'mutate')
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      // Nothing in the archive folder: no move is even tried.
+      expect(mutate).not.toHaveBeenCalled()
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      // Not marked handled, here or in Gmail.
+      expect(await store.read('reminders-returned', [])).toEqual([])
+      expect(server.boxes.has('Warpmail/Returned')).toBe(false)
+      expect((await (service as any).reminders.due(accountId)).length).toBe(1)
+      for (let i = 0; i < 3; i++) {
+        ;(service as any).reminders.invalidate(accountId)
+        await new Promise((r) => setTimeout(r, 600))
+      }
+      expect(mutate).not.toHaveBeenCalled()
+      // She maps archive to All Mail; a while later, after a full pass, it comes back.
+      await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
+      vi.setSystemTime(start + 11 * 60_000)
+      await seenThenSynced()
+      await vi.waitFor(() => expect(server.box('INBOX').messages).toHaveLength(1), {
+        timeout: 3000,
+      })
+      expect(mutate).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('counts a thread that partly moved as returned, with its undo in the toast', async () => {
+    const day = 86_400_000
+    server.deliver('Archive', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * day).toISOString(),
+      text: 'Can you confirm?',
+    })
+    server.deliver('Archive', {
+      messageId: 'note@x',
+      references: ['ask@x'],
+      subject: 'Re: Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 9 * day).toISOString(),
+      text: 'Adding Sam.',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [
+      { messageId: 'ask@x', asks: true },
+      { messageId: 'note@x', asks: false },
+    ])
+    // The server refuses one of the two moves.
+    const update = provider().update.bind(provider())
+    vi.spyOn(provider(), 'update').mockImplementation(async (account, changes, destroy, state) => {
+      const [first, ...rest] = Object.keys(changes)
+      const done = await update(account, { [first!]: changes[first!]! }, destroy, state)
+      return {
+        updated: done.updated,
+        failures: [...done.failures, ...rest.map((id) => id + ': the server refused the move')],
+      }
+    })
+    const emit = vi.spyOn(service as any, 'emit')
+    await seenThenSynced()
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'remindersReturned' })),
+    )
+    expect(server.box('INBOX').messages).toHaveLength(1)
+    const toast = emit.mock.calls
+      .map((c) => c[0] as any)
+      .find((e) => e.type === 'remindersReturned')
+    expect(toast).toMatchObject({ count: 1, undoId: expect.any(String) })
+    expect(await store.read<string[]>('reminders-returned', [])).toHaveLength(1)
+    await vi.waitFor(() => expect(server.boxes.get('Warpmail/Returned')?.messages).toHaveLength(1))
+    expect(server.box('Warpmail/Returned').messages[0]!.input.messageId).toBe('ask@x')
+    // The toast's undo puts back what moved.
+    await service.undo(toast.undoId)
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(server.box('Archive').messages).toHaveLength(2)
+  })
+  it('leaves alone a follow-up with no copy in the archive folder, such as one only in Sent', async () => {
+    server.deliver('Sent', {
+      messageId: 'ask@x',
+      subject: 'Plans',
+      from: [{ name: 'Me', email: 'me@example.com' }],
+      to: [{ name: 'Pat', email: 'pat@example.org' }],
+      date: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      text: 'Can you confirm?',
+    })
+    await (provider() as any).syncPass('all')
+    await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+    const mutate = vi.spyOn(service, 'mutate')
+    // The sync's own refresh settles first; the recompute it starts runs meanwhile.
+    await new Promise((r) => setTimeout(r, 700))
+    const emit = vi.spyOn(service as any, 'emit')
+    for (let i = 0; i < 3; i++) {
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 700))
+    }
+    // Still a follow-up, but nothing to bring back, and nothing announced.
+    expect((await (service as any).reminders.due(accountId)).length).toBe(1)
+    expect(mutate).not.toHaveBeenCalled()
+    const types = emit.mock.calls.map((c) => (c[0] as { type: string }).type)
+    expect(types).not.toContain('changed')
+    expect(types).not.toContain('remindersReturned')
+    expect(server.box('INBOX').messages).toHaveLength(0)
+    expect(await store.read('reminders-returned', [])).toEqual([])
+  })
+  it('holds a return until a full pass that started after the thread was first seen archived', async () => {
+    const ten = Date.now()
+    const minute = 60_000
+    vi.useFakeTimers({ toFake: ['Date'], now: ten })
+    try {
+      server.addMailbox('[Gmail]/All Mail', '\\All')
+      await service.setFolderMappings(accountId, { archive: { path: '[Gmail]/All Mail' } })
+      // Due long ago, but still in the Inbox.
+      const ask = {
+        emailId: 'e1',
+        messageId: 'ask@x',
+        subject: 'Plans',
+        from: [{ name: 'Me', email: 'me@example.com' }],
+        to: [{ name: 'Pat', email: 'pat@example.org' }],
+        date: new Date(ten - 10 * 86_400_000).toISOString(),
+        text: 'Can you confirm?',
+      }
+      server.deliver('[Gmail]/All Mail', ask)
+      server.deliver('INBOX', ask)
+      await provider().setAskChecks(service.accounts[0]!, [{ messageId: 'ask@x', asks: true }])
+      // 10:00: a full pass starts and completes.
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 700))
+      expect(server.box('INBOX').messages).toHaveLength(1)
+      // 10:30: Pat answers, and a filter files the answer straight into All Mail.
+      vi.setSystemTime(ten + 30 * minute)
+      server.deliver('[Gmail]/All Mail', {
+        emailId: 'e2',
+        messageId: 'answer@x',
+        references: ['ask@x'],
+        subject: 'Re: Plans',
+        from: [{ name: 'Pat', email: 'pat@example.org' }],
+        to: [{ name: 'Me', email: 'me@example.com' }],
+        date: new Date(ten + 30 * minute).toISOString(),
+        text: 'Confirmed.',
+      })
+      // 10:31: she archives the thread on her phone; an inbox pass sees that, not the answer.
+      vi.setSystemTime(ten + 31 * minute)
+      server.box('INBOX').messages.splice(0)
+      await (provider() as any).syncPass('inbox')
+      ;(service as any).reminders.invalidate(accountId)
+      await new Promise((r) => setTimeout(r, 900))
+      expect(await (service as any).reminders.due(accountId)).toMatchObject([
+        { kind: 'followUp', messageId: 'ask@x' },
+      ])
+      // The 10:00 pass is too old to act on, though it began after the follow-up came due.
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      // 10:32: the next full pass sees the answer, which cancels the follow-up.
+      vi.setSystemTime(ten + 32 * minute)
+      await (provider() as any).syncPass('all')
+      await new Promise((r) => setTimeout(r, 900))
+      expect(server.box('INBOX').messages).toHaveLength(0)
+      expect(await (service as any).reminders.due(accountId)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('marks a conversation waiting on my reply in the inbox, and nowhere else', async () => {
+    server.deliver('INBOX', {
+      messageId: 'waiting@x',
+      subject: 'Question',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(Date.now() - 5 * 86_400_000).toISOString(),
+      text: 'Can you send the file?',
+    })
+    await (provider() as any).syncPass('all')
+    const [inbox] = (await service.query({ view: 'inbox' })).items
+    expect(inbox!.reminder).toMatchObject({ kind: 'reply', messageId: 'waiting@x' })
+    const [all] = (await service.query({ view: 'all' })).items
+    expect(all!.reminder).toBeUndefined()
+  })
+  it('lists a reply that came due while the app was closed on top of the first inbox', async () => {
+    const receivedMs = Date.now() - 10 * 86_400_000
+    server.deliver('INBOX', {
+      messageId: 'waiting@x',
+      subject: 'Question',
+      from: [{ name: 'Pat', email: 'pat@example.org' }],
+      to: [{ name: 'Me', email: 'me@example.com' }],
+      date: new Date(receivedMs).toISOString(),
+      text: 'Can you send the file?',
+    })
+    // Newer than the question but older than its due time, and not addressed to me.
+    server.deliver('INBOX', {
+      messageId: 'newer@x',
+      subject: 'Lunch',
+      from: [{ name: 'Sam', email: 'sam@example.org' }],
+      to: [{ name: 'Team', email: 'team@example.org' }],
+      date: new Date(receivedMs + 60_000).toISOString(),
+      text: 'Lunch on Friday?',
+    })
+    await (provider() as any).syncPass('all')
+    await restart()
+    const items = (await service.query({ view: 'inbox' })).items
+    expect(items.map((c) => c.reminder?.messageId ?? null)).toEqual(['waiting@x', null])
   })
 })

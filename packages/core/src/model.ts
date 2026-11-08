@@ -1,3 +1,11 @@
+import type {
+  ReminderFacts,
+  ReminderKind,
+  ReminderLabel,
+  ReminderSettings,
+  ReminderTarget,
+  ReminderSnooze,
+} from './reminders'
 import type { ImportantSettings, InboxExport, SplitScope, SplitTab } from './split'
 import type { AddressSeen, RuleSuggestion } from './split-suggest'
 import type { AiModel, AiStatus, AiTestResult, ImproveResult, ImproveStyle } from './improve'
@@ -168,6 +176,9 @@ export interface Conversation {
   hasAttachment: boolean
   count: number
   messages: Message[]
+  // Reminders
+  /** A due reminder: in the inbox the conversation sorts by `dueAt` (ISO) when that is later. */
+  reminder?: { kind: ReminderKind; dueAt: string; messageId: string }
 }
 export interface Identity {
   id: string
@@ -230,6 +241,9 @@ export interface Draft {
   encryptionRequired?: boolean
   downgradeConfirmed?: boolean
   earlierPlaintext?: boolean
+  // Reminders
+  /** The follow-up switch's choice at send; undefined lets the ask-check decide. */
+  followUp?: boolean
   status: 'local' | 'saving' | 'synced' | 'error' | 'sending' | 'uncertain' | 'sent'
   error?: string
   /** What kind of problem `error` describes, so the composer can offer the right recovery. */
@@ -264,6 +278,9 @@ export interface Settings {
   important?: ImportantSettings
   // Read status: absent is treated as `{ enabled: true }`.
   readStatus?: ReadStatusSettings
+  // Reminders
+  reminders?: Partial<ReminderSettings>
+  reminderSnoozes?: ReminderSnooze[]
 }
 export interface ReadStatusSettings {
   enabled: boolean
@@ -300,6 +317,9 @@ export interface MutationInput {
   targets: MutationTarget[]
   action: MailAction
   mailboxId?: string
+  // Reminders
+  /** Only locations in mailboxes of these roles take part (main process only, not over IPC). */
+  fromRoles?: string[]
 }
 export interface MutationResult {
   changed: number
@@ -512,6 +532,9 @@ export interface ProviderEvent {
 /** A query as providers see it: the main process has already resolved `tab` into `split`. */
 export interface ProviderQuery extends MailQuery {
   split?: SplitScope
+  // Reminders
+  /** Due reminders, which lift their conversations to the top of the inbox and its tabs. */
+  reminders?: { threadId: string; kind: ReminderKind; dueAt: string; messageId: string }[]
 }
 export interface MailProvider {
   readonly capabilities: ProviderCapabilities
@@ -554,7 +577,13 @@ export interface MailProvider {
     expectedState?: string,
   ): Promise<{ updated: string[]; failures: string[] }>
   conversationMetadata(account: Account, threadIds: string[]): Promise<Message[]>
-  messages(account: Account, ids: string[], bodies?: boolean): Promise<Message[]>
+  /** `background` reads run behind the user's own work (Reminders: the Sent ask scan). */
+  messages(
+    account: Account,
+    ids: string[],
+    bodies?: boolean,
+    options?: { background?: boolean },
+  ): Promise<Message[]>
   folder(
     account: Account,
     operation: 'create' | 'rename' | 'delete',
@@ -615,6 +644,44 @@ export interface MailProvider {
   setFolderMappings?(account: Account, mappings: FolderMappings): Promise<FolderMappingReview>
   subscribe(listener: (event: ProviderEvent) => void): () => void
   dispose(): void
+  // Reminders
+  /** Per recent thread, what reminders are worked out from. Omitted by providers without an index. */
+  reminderFacts?(
+    account: Account,
+    query: {
+      important: Extract<SplitScope, { kind: 'important' }>
+      sinceMs: number
+      threadIds?: string[]
+      /** My addresses, lowercase, so an ask of mine survives my own later messages. */
+      own?: string[]
+    },
+  ): Promise<ReminderFacts[]>
+  /** Sent mail since `sinceMs` whose ask-check isn't stored yet, newest first. */
+  askChecksNeeded?(
+    account: Account,
+    sinceMs: number,
+    limit: number,
+  ): Promise<{ id: string; messageId: string }[]>
+  setAskChecks?(account: Account, rows: { messageId: string; asks: boolean }[]): Promise<void>
+  /** Adds or removes a reminder label (a Gmail label kept as an IMAP folder) on one email. */
+  labelMessage?(
+    account: Account,
+    label: ReminderLabel,
+    messageId: string,
+    add: boolean,
+  ): Promise<void>
+  /** Asks for a sync soon, such as when an email just filed isn't indexed yet. */
+  requestSync?(scope: 'inbox' | 'all'): void
+  /**
+   * Whether a full sync since connecting started at or after `dueMs`: before one, the index may
+   * predate a reply or a dismissal made elsewhere, and returning to the inbox would act on it.
+   * Omitted: ready.
+   */
+  readyForReminders?(dueMs: number): boolean
+  /** A return waits on a full sync: run one soon, and announce it even with nothing new. */
+  awaitFullSync?(): void
+  /** The computer woke from sleep: the index may predate what changed meanwhile. */
+  resumed?(): void
 }
 export type AppEvent =
   | { type: 'encryption'; locked: boolean }
@@ -629,6 +696,8 @@ export type AppEvent =
   // Improve draft
   | { type: 'improve'; id: string; text: string }
   | { type: 'readStatus' } // Read status
+  // Reminders
+  | { type: 'remindersReturned'; count: number; undoId?: string }
 export type UpdateStatus =
   | { phase: 'idle' }
   | { phase: 'downloading'; version: string; percent: number }
@@ -836,5 +905,10 @@ export interface DesktopMailAPI {
   readStatusInfo(): Promise<ReadStatusInfo>
   setReadStatusPassword(password: string | null): Promise<ReadStatusInfo>
   testReadStatus(workerUrl: string, password?: string): Promise<{ ok: boolean; message: string }>
+  // Reminders
+  /** Hides a reminder on every device; rejects with a message to show when it can't. */
+  dismissReminder(target: ReminderTarget): Promise<void>
+  /** Undoes `dismissReminder`. */
+  restoreReminder(target: ReminderTarget): Promise<void>
   onEvent(listener: (event: AppEvent) => void): () => void
 }

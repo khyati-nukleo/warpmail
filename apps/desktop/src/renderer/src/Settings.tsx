@@ -22,6 +22,7 @@ import {
   Inbox,
   Sparkles,
   Eye,
+  Calendar,
 } from '@inlark/ui/icons'
 import { Button, Dropdown, EmptyState, MenuItem, Modal, Select, Switch } from '@inlark/ui'
 import {
@@ -45,6 +46,8 @@ import { EncryptionPanel } from './EncryptionSettings'
 import { AiSettings } from './AiSettings'
 import { newMessageAccount } from './compose-account'
 import { InboxSettings } from './split/InboxSettings'
+import { RemindersSettings } from './reminders/RemindersSettings'
+import { saveSplitSettings } from './split/split-saves'
 
 /** A miniature of the app window in one theme. */
 function ThemePreview({ theme, className }: { theme: 'dark' | 'light'; className?: string }) {
@@ -262,6 +265,7 @@ export function SettingsPanel({
               ['general', 'General', SlidersHorizontal],
               ['inbox', 'Inbox', Inbox],
               ['readStatus', 'Read status', Eye], // Read status
+              ['reminders', 'Reminders', Calendar], // Reminders
               ['accounts', 'Accounts', Mail],
               ['signatures', 'Signatures', PenLine],
               ['ai', 'AI', Sparkles],
@@ -540,6 +544,14 @@ export function SettingsPanel({
             {tab === 'inbox' && <InboxSettings bootstrap={bootstrap} notify={notify} />}
             {/* Read status */}
             {tab === 'readStatus' && <ReadStatusSettings bootstrap={bootstrap} notify={notify} />}
+            {tab === 'reminders' && (
+              <RemindersSettings
+                settings={bootstrap.settings}
+                save={(change) =>
+                  saveSplitSettings(change).catch((e) => notify(friendlyError(e), 'error'))
+                }
+              />
+            )}
             {tab === 'accounts' &&
               (setup ? (
                 <AccountSetup
